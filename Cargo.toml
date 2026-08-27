@@ -28,7 +28,7 @@ portable-pty = "0.9"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-base64 = "0.22"
+base64 = "0.23"
 strip-ansi-escapes = "0.2"
 strsim = "0.11"
 tempfile = "3"
@@ -40,25 +40,25 @@ tokio-stream = "0.1"
 unicode-width = "0.2"
 flate2 = "1"
 tar = "0.4"
-sha2 = "0.10"
+sha2 = "0.11"
 arboard = "3"
 shell-words = "1"
 toml = "1"
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 axum = "0.8"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-tower-http = { version = "0.6", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace"] }
 chrono = { version = "0.4", features = ["serde"] }
-rcgen = "0.13"
+rcgen = "0.14"
 ring = "0.17"
 subtle = "2"
 thiserror = "2"
 async-trait = "0.1"
 futures-util = "0.3"
-which = "7"
+which = "8"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal", "process", "fs", "poll"] }
