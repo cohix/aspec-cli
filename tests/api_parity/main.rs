@@ -13,6 +13,7 @@
 mod helpers;
 
 mod auth_modes;
+mod http_core;
 mod live_server;
 mod rename_0077;
 mod routes;

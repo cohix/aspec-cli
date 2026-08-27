@@ -361,6 +361,12 @@ CODE AGENTS
 
 If awman is launched outside of any Git repository, `status --watch` runs automatically instead of the normal startup.
 
+The status output includes a source marker for each container. Ordinary user
+sessions are marked `session`; a container launched by the amie daemon is
+marked `amie:<condition>`, such as `amie:issue-triage`. This marker identifies
+which condition owns the background evaluation. It can appear even if you have
+never enabled amie; it does not indicate a problem with a regular session.
+
 ---
 
 ## Agent authentication

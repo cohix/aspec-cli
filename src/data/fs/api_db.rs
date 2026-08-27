@@ -109,9 +109,21 @@ impl SqliteSessionStore {
     /// Open (or create) a sqlite database at `<root>/awman.db`, run migrations,
     /// and enable WAL mode for concurrent reads.
     pub fn open(root: &Path) -> Result<Self, DataError> {
-        std::fs::create_dir_all(root).map_err(|e| DataError::io(root, e))?;
-        let db_file = root.join(crate::data::fs::api_paths::API_DB_FILENAME);
-        let conn = Connection::open(&db_file)?;
+        Self::open_at(&root.join(crate::data::fs::api_paths::API_DB_FILENAME))
+    }
+
+    /// Open (or create) the database at an exact file path. This is the
+    /// env-scoped entry point used after the database moved out of the API
+    /// daemon directory into `DataPaths`.
+    pub fn open_at(db_file: &Path) -> Result<Self, DataError> {
+        let parent = db_file.parent().ok_or_else(|| {
+            DataError::Other(format!(
+                "database path has no parent: {}",
+                db_file.display()
+            ))
+        })?;
+        std::fs::create_dir_all(parent).map_err(|e| DataError::io(parent, e))?;
+        let conn = Connection::open(db_file)?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         Self::migrate(&conn)?;
         Ok(Self {
@@ -121,7 +133,7 @@ impl SqliteSessionStore {
 
     /// Convenience constructor that opens at the path resolved from `paths`.
     pub fn open_from_paths(paths: &ApiPaths) -> Result<Self, DataError> {
-        Self::open(paths.root())
+        Self::open_at(&paths.db_path())
     }
 
     fn migrate(conn: &Connection) -> Result<(), DataError> {

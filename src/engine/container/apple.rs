@@ -125,8 +125,11 @@ fn is_awman_container(name: &str) -> bool {
 }
 
 /// Parse the JSON output of `container list --format json` into container
-/// handles, filtering for running awman containers.
-fn parse_apple_list_output(stdout: &str) -> Vec<AgentHandle> {
+/// handles, filtering for running awman containers. When `name_prefix` is
+/// `Some`, additionally require the container name to start with it — Apple
+/// has no server-side name filter, so name-prefix discovery is done here,
+/// client-side.
+fn parse_apple_list_output(stdout: &str, name_prefix: Option<&str>) -> Vec<AgentHandle> {
     let arr: Result<Vec<serde_json::Value>, _> = serde_json::from_str(stdout);
     let rows: Vec<serde_json::Value> = match arr {
         Ok(v) => v,
@@ -143,6 +146,11 @@ fn parse_apple_list_output(stdout: &str) -> Vec<AgentHandle> {
         let name = extract_apple_name(&row);
         if !is_awman_container(&name) {
             continue;
+        }
+        if let Some(prefix) = name_prefix {
+            if !name.starts_with(prefix) {
+                continue;
+            }
         }
         let id = name.clone();
         let image_tag = extract_apple_image(&row);
@@ -199,7 +207,7 @@ impl ContainerBackend for AppleBackend {
             _ => return Ok(Vec::new()),
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_apple_list_output(&stdout))
+        Ok(parse_apple_list_output(&stdout, None))
     }
 
     fn list_running_all(&self) -> Result<Vec<AgentHandle>, EngineError> {
@@ -213,7 +221,7 @@ impl ContainerBackend for AppleBackend {
             _ => return Ok(Vec::new()),
         };
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_apple_list_output(&stdout))
+        Ok(parse_apple_list_output(&stdout, None))
     }
 
     fn stats(&self, handle: &AgentHandle) -> Result<AgentStats, EngineError> {
@@ -318,6 +326,28 @@ impl ContainerBackend for AppleBackend {
         args.push(container_id.to_string());
         args.extend(entrypoint.iter().map(|s| s.to_string()));
         args
+    }
+
+    fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
+        Ok(Box::new(AppleAttachInstance {
+            handle: handle.clone(),
+        }))
+    }
+
+    fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError> {
+        // Apple has no server-side name filter; list everything and filter by
+        // the prefix client-side.
+        let output = Command::new("container")
+            .args(["list", "--format", "json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let output = match output {
+            Ok(o) if o.status.success() => o,
+            _ => return Ok(Vec::new()),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(parse_apple_list_output(&stdout, Some(prefix)))
     }
 
     fn name(&self) -> &'static str {
@@ -659,6 +689,235 @@ impl ExecutionBackend for AppleExecution {
     }
 }
 
+// ─── Attach (re-attach into a foreign, already-running container) ───────────
+
+/// Configured-but-not-running Apple attach handle. Mirrors the Docker attach
+/// shape over `container exec`, reusing the shared attach helpers from
+/// `docker.rs` and an `AppleAttachExecution` that never stops the target.
+struct AppleAttachInstance {
+    handle: AgentHandle,
+}
+
+impl AgentInstance for AppleAttachInstance {
+    fn handle_preview(&self) -> AgentHandlePreview {
+        AgentHandlePreview {
+            id: self.handle.id.clone(),
+            name: self.handle.name.clone(),
+            image: self.handle.image_tag.clone(),
+        }
+    }
+
+    fn run_with_frontend(
+        self: Box<Self>,
+        mut frontend: Box<dyn crate::engine::agent_runtime::frontend::AgentFrontend>,
+    ) -> Result<AgentExecution, EngineError> {
+        use crate::engine::container::docker::{attach_bridge_config, default_attach_entrypoint};
+
+        let started_at = chrono::Utc::now();
+        let handle = self.handle.clone();
+
+        frontend.report_status(
+            crate::engine::agent_runtime::frontend::AgentStatus::Running {
+                container_name: handle.name.clone(),
+            },
+        );
+
+        let grace_timeout = frontend.grace_timeout();
+        let stuck_timeout = frontend.stuck_timeout();
+        let io = frontend.take_io();
+        let bridge_cfg = attach_bridge_config(grace_timeout, stuck_timeout);
+
+        let entrypoint = default_attach_entrypoint();
+        let ep_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+        if let Some((cols, rows)) = io.initial_size {
+            let cols_s = cols.to_string();
+            let rows_s = rows.to_string();
+            let argv = AppleBackend.exec_args(
+                &handle.id,
+                "/workspace",
+                &ep_refs,
+                &[("COLUMNS", &cols_s), ("LINES", &rows_s)],
+            );
+            return spawn_pty_bridged_apple_attach(io, argv, started_at, handle, bridge_cfg);
+        }
+
+        let argv = AppleBackend.exec_args(&handle.id, "/workspace", &ep_refs, &[]);
+        spawn_piped_apple_attach(io, argv, started_at, handle, bridge_cfg)
+    }
+}
+
+/// Spawn `container exec -it` via `portable-pty` and bridge through `AgentIo`.
+fn spawn_pty_bridged_apple_attach(
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+) -> Result<AgentExecution, EngineError> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    let (cols, rows) = io.initial_size.expect("PTY path requires initial_size");
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| EngineError::Container(format!("openpty: {e}")))?;
+
+    let mut cmd = CommandBuilder::new("container");
+    for arg in &argv {
+        cmd.arg(arg);
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| EngineError::Container(format!("spawn container exec via pty: {e}")))?;
+    let child_pid = child.process_id();
+
+    let (master_arc, bridge) =
+        crate::engine::container::io_bridge::bridge_pty(io, pair, bridge_cfg)?;
+
+    let backend = AppleAttachExecution {
+        child: None,
+        pty_child: Some(child),
+        pty_master: Some(master_arc),
+        stdin_injector: Some(bridge.stdin_injector),
+        child_pid,
+        started_at,
+    };
+    Ok(AgentExecution::new(
+        handle,
+        Box::new(backend),
+        bridge.stuck_tx,
+        Some(bridge.output_tail),
+    ))
+}
+
+/// Spawn `container exec` with piped stdio and bridge through `AgentIo`.
+fn spawn_piped_apple_attach(
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+) -> Result<AgentExecution, EngineError> {
+    let mut cmd = Command::new("container");
+    cmd.args(&argv);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            EngineError::ContainerRuntimeUnavailable {
+                binary: "container".into(),
+            }
+        } else {
+            EngineError::Container(format!("spawn container exec: {e}"))
+        }
+    })?;
+    let child_pid = Some(child.id());
+
+    let bridge = crate::engine::container::io_bridge::bridge_piped(io, &mut child, bridge_cfg);
+    drop(bridge.stdin_injector);
+
+    let backend = AppleAttachExecution {
+        child: Some(child),
+        pty_child: None,
+        pty_master: None,
+        stdin_injector: None,
+        child_pid,
+        started_at,
+    };
+    Ok(AgentExecution::new(
+        handle,
+        Box::new(backend),
+        bridge.stuck_tx,
+        Some(bridge.output_tail),
+    ))
+}
+
+/// Execution backend for an Apple attach session. Cancellation kills only the
+/// local `container exec` client — never `container stop <name>`, because the
+/// target container belongs to another process.
+struct AppleAttachExecution {
+    child: Option<std::process::Child>,
+    pty_child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    pty_master: Option<std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
+    stdin_injector: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    child_pid: Option<u32>,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ExecutionBackend for AppleAttachExecution {
+    fn wait_blocking(mut self: Box<Self>) -> Result<AgentExitInfo, EngineError> {
+        if let Some(mut child) = self.pty_child.take() {
+            let status = child
+                .wait()
+                .map_err(|e| EngineError::Container(format!("wait container exec (pty): {e}")))?;
+            self.pty_master = None;
+            let exit_code = status.exit_code().try_into().unwrap_or(-1);
+            return Ok(AgentExitInfo {
+                exit_code,
+                signal: None,
+                started_at: self.started_at,
+                ended_at: chrono::Utc::now(),
+            });
+        }
+
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| EngineError::Container("execution already waited".into()))?;
+        let status = child
+            .wait()
+            .map_err(|e| EngineError::Container(format!("wait container exec: {e}")))?;
+        let exit_code = status.code().unwrap_or(-1);
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        Ok(AgentExitInfo {
+            exit_code,
+            signal,
+            started_at: self.started_at,
+            ended_at: chrono::Utc::now(),
+        })
+    }
+
+    fn try_inject_stdin(&self, bytes: &[u8]) -> Result<bool, EngineError> {
+        if let Some(tx) = &self.stdin_injector {
+            tx.send(bytes.to_vec())
+                .map_err(|e| EngineError::Container(format!("inject stdin: {e}")))?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn cancel(&self) -> Result<(), EngineError> {
+        crate::engine::container::docker::kill_local_exec(self.child_pid);
+        Ok(())
+    }
+
+    fn cancel_handle(&self) -> Option<crate::engine::agent_runtime::execution::CancelHandle> {
+        let pid = self.child_pid;
+        Some(crate::engine::agent_runtime::execution::CancelHandle::new(
+            move || {
+                crate::engine::container::docker::kill_local_exec(pid);
+                Ok(())
+            },
+        ))
+    }
+}
+
 /// Parse a memory-usage string like `"123.4MiB"`, `"1.2GB"`, `"512KB"` into
 /// megabytes. Unrecognized units fall back to assuming MB (consistent with
 /// the legacy parser at `oldsrc/runtime/docker.rs`).
@@ -736,7 +995,7 @@ mod apple_tests {
                 "startedDate": 1715000200.0
             }
         ]"#;
-        let handles = parse_apple_list_output(json);
+        let handles = parse_apple_list_output(json, None);
         assert_eq!(handles.len(), 2);
         assert_eq!(handles[0].name, "awman-12345-999");
         assert_eq!(handles[0].id, "awman-12345-999");
@@ -753,14 +1012,14 @@ mod apple_tests {
             },
             "startedDate": 1715000000.0
         }]"#;
-        let handles = parse_apple_list_output(json);
+        let handles = parse_apple_list_output(json, None);
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].name, "nanoclaw-worker-1");
     }
 
     #[test]
     fn parse_apple_list_empty_array() {
-        let handles = parse_apple_list_output("[]");
+        let handles = parse_apple_list_output("[]", None);
         assert!(handles.is_empty());
     }
 
@@ -771,7 +1030,7 @@ mod apple_tests {
             "configuration": { "id": "awman-dying" },
             "startedDate": 1715000000.0
         }]"#;
-        let handles = parse_apple_list_output(json);
+        let handles = parse_apple_list_output(json, None);
         assert!(handles.is_empty());
     }
 
@@ -843,7 +1102,7 @@ mod apple_tests {
             },
             "startedDate": 1715000000.0
         }]"#;
-        let handles = parse_apple_list_output(json);
+        let handles = parse_apple_list_output(json, None);
         assert_eq!(handles.len(), 1);
         assert_eq!(handles[0].image_tag, "awman-myproj-claude:latest");
     }

@@ -43,6 +43,49 @@ pub struct ApiConfig {
     pub always_non_interactive: Option<bool>,
 }
 
+/// Amie daemon configuration nested inside [`GlobalConfig`](crate::data::config::GlobalConfig).
+///
+/// It lives beside the other shared configuration structs even though it is
+/// global rather than repository-scoped.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AmieConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents_to_models: Option<HashMap<String, Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_evaluations: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_leader: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<Vec<String>>,
+}
+
+impl AmieConfig {
+    pub fn validate(&self) -> Result<(), DataError> {
+        if let Some(n) = self.max_concurrent_evaluations {
+            if n < 1 {
+                return Err(DataError::Other(
+                    "amie.maxConcurrentEvaluations must be >= 1".to_string(),
+                ));
+            }
+        }
+        if let Some(leader) = &self.default_leader {
+            validate_leader_spec("amie", leader)?;
+        }
+        if let Some(map) = &self.agents_to_models {
+            validate_agents_to_models("amie", map)?;
+        }
+        if let Some(entries) = &self.guidance {
+            validate_guidance("amie", entries)?;
+        }
+        Ok(())
+    }
+
+    pub fn max_concurrent_evaluations_or_default(&self) -> usize {
+        self.max_concurrent_evaluations.unwrap_or(2)
+    }
+}
+
 /// Per-repo credential injection mode.
 ///
 /// Controls how awman injects credentials into agent containers.  The default
@@ -127,48 +170,13 @@ impl DynamicWorkflowsConfig {
             }
         }
         if let Some(leader) = &self.default_leader {
-            validate_default_leader(leader)?;
+            validate_leader_spec("dynamicWorkflows", leader)?;
         }
         if let Some(map) = &self.agents_to_models {
-            for (agent, models) in map {
-                validate_dynamic_agent_key(agent)?;
-                if models.is_empty() {
-                    return Err(DataError::Other(format!(
-                        "dynamicWorkflows.agentsToModels.{agent} has an empty model list. \
-                         Provide at least one model name."
-                    )));
-                }
-                for m in models {
-                    if m.trim().is_empty() {
-                        return Err(DataError::Other(format!(
-                            "dynamicWorkflows.agentsToModels.{agent} contains an empty model name."
-                        )));
-                    }
-                }
-            }
+            validate_agents_to_models("dynamicWorkflows", map)?;
         }
         if let Some(entries) = &self.guidance {
-            if entries.len() > GUIDANCE_MAX_ENTRIES {
-                return Err(DataError::Other(format!(
-                    "dynamicWorkflows.guidance has {} entries; the maximum is {GUIDANCE_MAX_ENTRIES}.",
-                    entries.len()
-                )));
-            }
-            for (i, entry) in entries.iter().enumerate() {
-                if entry.trim().is_empty() {
-                    return Err(DataError::Other(format!(
-                        "dynamicWorkflows.guidance[{i}] is empty or whitespace-only. \
-                         Remove it or provide a non-empty instruction."
-                    )));
-                }
-                if entry.chars().count() > GUIDANCE_MAX_ENTRY_LEN {
-                    return Err(DataError::Other(format!(
-                        "dynamicWorkflows.guidance[{i}] is {} characters; the maximum is \
-                         {GUIDANCE_MAX_ENTRY_LEN}.",
-                        entry.chars().count()
-                    )));
-                }
-            }
+            validate_guidance("dynamicWorkflows", entries)?;
         }
         Ok(())
     }
@@ -178,10 +186,10 @@ impl DynamicWorkflowsConfig {
 /// rules as [`crate::data::session::AgentName`] (ASCII alphanumerics, `-`, `_`,
 /// length 1..=64). Returns [`DataError::Other`] so the failure surfaces as a
 /// config-load error rather than a synthesized parse error.
-fn validate_dynamic_agent_key(key: &str) -> Result<(), DataError> {
+pub(crate) fn validate_agent_name_key(field_path: &str, key: &str) -> Result<(), DataError> {
     crate::data::session::AgentName::new(key).map_err(|_| {
         DataError::Other(format!(
-            "dynamicWorkflows.agentsToModels key {key:?} is not a valid agent name: only ASCII \
+            "{field_path}.agentsToModels key {key:?} is not a valid agent name: only ASCII \
              alphanumerics, '-', and '_' are allowed, length 1..=64"
         ))
     })?;
@@ -193,26 +201,74 @@ fn validate_dynamic_agent_key(key: &str) -> Result<(), DataError> {
 /// no leading/trailing whitespace in either component and an `AgentName`-valid
 /// agent component. Kept in the data layer so the config fails fast at load
 /// without depending on the command layer's `LeaderSpec`.
-fn validate_default_leader(raw: &str) -> Result<(), DataError> {
+pub(crate) fn validate_leader_spec(field_path: &str, raw: &str) -> Result<(), DataError> {
     let parts: Vec<&str> = raw.split("::").collect();
     if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
         return Err(DataError::Other(format!(
-            "dynamicWorkflows.defaultLeader {raw:?} is invalid; expected agent::model \
+            "{field_path}.defaultLeader {raw:?} is invalid; expected agent::model \
              (e.g. claude::claude-opus-4-8)"
         )));
     }
     let (agent, model) = (parts[0], parts[1]);
     if agent != agent.trim() || model != model.trim() {
         return Err(DataError::Other(format!(
-            "dynamicWorkflows.defaultLeader {raw:?} must not have leading or trailing whitespace \
+            "{field_path}.defaultLeader {raw:?} must not have leading or trailing whitespace \
              in the agent or model component"
         )));
     }
     if crate::data::session::AgentName::new(agent).is_err() {
         return Err(DataError::Other(format!(
-            "dynamicWorkflows.defaultLeader agent component {agent:?} is not a valid agent name: \
+            "{field_path}.defaultLeader agent component {agent:?} is not a valid agent name: \
              only ASCII alphanumerics, '-', and '_' are allowed, length 1..=64"
         )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_agents_to_models(
+    field_path: &str,
+    map: &HashMap<String, Vec<String>>,
+) -> Result<(), DataError> {
+    for (agent, models) in map {
+        validate_agent_name_key(field_path, agent)?;
+        if models.is_empty() {
+            return Err(DataError::Other(format!(
+                "{field_path}.agentsToModels.{agent} has an empty model list. \
+                 Provide at least one model name."
+            )));
+        }
+        for model in models {
+            if model.trim().is_empty() {
+                return Err(DataError::Other(format!(
+                    "{field_path}.agentsToModels.{agent} contains an empty model name."
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_guidance(field_path: &str, entries: &[String]) -> Result<(), DataError> {
+    if entries.len() > GUIDANCE_MAX_ENTRIES {
+        return Err(DataError::Other(format!(
+            "{field_path}.guidance has {} entries; the maximum is {GUIDANCE_MAX_ENTRIES}.",
+            entries.len()
+        )));
+    }
+    for (i, entry) in entries.iter().enumerate() {
+        if entry.trim().is_empty() {
+            return Err(DataError::Other(format!(
+                "{field_path}.guidance[{i}] is empty or whitespace-only. \
+                 Remove it or provide a non-empty instruction."
+            )));
+        }
+        if entry.chars().count() > GUIDANCE_MAX_ENTRY_LEN {
+            return Err(DataError::Other(format!(
+                "{field_path}.guidance[{i}] is {} characters; the maximum is \
+                 {GUIDANCE_MAX_ENTRY_LEN}.",
+                entry.chars().count()
+            )));
+        }
     }
     Ok(())
 }
@@ -962,5 +1018,45 @@ mod tests {
             !written.contains("envPassthrough"),
             "legacy envPassthrough must not be re-serialized by save(); got: {written}"
         );
+    }
+
+    #[test]
+    fn amie_config_uses_camel_case_and_validates_shared_agent_rules() {
+        let config = AmieConfig {
+            agents_to_models: Some(HashMap::from([(
+                "claude".to_string(),
+                vec!["claude-opus-4-8".to_string()],
+            )])),
+            max_concurrent_evaluations: Some(3),
+            default_leader: Some("claude::claude-opus-4-8".to_string()),
+            guidance: Some(vec!["Use focused workflows.".to_string()]),
+        };
+        config.validate().unwrap();
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(serialized.get("maxConcurrentEvaluations").is_some());
+        assert!(serialized.get("defaultLeader").is_some());
+    }
+
+    #[test]
+    fn amie_config_rejects_zero_and_malformed_leader() {
+        let zero = AmieConfig {
+            max_concurrent_evaluations: Some(0),
+            ..Default::default()
+        };
+        assert!(zero
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("amie.maxConcurrentEvaluations must be >= 1"));
+
+        let malformed = AmieConfig {
+            default_leader: Some(" claude::model".to_string()),
+            ..Default::default()
+        };
+        assert!(malformed
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("amie.defaultLeader"));
     }
 }

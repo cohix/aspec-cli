@@ -393,6 +393,15 @@ mod tests {
         ) -> Vec<String> {
             Vec::new()
         }
+        fn attach(&self, _h: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
+            unimplemented!("not exercised by BackgroundContainer lifecycle tests")
+        }
+        fn list_running_with_name_prefix(
+            &self,
+            _prefix: &str,
+        ) -> Result<Vec<AgentHandle>, EngineError> {
+            Ok(Vec::new())
+        }
         fn name(&self) -> &'static str {
             "recording"
         }

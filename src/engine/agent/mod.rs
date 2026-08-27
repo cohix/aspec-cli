@@ -217,7 +217,10 @@ impl AgentEngine {
             ContainerOption::Entrypoint(entrypoint),
             ContainerOption::Interactive(!run.non_interactive),
             ContainerOption::AllowDocker(run.allow_docker),
-            ContainerOption::SessionLabel(session.id().to_string()),
+            ContainerOption::Label {
+                key: "awman.session".into(),
+                value: session.id().to_string(),
+            },
         ];
 
         // Mode flags.
@@ -875,6 +878,31 @@ mod tests {
             opts.iter()
                 .any(|o| matches!(o, ContainerOption::Entrypoint(_))),
             "Entrypoint option must be present"
+        );
+    }
+
+    /// WI 0101 §2.2 regression guard: after `SessionLabel` was generalized to
+    /// `Label { key, value }`, the one existing producer must still emit
+    /// exactly `awman.session=<session id>` and nothing else.
+    #[test]
+    fn build_options_still_emits_the_session_label_after_the_label_generalization() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, session) = make_agent_engine(tmp.path());
+        let agent = crate::data::session::AgentName::new("claude").unwrap();
+        let opts = engine
+            .build_options(&session, &agent, &AgentRunOptions::default())
+            .unwrap();
+        let labels: Vec<(&str, &str)> = opts
+            .iter()
+            .filter_map(|o| match o {
+                ContainerOption::Label { key, value } => Some((key.as_str(), value.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            vec![("awman.session", session.id().to_string().as_str())],
+            "an ordinary session container carries exactly the session label"
         );
     }
 
@@ -2219,6 +2247,20 @@ mod tests {
         }
         fn exec_args(&self, _: &str, _: &str, _: &[&str], _: &[(&str, &str)]) -> Vec<String> {
             vec![]
+        }
+        fn attach(
+            &self,
+            _: &crate::data::session::AgentHandle,
+        ) -> Result<Box<dyn crate::engine::agent_runtime::AgentInstance>, EngineError> {
+            unimplemented!(
+                "FakeRuntime: attach() is not exercised by option-construction parity tests"
+            )
+        }
+        fn list_running_with_name_prefix(
+            &self,
+            _: &str,
+        ) -> Result<Vec<crate::data::session::AgentHandle>, EngineError> {
+            Ok(vec![])
         }
         fn cli_binary(&self) -> &'static str {
             "fake"

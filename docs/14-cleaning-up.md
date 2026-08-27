@@ -1,12 +1,12 @@
 # Cleaning Up
 
-awman creates and manages various resources — Docker containers, workflow data files, and images — as you use the tool. Over time, completed workflows leave behind data that can accumulate. The `awman clean` command safely removes these resources.
+awman creates and manages various resources — Docker containers, workflow data files, database migration backups, and images — as you use the tool. Over time, completed workflows leave behind data that can accumulate. The `awman clean` command safely removes these resources.
 
 ---
 
 ## What gets removed
 
-`awman clean` targets four categories of resources:
+`awman clean` targets five categories of resources:
 
 1. **Stopped containers** — Docker containers from previous awman runs that have exited or died. These typically remain on disk even after they complete, and can accumulate quickly if you run many workflows.
 
@@ -15,6 +15,8 @@ awman creates and manages various resources — Docker containers, workflow data
 3. **Completed workflow context directories** — Per-invocation context directories under `~/.awman/context/workflows/` that belong to terminal (completed) workflows. These contain logs, temporary files, and other state from the workflow run. Directories are considered complete when their UUID matches a terminal workflow in the current repo, or when they contain a `completed` marker file.
 
 4. **Dangling images** — Awman-labeled Docker images that Docker reports as dangling, usually because a newer build replaced the same tag. If Docker refuses to remove an image because a container still references it, awman reports that item as a deletion error and continues.
+
+5. **Pre-migration database backup** — The retained `awman.db.pre-migration` backup from an automatic database migration (and any matching SQLite sidecar backups). The live database at `~/.awman/data/awman.db` is never removed or modified by `awman clean`.
 
 ---
 

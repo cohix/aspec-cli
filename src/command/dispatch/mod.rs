@@ -11,6 +11,13 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::command::commands::amie::commands::{AmieCommand, AmieCommandFrontend, AmieSubcommand};
+use crate::command::commands::amie::daemon::{
+    AmieLogsFlags, AmieStartFlags, AmieStatusFlags, AmieStopFlags,
+};
+use crate::command::commands::amie::gateway::{
+    ConditionGateway, CreateCondition, SharedConditionGateway,
+};
 use crate::command::commands::api_server::{
     ApiServerCommand, ApiServerCommandFrontend, ApiServerKillFlags, ApiServerLogsFlags,
     ApiServerStartFlags, ApiServerStatusFlags, ApiServerSubcommand,
@@ -46,6 +53,7 @@ use crate::command::commands::Command;
 use crate::command::dispatch::catalogue::{CommandCatalogue, FlagKind, FlagSpec};
 use crate::command::error::CommandError;
 use crate::data::config::global::GlobalConfig;
+use crate::data::fs::condition_store::MountScope;
 use crate::data::message::UserMessageSink;
 use crate::data::session::Session;
 use crate::engine::agent::AgentEngine;
@@ -220,6 +228,7 @@ pub trait DispatchFrontend:
     + ExecPromptCommandFrontend
     + ExecWorkflowCommandFrontend
     + ApiServerCommandFrontend
+    + AmieCommandFrontend
     + RemoteCommandFrontend
     + NewCommandFrontend
     + AuthCommandFrontend
@@ -240,6 +249,7 @@ impl<T> DispatchFrontend for T where
         + ExecPromptCommandFrontend
         + ExecWorkflowCommandFrontend
         + ApiServerCommandFrontend
+        + AmieCommandFrontend
         + RemoteCommandFrontend
         + NewCommandFrontend
         + AuthCommandFrontend
@@ -265,6 +275,7 @@ pub enum CommandOutcome {
     ExecPrompt(crate::command::commands::exec_prompt::ExecPromptOutcome),
     ExecWorkflow(crate::command::commands::exec_workflow::ExecWorkflowOutcome),
     ApiServer(crate::command::commands::api_server::ApiServerOutcome),
+    Amie(crate::command::commands::amie::commands::AmieOutcome),
     Remote(crate::command::commands::remote::RemoteOutcome),
     New(crate::command::commands::new::NewOutcome),
     Specs(crate::command::commands::specs::SpecsOutcome),
@@ -287,6 +298,7 @@ pub enum BuiltCommand {
     ExecPrompt(ExecPromptCommand),
     ExecWorkflow(ExecWorkflowCommand),
     ApiServer(ApiServerCommand),
+    Amie(AmieCommand),
     Remote(RemoteCommand),
     New(NewCommand),
     Auth(AuthCommand),
@@ -301,6 +313,7 @@ pub struct Dispatch<F: CommandFrontend> {
     frontend: F,
     session: Arc<RwLock<Session>>,
     engines: Engines,
+    amie_gateway: Option<Arc<dyn ConditionGateway>>,
 }
 
 impl<F: CommandFrontend> Dispatch<F> {
@@ -310,6 +323,7 @@ impl<F: CommandFrontend> Dispatch<F> {
             frontend,
             session,
             engines,
+            amie_gateway: None,
         }
     }
 
@@ -331,6 +345,13 @@ impl<F: CommandFrontend> Dispatch<F> {
 
     pub fn engines(&self) -> &Engines {
         &self.engines
+    }
+
+    /// Inject the daemon-local gateway for amie HTTP dispatch. CLI and TUI do
+    /// not receive this: they obtain a remote gateway through AmieSupervisor.
+    pub fn with_amie_gateway(mut self, gateway: Arc<dyn ConditionGateway>) -> Self {
+        self.amie_gateway = Some(gateway);
+        self
     }
 
     /// Read flags from the frontend and construct the typed `*Command`. No
@@ -550,6 +571,137 @@ impl<F: CommandFrontend> Dispatch<F> {
                 ApiServerSubcommand::Status(ApiServerStatusFlags {}),
                 self.engines.clone(),
             ))),
+            ["amie", "start"] => Ok(BuiltCommand::Amie(AmieCommand::new(
+                AmieSubcommand::Start(AmieStartFlags {
+                    port: self
+                        .frontend
+                        .flag_u16(&canonical_refs, "port")?
+                        .unwrap_or(0),
+                    background: self
+                        .frontend
+                        .flag_bool(&canonical_refs, "background")?
+                        .unwrap_or(false),
+                    refresh_key: self
+                        .frontend
+                        .flag_bool(&canonical_refs, "refresh-key")?
+                        .unwrap_or(false),
+                    dangerously_skip_auth: self
+                        .frontend
+                        .flag_bool(&canonical_refs, "dangerously-skip-auth")?
+                        .unwrap_or(false),
+                }),
+                None,
+                self.engines.clone(),
+            ))),
+            ["amie", "stop"] => Ok(BuiltCommand::Amie(AmieCommand::new(
+                AmieSubcommand::Stop(AmieStopFlags),
+                None,
+                self.engines.clone(),
+            ))),
+            ["amie", "status"] => Ok(BuiltCommand::Amie(AmieCommand::new(
+                AmieSubcommand::Status(AmieStatusFlags),
+                None,
+                self.engines.clone(),
+            ))),
+            ["amie", "logs"] => Ok(BuiltCommand::Amie(AmieCommand::new(
+                AmieSubcommand::Logs(AmieLogsFlags {
+                    follow: self
+                        .frontend
+                        .flag_bool(&canonical_refs, "follow")?
+                        .unwrap_or(false),
+                }),
+                None,
+                self.engines.clone(),
+            ))),
+            ["amie", "add"] => {
+                let name = self
+                    .frontend
+                    .flag_string(&canonical_refs, "name")?
+                    .ok_or_else(|| CommandError::missing_required_flag(&canonical_refs, "name"))?;
+                let description = self
+                    .frontend
+                    .flag_string(&canonical_refs, "description")?
+                    .ok_or_else(|| {
+                        CommandError::missing_required_flag(&canonical_refs, "description")
+                    })?;
+                let interval = self
+                    .frontend
+                    .flag_string(&canonical_refs, "interval")?
+                    .unwrap_or_else(|| "5m".into());
+                let interval_secs = parse_amie_interval(&canonical_refs, &interval)?;
+                let repo_scope = self
+                    .frontend
+                    .flag_path(&canonical_refs, "repo")?
+                    .unwrap_or_else(|| session.working_dir().to_path_buf());
+                let mount_scope = match self
+                    .frontend
+                    .flag_enum(&canonical_refs, "mount-scope")?
+                    .as_deref()
+                    .unwrap_or("gitroot")
+                {
+                    "cwd" => MountScope::Cwd,
+                    "gitroot" => MountScope::GitRoot,
+                    _ => unreachable!("catalogue enum validation"),
+                };
+                let gateway = self.amie_gateway.clone().map(|gateway| {
+                    Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
+                });
+                Ok(BuiltCommand::Amie(AmieCommand::new(
+                    AmieSubcommand::Add(CreateCondition {
+                        name,
+                        description,
+                        repo_scope,
+                        mount_scope,
+                        interval_secs,
+                        agent: self.frontend.flag_string(&canonical_refs, "agent")?,
+                        model: self.frontend.flag_string(&canonical_refs, "model")?,
+                    }),
+                    gateway,
+                    self.engines.clone(),
+                )))
+            }
+            ["amie", action @ ("list" | "show" | "remove" | "pause" | "resume")] => {
+                let gateway = self.amie_gateway.clone().map(|gateway| {
+                    Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
+                });
+                let sub = match *action {
+                    "list" => AmieSubcommand::List,
+                    "show" => AmieSubcommand::Show(
+                        self.frontend
+                            .argument(&canonical_refs, "name")?
+                            .ok_or_else(|| {
+                                CommandError::missing_required_argument(&canonical_refs, "name")
+                            })?,
+                    ),
+                    "remove" => AmieSubcommand::Remove(
+                        self.frontend
+                            .argument(&canonical_refs, "name")?
+                            .ok_or_else(|| {
+                                CommandError::missing_required_argument(&canonical_refs, "name")
+                            })?,
+                    ),
+                    "pause" => AmieSubcommand::Pause(
+                        self.frontend
+                            .argument(&canonical_refs, "name")?
+                            .ok_or_else(|| {
+                                CommandError::missing_required_argument(&canonical_refs, "name")
+                            })?,
+                    ),
+                    "resume" => AmieSubcommand::Resume(
+                        self.frontend
+                            .argument(&canonical_refs, "name")?
+                            .ok_or_else(|| {
+                                CommandError::missing_required_argument(&canonical_refs, "name")
+                            })?,
+                    ),
+                    _ => unreachable!(),
+                };
+                Ok(BuiltCommand::Amie(AmieCommand::new(
+                    sub,
+                    gateway,
+                    self.engines.clone(),
+                )))
+            }
             ["remote", "exec", "workflow"] => {
                 let workflow = self
                     .frontend
@@ -791,6 +943,10 @@ impl<F: DispatchFrontend> Dispatch<F> {
                     .await
                     .map(CommandOutcome::ApiServer)
             }
+            BuiltCommand::Amie(cmd) => {
+                let boxed: Box<dyn AmieCommandFrontend> = Box::new(frontend);
+                cmd.run_with_frontend(boxed).await.map(CommandOutcome::Amie)
+            }
             BuiltCommand::Remote(cmd) => {
                 let boxed: Box<dyn RemoteCommandFrontend> = Box::new(frontend);
                 cmd.run_with_frontend(boxed)
@@ -858,6 +1014,28 @@ fn validate_conflicts<F: CommandFrontend>(
         }
     }
     Ok(())
+}
+
+fn parse_amie_interval(command: &[&str], raw: &str) -> Result<u64, CommandError> {
+    let value = raw.trim();
+    let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
+        (number, 1)
+    } else if let Some(number) = value.strip_suffix('m') {
+        (number, 60)
+    } else if let Some(number) = value.strip_suffix('h') {
+        (number, 3600)
+    } else {
+        (value, 1)
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(multiplier))
+        .ok_or_else(|| CommandError::InvalidFlagValue {
+            command: command.iter().map(|part| (*part).to_string()).collect(),
+            flag: "interval".into(),
+            reason: "expected seconds or a duration such as 5m".into(),
+        })
 }
 
 // ─── Per-command flag readers ───────────────────────────────────────────────

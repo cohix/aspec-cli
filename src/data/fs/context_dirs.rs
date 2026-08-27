@@ -10,6 +10,7 @@ use std::process::Command;
 use crate::data::config::env::{Env, EnvSnapshot};
 use crate::data::config::global::GlobalConfig;
 use crate::data::error::DataError;
+use crate::data::fs::path_guard::validate_under_root;
 
 /// Resolves host-side context directory paths.
 #[derive(Debug, Clone)]
@@ -158,16 +159,11 @@ fn normalise_slug(s: &str) -> String {
 /// Validate that a resolved context path stays under `~/.awman/context/`.
 /// Returns `Err` if the path escapes (e.g. via `..` in a crafted slug).
 pub fn validate_context_path(awman_home: &Path, resolved: &Path) -> Result<(), DataError> {
-    let context_root = awman_home.join("context");
-    let canonical_root = std::fs::canonicalize(&context_root).unwrap_or(context_root.clone());
-    let canonical_resolved = std::fs::canonicalize(resolved).unwrap_or(resolved.to_path_buf());
-    if !canonical_resolved.starts_with(&canonical_root) {
-        return Err(DataError::InvalidPath {
-            path: resolved.to_path_buf(),
-            reason: "context directory must reside under ~/.awman/context/".to_string(),
-        });
-    }
-    Ok(())
+    validate_under_root(
+        &awman_home.join("context"),
+        resolved,
+        "context directory must reside under ~/.awman/context/",
+    )
 }
 
 #[cfg(test)]

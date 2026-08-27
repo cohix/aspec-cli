@@ -4,7 +4,9 @@ API mode exposes awman's session and subcommand execution over HTTP. Start a per
 
 A **session** in API mode is conceptually identical to a TUI tab: a named, isolated workspace bound to a working directory. Subcommands dispatched to a session (`exec workflow`, `chat`, etc.) execute exactly as they would in a TUI tab — inside a Docker container, with all the same security and isolation guarantees.
 
-All operations, inputs, and outputs are recorded durably in `~/.awman/api/` for auditability.
+API metadata, credentials, and output logs are recorded durably under
+`~/.awman/api/` for auditability. The shared SQLite database is stored at
+`~/.awman/data/awman.db`.
 
 ---
 
@@ -390,6 +392,18 @@ If `bind()` fails because the port is already in use, the error message includes
 ```
 error: port 9876 is already in use (PID 41290)
 ```
+
+### API server and amie daemon
+
+The API server and the amie daemon share the database and cannot run at the
+same time. Starting either one while the other is alive fails before the new
+process starts. The error names the other process and its PID, for example:
+
+```
+error: the amie daemon is already running (PID 41290). Run `awman amie stop` first; awman api and the amie daemon cannot run at the same time.
+```
+
+Stop the running process before starting the other one.
 
 ---
 
@@ -1292,13 +1306,12 @@ CMD=$(curl -s -X POST "$SERVER/v1/commands" \
 
 ## Storage layout
 
-Everything API mode writes lives under `~/.awman/api/`:
+API runtime files live under `~/.awman/api/`:
 
 ```
 ~/.awman/api/
   awman.log                        # server log (background mode only)
   awman.pid                        # PID file for the background process
-  awman.db                         # SQLite database: sessions + commands
   api_key.hash                     # SHA-256 hex digest of the API key (mode 0600)
   sessions/
     <session-uuid>/
@@ -1309,9 +1322,16 @@ Everything API mode writes lives under `~/.awman/api/`:
           workflow.state.json      # workflow state — only present for workflow commands
 ```
 
+The shared SQLite database is stored separately at
+`~/.awman/data/awman.db`. On the first start after upgrading, awman migrates
+the database from its former API storage location automatically. It retains an
+`awman.db.pre-migration` backup of the old database; `awman clean` removes that
+backup, but never removes the live database.
+
 `workflow.state.json` is written and updated atomically (write to a temp file, then rename) each time the workflow advances to a new step. The file uses the identical JSON structure as the local workflow state in `$GITROOT/.awman/workflows/`. It is created only when the command runs a workflow; it is never present for `exec prompt`, `chat`, `implement` (without `--workflow`), or other non-workflow commands.
 
-`awman.db` contains two tables:
+`awman.db` contains the API session and command records (and the amie condition
+and run records when amie is in use):
 
 **`sessions`** — one row per session: `id` (UUID), `workdir`, `status` (`active`/`closed`), `created_at`, `closed_at`.
 
@@ -1391,7 +1411,7 @@ For additional defense in depth, bind the server to `localhost` (the default) an
 
 ## Session cleanup
 
-At server startup, awman automatically purges sessions that were closed more than 24 hours ago. Their rows are removed from `awman.db` along with all associated command records. The on-disk output logs in `~/.awman/api/sessions/<uuid>/` are **not** deleted — they remain for audit purposes.
+At server startup, awman automatically purges sessions that were closed more than 24 hours ago. Their rows are removed from `~/.awman/data/awman.db` along with all associated command records. The on-disk output logs in `~/.awman/api/sessions/<uuid>/` are **not** deleted — they remain for audit purposes.
 
 The cleanup runs once, before the server begins accepting connections. Each purged session is logged at `INFO` level:
 
@@ -1420,6 +1440,7 @@ On `SIGTERM` or `SIGINT`, the server finishes all in-flight HTTP responses and a
 | Multiple `POST /v1/commands` in quick succession | All commands are enqueued; first returns immediately, subsequent requests also return immediately with different command IDs; all are processed in FIFO order (one per session at a time) |
 | Session is `closing` on `POST /v1/commands` | HTTP 409 `"session is closing"`; command is rejected to prevent new work during graceful shutdown |
 | Server already running when `api start` is invoked | Error printed; exits non-zero |
+| API server or amie daemon already running when the other is started | Error names the other process and its PID; the new process does not start |
 | Port already bound (EADDRINUSE) | Error includes the port number and PID holding it |
 | `--workdirs` path doesn't exist at startup | Warning logged; path remains on allowlist |
 | `awman api kill` when server is not running | Informational message; exits 0 |

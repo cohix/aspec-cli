@@ -6,22 +6,24 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::command::commands::http_core::{HttpCore, HttpResponse};
 use crate::command::error::CommandError;
 use crate::data::execution_event::ExecutionEvent;
 use crate::data::session::Session;
 use crate::data::session_setup_event::SessionSetupState;
 use crate::engine::auth::ApiKey;
 
+/// Typed HTTP client for talking to a remote awman API server. A thin façade
+/// over one [`HttpCore`]: `RemoteClient` owns only the route-specific methods,
+/// the generic transport lives in the core.
 pub struct RemoteClient {
-    base_url: String,
-    http: reqwest::Client,
+    core: HttpCore,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct RemoteResponse {
-    pub status: u16,
-    pub body: serde_json::Value,
-}
+/// Response for the low-level verb helpers. Kept as a type alias so external
+/// callers referencing `remote_client::RemoteResponse` (e.g. `get_job`'s return
+/// type) do not change.
+pub type RemoteResponse = HttpResponse;
 
 /// Test-only sink used by the legacy SSE parser test. Production code never
 /// uses this; see `ExecutionEventSink` for the typed surface.
@@ -88,8 +90,12 @@ pub struct SessionSetupStatusResponse {
 }
 
 impl RemoteClient {
-    pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-    pub const READ_TIMEOUT: Duration = Duration::from_secs(600);
+    /// The API version prefix. Hardcoded here (rather than at every call site)
+    /// and threaded into the shared [`HttpCore`].
+    const PREFIX: &'static str = "v1";
+
+    pub const CONNECT_TIMEOUT: Duration = HttpCore::CONNECT_TIMEOUT;
+    pub const READ_TIMEOUT: Duration = HttpCore::READ_TIMEOUT;
 
     pub fn new(base_url: &str, api_key: Option<&ApiKey>) -> Result<Self, CommandError> {
         Self::new_with_pinned_cert(base_url, api_key, None)
@@ -106,28 +112,8 @@ impl RemoteClient {
         api_key: Option<&ApiKey>,
         pinned_cert_pem: Option<&str>,
     ) -> Result<Self, CommandError> {
-        let mut builder = reqwest::Client::builder()
-            .connect_timeout(Self::CONNECT_TIMEOUT)
-            .timeout(Self::READ_TIMEOUT);
-        if let Some(key) = api_key {
-            let mut headers = reqwest::header::HeaderMap::new();
-            let auth_value = format!("Bearer {}", key.as_str());
-            let value = reqwest::header::HeaderValue::from_str(&auth_value)
-                .map_err(|e| CommandError::Other(format!("invalid api key header: {e}")))?;
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-            builder = builder.default_headers(headers);
-        }
-        if let Some(pem) = pinned_cert_pem {
-            let cert = reqwest::Certificate::from_pem(pem.as_bytes())
-                .map_err(|e| CommandError::Other(format!("invalid pinned cert: {e}")))?;
-            builder = builder.add_root_certificate(cert);
-        }
-        let http = builder
-            .build()
-            .map_err(|e| CommandError::RemoteTransport(e.to_string()))?;
         Ok(Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            http,
+            core: HttpCore::new_with_pinned_cert(base_url, Self::PREFIX, api_key, pinned_cert_pem)?,
         })
     }
 
@@ -135,21 +121,7 @@ impl RemoteClient {
     /// `::1`, `localhost`). Used to decide whether the locally-stored
     /// self-signed cert should be trusted.
     pub fn is_loopback_addr(addr: &str) -> bool {
-        let trimmed = addr.trim();
-        let after_scheme = trimmed
-            .split_once("://")
-            .map(|(_, rest)| rest)
-            .unwrap_or(trimmed);
-        let host_part = after_scheme
-            .split_once('/')
-            .map(|(h, _)| h)
-            .unwrap_or(after_scheme);
-        let host = host_part
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(host_part);
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        matches!(host, "127.0.0.1" | "::1" | "localhost")
+        HttpCore::is_loopback_addr(addr)
     }
 
     /// API-key resolution per spec §6.5: explicit > AWMAN_API_KEY > global
@@ -195,9 +167,10 @@ impl RemoteClient {
         &self,
         req: &StartSessionRequest,
     ) -> Result<StartSessionResponse, CommandError> {
-        let url = format!("{}/v1/sessions", self.base_url);
+        let url = self.core.url(&["sessions"]);
         let resp = self
-            .http
+            .core
+            .http()
             .post(&url)
             .json(req)
             .send()
@@ -298,10 +271,11 @@ impl RemoteClient {
         use crate::data::execution_event::EventPayload;
         use futures_util::StreamExt;
 
-        let url = format!("{}/v1/commands/{job_id}/logs", self.base_url);
+        let url = self.core.url(&["commands", job_id, "logs"]);
 
         let resp = self
-            .http
+            .core
+            .http()
             .get(&url)
             .timeout(Duration::from_secs(86400))
             .send()
@@ -369,7 +343,7 @@ impl RemoteClient {
         path: &[&str],
         flags: &[(&str, serde_json::Value)],
     ) -> Result<RemoteResponse, CommandError> {
-        self.send_command_with_headers(path, flags, &[]).await
+        self.core.post_command(path, flags, &[]).await
     }
 
     /// Like `send_command` but also attaches request headers — used to set
@@ -381,72 +355,15 @@ impl RemoteClient {
         flags: &[(&str, serde_json::Value)],
         headers: &[(&str, &str)],
     ) -> Result<RemoteResponse, CommandError> {
-        let url = format!("{}/v1/{}", self.base_url, path.join("/"));
-        let mut body = serde_json::Map::new();
-        for (k, v) in flags {
-            body.insert(k.to_string(), v.clone());
-        }
-        let mut req = self.http.post(&url).json(&serde_json::Value::Object(body));
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        let resp = req.send().await.map_err(Self::map_reqwest_error)?;
-        let status = resp.status().as_u16();
-        let body = resp
-            .json::<serde_json::Value>()
-            .await
-            .map_err(Self::map_reqwest_error)?;
-        if status >= 400 {
-            return Err(CommandError::RemoteHttpStatus {
-                status,
-                body: body.to_string(),
-            });
-        }
-        Ok(RemoteResponse { status, body })
+        self.core.post_command(path, flags, headers).await
     }
 
     pub(crate) async fn get(&self, path: &[&str]) -> Result<RemoteResponse, CommandError> {
-        let url = format!("{}/v1/{}", self.base_url, path.join("/"));
-        let resp = self
-            .http
-            .get(&url)
-            .send()
-            .await
-            .map_err(Self::map_reqwest_error)?;
-        let status = resp.status().as_u16();
-        let body = resp
-            .json::<serde_json::Value>()
-            .await
-            .map_err(Self::map_reqwest_error)?;
-        if status >= 400 {
-            return Err(CommandError::RemoteHttpStatus {
-                status,
-                body: body.to_string(),
-            });
-        }
-        Ok(RemoteResponse { status, body })
+        self.core.get(path).await
     }
 
     pub(crate) async fn delete(&self, path: &[&str]) -> Result<RemoteResponse, CommandError> {
-        let url = format!("{}/v1/{}", self.base_url, path.join("/"));
-        let resp = self
-            .http
-            .delete(&url)
-            .send()
-            .await
-            .map_err(Self::map_reqwest_error)?;
-        let status = resp.status().as_u16();
-        let body = resp
-            .json::<serde_json::Value>()
-            .await
-            .unwrap_or(serde_json::json!({}));
-        if status >= 400 {
-            return Err(CommandError::RemoteHttpStatus {
-                status,
-                body: body.to_string(),
-            });
-        }
-        Ok(RemoteResponse { status, body })
+        self.core.delete(path).await
     }
 
     /// Stream raw SSE events to the given sink. Kept crate-private for tests
@@ -460,10 +377,11 @@ impl RemoteClient {
     ) -> Result<(), CommandError> {
         use futures_util::StreamExt;
 
-        let url = format!("{}/v1/{}", self.base_url, path.join("/"));
+        let url = self.core.url(path);
 
         let resp = self
-            .http
+            .core
+            .http()
             .get(&url)
             .timeout(Duration::from_secs(86400))
             .send()
@@ -537,13 +455,7 @@ impl RemoteClient {
     }
 
     pub fn map_reqwest_error(e: reqwest::Error) -> CommandError {
-        if e.is_timeout() {
-            CommandError::RemoteTimeout
-        } else if e.is_connect() {
-            CommandError::RemoteConnectionRefused(e.to_string())
-        } else {
-            CommandError::RemoteTransport(e.to_string())
-        }
+        HttpCore::map_reqwest_error(e)
     }
 }
 

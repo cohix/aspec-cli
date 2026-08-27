@@ -95,3 +95,48 @@ path = "tests/api_parity/main.rs"
 [[test]]
 name = "binary_smoke"
 path = "tests/binary_smoke/main.rs"
+
+# ── WI 0101 amie test coverage (tests-amie step) ──────────────────────────────
+# `autotests = false` above means top-level `tests/*.rs` files are NOT
+# auto-discovered in this repo despite the usual Cargo convention; each needs
+# its own explicit [[test]] entry or `cargo test` silently never builds it.
+
+[[test]]
+name = "amie_naming"
+path = "tests/amie_naming.rs"
+
+[[test]]
+name = "amie_runtime_discovery"
+path = "tests/amie_runtime_discovery.rs"
+
+[[test]]
+name = "amie_attach"
+path = "tests/amie_attach.rs"
+
+[[test]]
+name = "amie_status_marker"
+path = "tests/amie_status_marker.rs"
+
+[[test]]
+name = "amie_scheduler"
+path = "tests/amie_scheduler.rs"
+
+[[test]]
+name = "amie_repair_loop"
+path = "tests/amie_repair_loop.rs"
+
+[[test]]
+name = "amie_daemon_http"
+path = "tests/amie_daemon_http.rs"
+
+[[test]]
+name = "amie_daemon_e2e"
+path = "tests/amie_daemon_e2e.rs"
+
+[[test]]
+name = "amie_mutual_exclusion"
+path = "tests/amie_mutual_exclusion.rs"
+
+[[test]]
+name = "amie_sandbox_refusal"
+path = "tests/amie_sandbox_refusal.rs"

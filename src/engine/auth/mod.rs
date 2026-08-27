@@ -209,23 +209,17 @@ impl AuthEngine {
     }
 
     /// Persist the hash to `<api-root>/api_key.hash` with mode 0o600 on Unix.
+    /// Delegates to `DaemonPaths::write_key_hash` so the secure-write logic
+    /// lives in Layer 0 and is shared by both daemons.
     pub fn write_api_key_hash(&self, hash: &ApiKeyHash) -> Result<(), EngineError> {
-        let path = self.api_paths.api_key_hash_file();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| EngineError::io(parent, e))?;
-        }
-        write_file_secure(&path, hash.0.as_bytes())?;
+        self.api_paths.daemon().write_key_hash(&hash.0)?;
         Ok(())
     }
 
-    /// Read the persisted hash, or `None` when absent.
+    /// Read the persisted hash, or `None` when absent. Delegates to
+    /// `DaemonPaths::read_key_hash` (trim-on-read preserved).
     pub fn read_api_key_hash(&self) -> Result<Option<ApiKeyHash>, EngineError> {
-        let path = self.api_paths.api_key_hash_file();
-        match std::fs::read_to_string(&path) {
-            Ok(s) => Ok(Some(ApiKeyHash(s.trim().to_string()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(EngineError::io(path, e)),
-        }
+        Ok(self.api_paths.daemon().read_key_hash()?.map(ApiKeyHash))
     }
 
     /// Constant-time API-key verification. Even when no hash exists on disk,

@@ -169,20 +169,13 @@ struct StatusResponse {
     running_commands: i64,
 }
 
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
 #[derive(Deserialize, Default)]
 struct ListSessionsQuery {
     #[serde(default)]
     status: Option<String>,
 }
 
-fn error_json(msg: impl Into<String>) -> Json<ErrorResponse> {
-    Json(ErrorResponse { error: msg.into() })
-}
+use crate::frontend::api::serve::error_json;
 
 /// Map a session-creation validation error to its HTTP status. This is the
 /// ONLY session-creation logic that remains in the frontend — the transport
@@ -230,50 +223,12 @@ async fn auth_middleware(
     req: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
 ) -> Response {
-    if let AuthMode::Enabled { ref key_hash } = state.auth_mode {
-        let auth_header = req
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok());
-
-        match auth_header {
-            None | Some("") => {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    error_json(
-                        "API key required. Pass the key via the Authorization header \
-                         (e.g. Authorization: Bearer <key>).",
-                    ),
-                )
-                    .into_response();
-            }
-            Some(header) => {
-                let provided_key = if header
-                    .get(..7)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer "))
-                {
-                    &header[7..]
-                } else {
-                    header
-                };
-
-                let provided_hash = {
-                    use ring::digest;
-                    let h = digest::digest(&digest::SHA256, provided_key.as_bytes());
-                    h.as_ref()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>()
-                };
-
-                use subtle::ConstantTimeEq;
-                let keys_equal: bool = provided_hash.as_bytes().ct_eq(key_hash.as_bytes()).into();
-                if !keys_equal {
-                    return (StatusCode::UNAUTHORIZED, error_json("Invalid API key."))
-                        .into_response();
-                }
-            }
-        }
+    // State extraction only: the decision itself lives in one shared place so
+    // the API and amie daemons can never diverge on how a key is accepted.
+    if let Some(rejection) =
+        crate::frontend::api::serve::check_bearer_auth(&state.auth_mode, req.headers())
+    {
+        return rejection;
     }
     next.run(req).await
 }

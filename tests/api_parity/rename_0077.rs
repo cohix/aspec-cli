@@ -59,7 +59,11 @@ fn awman_api_root_env_var_constant_uses_awman_prefix() {
     );
 }
 
-/// `AWMAN_API_ROOT` override is honoured and the resolved root is free of legacy names.
+/// `AWMAN_API_ROOT` override is honoured for the API root. As of WI 0101
+/// Part 1.1 the shared database no longer lives under the API root — it moved
+/// to `<data_home>/data/awman.db` (resolved by `DataPaths`), which does not
+/// track `AWMAN_API_ROOT`. The API root override still governs everything else
+/// under `~/.awman/api/`.
 #[test]
 fn api_paths_honours_awman_api_root_override() {
     let env = EnvSnapshot::with_overrides([(AWMAN_API_ROOT, "/custom/awman/api")]);
@@ -69,10 +73,15 @@ fn api_paths_honours_awman_api_root_override() {
         std::path::Path::new("/custom/awman/api"),
         "ApiPaths must respect AWMAN_API_ROOT override"
     );
+    // The database relocated out of the API root; it is no longer under it.
     let db = paths.db_path();
     assert!(
-        db.starts_with("/custom/awman/api"),
-        "db path must be under the overridden root; got {db:?}"
+        !db.starts_with("/custom/awman/api"),
+        "db path must NOT be under the API root after the WI 0101 relocation; got {db:?}"
+    );
+    assert!(
+        db.ends_with("data/awman.db"),
+        "db path must live under <data_home>/data/awman.db; got {db:?}"
     );
 }
 

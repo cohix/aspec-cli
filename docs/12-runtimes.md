@@ -185,6 +185,11 @@ awman status               # shows awman-managed sandboxes across all runtimes
 sbx ls                     # shows all sandboxes including non-awman ones
 ```
 
+`awman status` includes a source marker for running containers. Regular user
+sessions are marked `session`; containers launched by the amie daemon are
+marked `amie:<condition>` (for example, `amie:issue-triage`). The marker is
+informational and may be visible whether or not you use amie.
+
 **Sandbox naming:** awman names sandboxes `awman-<worktree-hash>-<agent>`. The hash is derived from the worktree's absolute path so the same worktree always produces the same name. Multi-agent workflows create one persistent sandbox per agent per worktree. When a workflow step runs, awman reuses the existing sandbox for that agent if one exists (restart, no reinstall), or creates a new one on first use. All steps that share the same agent share one sandbox — the per-agent install cost is paid once per worktree regardless of how many workflow steps use that agent.
 
 ### Credentials

@@ -92,6 +92,9 @@ pub struct ApiDispatchFrontend {
     last_sink_message_time: Option<std::time::Instant>,
 }
 
+#[async_trait::async_trait]
+impl crate::command::commands::amie::commands::AmieCommandFrontend for ApiDispatchFrontend {}
+
 impl ApiDispatchFrontend {
     /// Construct a new frontend from the HTTP request's subcommand + args.
     ///
