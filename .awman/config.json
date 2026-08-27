@@ -3,15 +3,25 @@
   "terminal_scrollback_lines": 7500,
   "dynamicWorkflows": {
     "agentsToModels": {
-      "codex": [
-        "gpt-5.5"
-      ],
       "claude": [
         "claude-sonnet-5",
         "claude-opus-4-8",
-        "claude-fable-5"
+		"claude-opus-5"
+      ],
+      "codex": [
+        "gpt-5.6-luna",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol"
       ]
     },
-    "defaultLeader": "claude::claude-fable-5"
+    "defaultLeader": "claude::claude-opus-5",
+    "guidance": [
+      "Attempt to split the workflow evenly among the available agent types. Do not use claude for everything, claude and codex should get rougly even usage so long as their models are appropriate.",
+      "Use Sonnet 5 or GPT 5.6 Luna evenly for simpler, well-scoped tasks like writing pre-designed functions and modules",
+      "Use Opus 4.8 or GPT 5.6 Terra evenly for more complex tasks like building large modules from scratch or complex refactors",
+      "Use Opus 5 GPT 5.6 Sol evenly only when there is truly complex or multi-part work that needs to be done, extremely difficult research, or coordination/planning for large groups of sub-agents.",
+      "Emulate the BMAD method's 'adverserial review' strategy when configuring the workflow for complex implementations (docs.bmad-method.org/explanation/adversarial-review/)"
+    ]
+  }
   }
 }
