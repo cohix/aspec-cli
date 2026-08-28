@@ -87,6 +87,12 @@ pub struct App {
     )>,
     /// Tracks when the last stats query was dispatched so we don't spam.
     pub last_stats_poll: std::time::Instant,
+    /// `(tab index, slot step name)` pairs with a stats query still running.
+    /// A container-runtime `stats()` call can take longer than the poll
+    /// interval on a busy daemon; without this guard every tick would pile
+    /// another query onto the same slot until the runtime CLI is swamped and
+    /// no slot's numbers stay current.
+    pub in_flight_stats: Arc<std::sync::Mutex<std::collections::HashSet<(usize, String)>>>,
 }
 
 impl App {
@@ -117,6 +123,7 @@ impl App {
             stats_rx: Some(stats_rx),
             stats_tx,
             last_stats_poll: std::time::Instant::now() - std::time::Duration::from_secs(10),
+            in_flight_stats: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -548,25 +555,26 @@ impl App {
                     continue;
                 }
 
-                // Poll every slot, tagging each query with the slot's step
-                // name so the drain routes the sample back to it. A slot
-                // whose container name is known (published by the engine per
-                // container) is queried directly; a sole slot whose name
-                // hasn't arrived yet falls back to listing running containers
-                // and picking the first.
-                let sole_slot = tab.container_slots.len() == 1;
-                for slot in &tab.container_slots {
-                    let Some(info) = slot.container_info.as_ref() else {
-                        continue;
+                for (step_name, target) in stats_poll_targets(tab) {
+                    let container_name = match target {
+                        StatsPollTarget::Named(name) => name,
+                        StatsPollTarget::FirstRunning => String::new(),
                     };
-                    let container_name = info.container_name.clone();
-                    if container_name.is_empty() && !sole_slot {
-                        continue;
+                    let tab_idx = i;
+                    // One query per slot at a time; a still-running one keeps
+                    // its slot's turn.
+                    let key = (tab_idx, step_name.clone());
+                    match self.in_flight_stats.lock() {
+                        Ok(mut guard) => {
+                            if !guard.insert(key.clone()) {
+                                continue;
+                            }
+                        }
+                        Err(_) => continue,
                     }
-                    let step_name = slot.step_name.clone();
                     let runtime = self.engines.runtime.clone();
                     let tx = self.stats_tx.clone();
-                    let tab_idx = i;
+                    let in_flight = self.in_flight_stats.clone();
                     self.runtime_handle.spawn_blocking(move || {
                         if !container_name.is_empty() {
                             // Fast path: name is known, query stats directly.
@@ -589,6 +597,9 @@ impl App {
                                     }
                                 }
                             }
+                        }
+                        if let Ok(mut guard) = in_flight.lock() {
+                            guard.remove(&key);
                         }
                     });
                 }
@@ -746,6 +757,50 @@ impl App {
         let completions = self.catalogue.tui_completions(partial);
         self.suggestion_row = completions.into_iter().map(|c| c.completion).collect();
     }
+}
+
+/// How one container slot's stats are obtained this tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StatsPollTarget {
+    /// The engine published this slot's container name — query it directly.
+    Named(String),
+    /// The name hasn't arrived yet; ask the runtime for the first running
+    /// container instead.
+    FirstRunning,
+}
+
+/// Which of a tab's container slots to poll for stats this tick, keyed by the
+/// slot's step name (empty for the single/backbone slot of a plain command)
+/// so the drain can route each sample back to the slot it was polled for.
+///
+/// Every slot whose container name is known is polled — during a parallel
+/// group that means all N containers, not just the focused one.
+///
+/// The "first running container" fallback covers the brief window before a
+/// plain `chat`/`exec` container reports its name. It is deliberately limited
+/// to a lone slot outside a parallel group: with several containers live,
+/// "the first running container" is an arbitrary sibling, and because the
+/// drain adopts a sample's name for a still-unnamed slot, one guess would pin
+/// that slot to a sibling's stats for the rest of the run. A group slot with
+/// no name yet simply waits for its `ContainerSlotEvent::ContainerName`.
+pub(crate) fn stats_poll_targets(tab: &Tab) -> Vec<(String, StatsPollTarget)> {
+    let in_parallel_group = !tab.dormant_slots.is_empty();
+    let sole_slot = tab.container_slots.len() == 1 && !in_parallel_group;
+    let mut targets = Vec::with_capacity(tab.container_slots.len());
+    for slot in &tab.container_slots {
+        let Some(info) = slot.container_info.as_ref() else {
+            continue;
+        };
+        if !info.container_name.is_empty() {
+            targets.push((
+                slot.step_name.clone(),
+                StatsPollTarget::Named(info.container_name.clone()),
+            ));
+        } else if sole_slot {
+            targets.push((slot.step_name.clone(), StatsPollTarget::FirstRunning));
+        }
+    }
+    targets
 }
 
 #[cfg(test)]
@@ -1031,6 +1086,79 @@ mod tests {
         assert!(
             build_info.latest_stats.is_none(),
             "the other slot must be untouched"
+        );
+    }
+
+    // ── stats poll targets ───────────────────────────────────────────────
+
+    fn named_slot(step: &str, container: &str) -> crate::frontend::tui::tabs::ContainerSlot {
+        let mut slot =
+            crate::frontend::tui::tabs::ContainerSlot::new(step.into(), "claude".into(), 1000);
+        if let Some(info) = slot.container_info.as_mut() {
+            info.container_name = container.into();
+        }
+        slot
+    }
+
+    #[test]
+    fn stats_poll_targets_covers_every_named_slot_in_a_parallel_group() {
+        let mut tab = Tab::new(make_test_session());
+        // A parallel group: the sequential backbone is dormant and every
+        // group slot has had its container name published by the engine.
+        tab.dormant_slots
+            .push(crate::frontend::tui::tabs::ContainerSlot::new(
+                String::new(),
+                "claude".into(),
+                1000,
+            ));
+        tab.container_slots.push(named_slot("build", "awman-b-1"));
+        tab.container_slots.push(named_slot("test", "awman-t-2"));
+        tab.container_slots.push(named_slot("docs", "awman-d-3"));
+
+        assert_eq!(
+            stats_poll_targets(&tab),
+            vec![
+                ("build".into(), StatsPollTarget::Named("awman-b-1".into())),
+                ("test".into(), StatsPollTarget::Named("awman-t-2".into())),
+                ("docs".into(), StatsPollTarget::Named("awman-d-3".into())),
+            ],
+            "every container in a parallel group must be polled, not just the focused one"
+        );
+    }
+
+    #[test]
+    fn stats_poll_targets_never_guesses_a_container_inside_a_parallel_group() {
+        let mut tab = Tab::new(make_test_session());
+        tab.dormant_slots
+            .push(crate::frontend::tui::tabs::ContainerSlot::new(
+                String::new(),
+                "claude".into(),
+                1000,
+            ));
+        // The group is down to one slot and its name hasn't arrived yet.
+        tab.container_slots
+            .push(crate::frontend::tui::tabs::ContainerSlot::new(
+                "build".into(),
+                "claude".into(),
+                1000,
+            ));
+
+        assert!(
+            stats_poll_targets(&tab).is_empty(),
+            "a group slot with no name yet must wait for it rather than adopting \
+             an arbitrary running container's stats"
+        );
+    }
+
+    #[test]
+    fn stats_poll_targets_falls_back_for_a_lone_unnamed_container() {
+        let mut tab = Tab::new(make_test_session());
+        tab.start_container("Claude".into(), String::new(), 80, 24);
+
+        assert_eq!(
+            stats_poll_targets(&tab),
+            vec![(String::new(), StatsPollTarget::FirstRunning)],
+            "a plain command's slot still gets stats before its name arrives"
         );
     }
 

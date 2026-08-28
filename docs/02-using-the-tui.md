@@ -389,7 +389,7 @@ Workflow steps that don't depend on each other can run at the same time, each in
   Ctrl-S switch  ·  Ctrl-M toggle  ·  Ctrl-W workflow
 ```
 
-Each minimized bar reads `🔒 agent [step_name] | container | cpu | mem | duration` — the same live stats the maximized title shows, polled per container:
+Each minimized bar reads `🔒 agent [step_name] | container | cpu | mem | duration` — the same live stats the maximized title shows, polled per container. Every container in the group is polled independently and refreshes about every 3 seconds, whether it is focused or minimized; a container shows `... | ...` in place of CPU and memory for the moment between its launch and its first sample:
 
 | Appearance | Meaning |
 |---|---|

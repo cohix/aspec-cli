@@ -318,6 +318,13 @@ impl WorkflowFrontend for WorkflowProxy {
             .report_parallel_step_launched(step_name, agent, model);
     }
 
+    fn report_parallel_step_container(&mut self, step_name: &str, container_name: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .report_parallel_step_container(step_name, container_name);
+    }
+
     fn report_parallel_step_exited(&mut self, step_name: &str, exit_code: i32) {
         self.0
             .lock()
@@ -3008,6 +3015,8 @@ mod tests {
 
     struct FakeExecWorkflowFrontend {
         pty_active_calls: Vec<bool>,
+        /// Per-step container names received via `report_parallel_step_container`.
+        parallel_containers: Arc<Mutex<Vec<(String, String)>>>,
         replay_queued_count: usize,
         summary_calls: Vec<WorkflowSummary>,
         messages: Vec<UserMessage>,
@@ -3018,6 +3027,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 pty_active_calls: vec![],
+                parallel_containers: Arc::new(Mutex::new(Vec::new())),
                 replay_queued_count: 0,
                 summary_calls: vec![],
                 messages: vec![],
@@ -3073,6 +3083,12 @@ mod tests {
         fn report_step_status(&mut self, _step: &WorkflowStep, _status: WorkflowStepStatus) {}
         fn report_step_output(&mut self, _step: &WorkflowStep, _output: StepOutput) {}
         fn report_workflow_completed(&mut self, _outcome: &WorkflowOutcome) {}
+        fn report_parallel_step_container(&mut self, step_name: &str, container_name: &str) {
+            self.parallel_containers
+                .lock()
+                .unwrap()
+                .push((step_name.to_string(), container_name.to_string()));
+        }
         fn confirm_resume(&mut self, _mismatch: &ResumeMismatch) -> Result<bool, EngineError> {
             Ok(true)
         }
@@ -3344,6 +3360,31 @@ prompt = "do something"
         // Can't easily downcast Box<dyn Trait>, but we can verify no panic
         // and that the proxy compiled and delegated without crashing.
         let _ = fake;
+    }
+
+    #[test]
+    fn workflow_proxy_forwards_parallel_step_container_to_inner_frontend() {
+        // Every parallel callback must be forwarded explicitly: the trait's
+        // default is a no-op, so a missing override silently swallows the
+        // event. When this one was missing, TUI parallel-group slots never
+        // learned their container names and their stats stayed blank.
+        let fake = FakeExecWorkflowFrontend::new();
+        let seen = Arc::clone(&fake.parallel_containers);
+        let inner: Arc<Mutex<Box<dyn ExecWorkflowCommandFrontend>>> =
+            Arc::new(Mutex::new(Box::new(fake)));
+        let mut proxy = WorkflowProxy(Arc::clone(&inner));
+
+        proxy.report_parallel_step_container("build", "awman-build-1");
+        proxy.report_parallel_step_container("test", "awman-test-2");
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [
+                ("build".to_string(), "awman-build-1".to_string()),
+                ("test".to_string(), "awman-test-2".to_string()),
+            ],
+            "the proxy must forward per-step container names to the real frontend"
+        );
     }
 
     #[test]
