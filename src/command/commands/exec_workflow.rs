@@ -138,6 +138,11 @@ pub struct ExecWorkflowCommand {
     flags: ExecWorkflowCommandFlags,
     engines: Engines,
     session: Session,
+    /// When set (only for amie-generated workflows), every container this
+    /// command launches is stamped with the condition's amie name + labels so
+    /// prefix discovery finds the workflow's step containers, not just the
+    /// evaluation leader. `None` for an ordinary `awman exec workflow`.
+    amie_identity: Option<crate::engine::amie::launcher::AmieContainerIdentity>,
 }
 
 impl ExecWorkflowCommand {
@@ -146,7 +151,19 @@ impl ExecWorkflowCommand {
             flags,
             engines,
             session,
+            amie_identity: None,
         }
+    }
+
+    /// Carry an amie container identity so every generated-workflow step
+    /// container is stamped exactly as the evaluation leader is. A non-amie
+    /// `exec workflow` never calls this and is unaffected.
+    pub fn with_amie_identity(
+        mut self,
+        identity: crate::engine::amie::launcher::AmieContainerIdentity,
+    ) -> Self {
+        self.amie_identity = Some(identity);
+        self
     }
 
     pub fn flags(&self) -> &ExecWorkflowCommandFlags {
@@ -452,6 +469,9 @@ struct CommandLayerFactory {
     image_git_root: PathBuf,
     /// Workflow-level overlays applied to every step.
     workflow_overlays: Option<Vec<String>>,
+    /// amie identity to stamp on every step container, when this is an
+    /// amie-generated workflow. `None` for an ordinary `exec workflow`.
+    amie_identity: Option<crate::engine::amie::launcher::AmieContainerIdentity>,
 }
 
 impl AgentExecutionFactory for CommandLayerFactory {
@@ -535,6 +555,13 @@ impl AgentExecutionFactory for CommandLayerFactory {
             &credential_env_vars,
             self.engines.runtime.as_ref(),
         )?;
+        // For an amie-generated workflow, stamp the condition's amie name +
+        // labels so this step's container is discoverable by prefix, exactly as
+        // the evaluation leader is. A non-amie run leaves `resolved` untouched.
+        let resolved = match &self.amie_identity {
+            Some(identity) => identity.stamp(resolved)?,
+            None => resolved,
+        };
         let instance = self.engines.runtime.build(resolved)?;
         let proxy = AgentFrontendProxy(Arc::clone(&self.shared));
         instance.run_with_frontend(Box::new(proxy))
@@ -966,7 +993,14 @@ impl Command for ExecWorkflowCommand {
             original_session: self.session,
             issue_temp_file: _issue_temp_file,
         };
-        execute_prepared(&self.flags, &self.engines, prepared, frontend).await
+        execute_prepared(
+            &self.flags,
+            &self.engines,
+            prepared,
+            frontend,
+            self.amie_identity.as_ref(),
+        )
+        .await
     }
 }
 
@@ -1005,6 +1039,7 @@ async fn execute_prepared(
     engines: &Engines,
     prepared: PreparedRun,
     frontend: Box<dyn ExecWorkflowCommandFrontend>,
+    amie_identity: Option<&crate::engine::amie::launcher::AmieContainerIdentity>,
 ) -> Result<ExecWorkflowOutcome, CommandError> {
     let PreparedRun {
         mut workflow,
@@ -1200,6 +1235,7 @@ async fn execute_prepared(
             work_item_context,
             image_git_root: git_root_for_scope.clone(),
             workflow_overlays: workflow_overlays_for_factory,
+            amie_identity: amie_identity.cloned(),
         };
         let mut engine = match WorkflowEngine::resume(
             &session,
@@ -2215,7 +2251,14 @@ impl ExecWorkflowCommand {
             original_session: base_session,
             issue_temp_file: None,
         };
-        execute_prepared(&effective_flags, &self.engines, prepared, frontend).await
+        execute_prepared(
+            &effective_flags,
+            &self.engines,
+            prepared,
+            frontend,
+            self.amie_identity.as_ref(),
+        )
+        .await
     }
 
     /// Launch a single leader/repair agent container and drive it through the
@@ -2264,6 +2307,13 @@ impl ExecWorkflowCommand {
             &creds,
             self.engines.runtime.as_ref(),
         )?;
+        // Stamp the amie identity on the dynamic leader too, when this is an
+        // amie-generated workflow, so its container carries the condition's
+        // discoverable name and labels.
+        let resolved = match &self.amie_identity {
+            Some(identity) => identity.stamp(resolved)?,
+            None => resolved,
+        };
         let instance = self.engines.runtime.build(resolved)?;
 
         shared.lock().unwrap().write_message(UserMessage {

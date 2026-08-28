@@ -111,7 +111,9 @@ fn amie_outcome_response(outcome: AmieOutcome) -> Response {
         AmieOutcome::Condition(condition) => Json(condition).into_response(),
         AmieOutcome::Detail(detail) => Json(detail).into_response(),
         AmieOutcome::Conditions(conditions) => Json(conditions).into_response(),
-        AmieOutcome::Removed { name } => Json(serde_json::json!({ "name": name })).into_response(),
+        AmieOutcome::Removed { name, .. } => {
+            Json(serde_json::json!({ "name": name })).into_response()
+        }
         AmieOutcome::Ok => Json(serde_json::json!({})).into_response(),
         AmieOutcome::Status(status) => Json(status).into_response(),
         AmieOutcome::Started {

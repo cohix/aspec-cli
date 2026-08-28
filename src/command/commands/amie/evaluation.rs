@@ -301,11 +301,19 @@ impl LocalConditionEvaluator {
             .progress
             .workflow_started(&request.run_id, &generated_path, &state_path);
 
+        // Stamp every generated-workflow step container with the same amie
+        // identity the evaluation leader carries, so prefix discovery finds the
+        // whole condition's container set — not just the leader (BLOCKER-1).
+        let amie_identity = crate::engine::amie::launcher::AmieContainerIdentity::new(
+            condition.name.clone(),
+            session.id().to_string(),
+        );
         let outcome = ExecWorkflowCommand::new(
             amie_workflow_flags(&generated_path),
             self.engines.clone(),
             session,
         )
+        .with_amie_identity(amie_identity)
         .run_with_frontend(
             self.frontends
                 .workflow_frontend(&condition.name, mount_scope_decision(condition.mount_scope)),

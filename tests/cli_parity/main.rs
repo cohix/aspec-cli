@@ -9,5 +9,6 @@
 #[path = "../helpers/mod.rs"]
 mod helpers;
 
+mod amie_catalogue;
 mod catalogue_completeness;
 mod json_outputs;

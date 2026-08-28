@@ -129,12 +129,20 @@ async fn main() -> Result<ExitCode> {
         workflow_state_store,
     };
 
+    let tab_session = session.clone();
     let ctx = RuntimeContext::new(session, engines);
 
-    if matches.subcommand_name().is_some() {
-        Ok(cli::run(matches, ctx).await)
+    let initial_tab = if matches.subcommand_name().is_none() {
+        Some(tui::InitialTab::Normal(tab_session))
+    } else if cli::is_bare_amie_tui_invocation(&matches) {
+        Some(tui::InitialTab::Amie)
     } else {
-        Ok(tui::run(matches, ctx, fatal_runtime_error).await)
+        None
+    };
+
+    match initial_tab {
+        Some(tab) => Ok(tui::run(matches, ctx, fatal_runtime_error, tab).await),
+        None => Ok(cli::run(matches, ctx).await),
     }
 }
 

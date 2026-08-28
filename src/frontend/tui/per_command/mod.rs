@@ -6,6 +6,7 @@
 
 mod agent_auth;
 mod agent_setup;
+mod amie;
 mod api_server;
 mod auth;
 mod chat;
@@ -19,7 +20,7 @@ mod init;
 mod mount_scope;
 mod new;
 mod ready;
-mod remote;
+pub(crate) mod remote;
 mod specs;
 mod status;
 mod workflow_frontend;

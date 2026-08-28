@@ -13,6 +13,9 @@
 pub(crate) mod helpers;
 pub(crate) mod render;
 
+pub(crate) mod amie;
+pub(crate) mod amie_attach;
+
 mod api_server;
 mod chat;
 mod clean;

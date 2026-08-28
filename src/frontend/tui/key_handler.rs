@@ -33,6 +33,16 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         // actively running.  Once the command finishes the overlay is closed, but
         // guard here too so a race can't leave the user unable to type.
         FocusContext::ContainerMaximized
+    } else if app.active_tab().is_amie
+        && app.active_tab().container_slots.is_empty()
+        && app.focus == Focus::ExecutionWindow
+    {
+        // WI 0102: the amie condition list holds focus. While an attach session
+        // owns the tab's slots (`container_slots` non-empty) this falls through
+        // to the ordinary ContainerMaximized/ExecutionWindow handling, so
+        // Ctrl-S slot cycling and PTY passthrough behave exactly as in a normal
+        // workflow run.
+        FocusContext::AmieList
     } else {
         match app.focus {
             Focus::CommandBox => FocusContext::CommandBox,
@@ -130,6 +140,20 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         return;
     }
 
+    // WI 0102: Ctrl-A inside the New Tab dialog opens the amie tab. Safe
+    // because keymap.rs already gates the global Ctrl-A -> PreviousTab mapping
+    // on `ctx != FocusContext::Dialog`, so the key is genuinely unclaimed here.
+    // Do NOT add a second global Ctrl-A mapping and do NOT relax that guard.
+    if key.code == KeyCode::Char('a')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(&app.active_dialog, Some(Dialog::TextInput { title, .. }) if title == "New Tab")
+    {
+        app.active_dialog = None;
+        app.command_dialog_active = false;
+        app.open_or_focus_amie_tab();
+        return;
+    }
+
     let action = keymap::map_key(key, ctx);
 
     match action {
@@ -149,7 +173,7 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 .to_string();
             app.active_dialog = Some(Dialog::TextInput {
                 title: "New Tab".to_string(),
-                prompt: "Working directory:".to_string(),
+                prompt: "Working directory:\nPress Ctrl-A to open amie".to_string(),
                 editor: {
                     let mut ed = text_edit::TextEdit::new(false);
                     ed.set_text(&cwd);
@@ -217,6 +241,11 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         Action::ToggleGitSidebar => {
+            // WI 0102: the git sidebar is meaningless for the amie tab's
+            // synthetic session, so Ctrl-G is a no-op while it is active.
+            if app.active_tab().is_amie {
+                return;
+            }
             let tab = app.active_tab_mut();
             tab.git_sidebar_state = match tab.git_sidebar_state {
                 git_sidebar::GitSidebarState::Open => git_sidebar::GitSidebarState::Closed,
@@ -298,6 +327,10 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         Action::ScrollUp => {
             if ctx == FocusContext::Dialog {
                 dialog_router::handle_dialog_scroll(app, -1);
+            } else if ctx == FocusContext::AmieList {
+                if let Some(state) = app.active_tab_mut().amie.as_mut() {
+                    state.move_selection(-1);
+                }
             } else {
                 let tab = app.active_tab_mut();
                 tab.scroll_offset = tab.scroll_offset.saturating_add(1);
@@ -306,6 +339,10 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         Action::ScrollDown => {
             if ctx == FocusContext::Dialog {
                 dialog_router::handle_dialog_scroll(app, 1);
+            } else if ctx == FocusContext::AmieList {
+                if let Some(state) = app.active_tab_mut().amie.as_mut() {
+                    state.move_selection(1);
+                }
             } else {
                 let tab = app.active_tab_mut();
                 tab.scroll_offset = tab.scroll_offset.saturating_sub(1);
@@ -492,6 +529,73 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
 
+        // ── amie list actions (WI 0102) ───────────────────────────────
+        // Each either opens a dialog or dispatches through `spawn_command`
+        // into Layer 2. None calls a gateway method directly — the keys are a
+        // shortcut over the same Layer-2 path the command box uses, never a
+        // second path.
+        Action::AmieShowDetail => {
+            let detail = app.active_tab().amie.as_ref().and_then(|state| {
+                let condition = state.selected_condition()?;
+                let runs = state
+                    .snapshot
+                    .lock()
+                    .ok()
+                    .map(|snap| snap.runs.clone())
+                    .unwrap_or_default();
+                Some(dialogs::AmieDetailState {
+                    name: condition.name.clone(),
+                    condition,
+                    runs,
+                    scroll: 0,
+                })
+            });
+            if let Some(detail) = detail {
+                app.active_dialog = Some(Dialog::AmieConditionDetail(detail));
+            }
+        }
+        Action::AmieAttach => {
+            let name = app
+                .active_tab()
+                .amie
+                .as_ref()
+                .and_then(|state| state.selected_name());
+            if let Some(name) = name {
+                crate::frontend::tui::amie_attach::start_amie_attach(app, &name);
+            }
+        }
+        Action::AmieNew => {
+            let mut flags = std::collections::BTreeMap::new();
+            flags.insert(
+                "interview".to_string(),
+                crate::command::dispatch::parsed_input::FlagValue::Bool(true),
+            );
+            app.spawn_command(
+                "amie add --interview",
+                crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
+                    path: vec!["amie".into(), "add".into()],
+                    flags,
+                    arguments: Default::default(),
+                },
+            );
+        }
+        Action::AmiePause => {
+            amie_dispatch_by_name(app, "pause");
+        }
+        Action::AmieResume => {
+            amie_dispatch_by_name(app, "resume");
+        }
+        Action::AmieDelete => {
+            let name = app
+                .active_tab()
+                .amie
+                .as_ref()
+                .and_then(|state| state.selected_name());
+            if let Some(name) = name {
+                app.active_dialog = Some(Dialog::AmieRemoveConfirm { name });
+            }
+        }
+
         // ── PTY passthrough ───────────────────────────────────────────
         Action::ForwardToPty(key_event) => {
             forward_key_to_pty(app, key_event);
@@ -655,6 +759,35 @@ fn handle_command_submit(app: &mut App) {
             app.input_error = Some(command_box::format_parse_error(&err));
         }
     }
+}
+
+// ─── amie list helpers (WI 0102) ─────────────────────────────────────────────
+
+/// Dispatch an `amie <subcommand> <name>` action (pause/resume) for the
+/// selected condition through the ordinary Layer-2 path. No-op when the list
+/// is empty.
+fn amie_dispatch_by_name(app: &mut App, subcommand: &str) {
+    let name = app
+        .active_tab()
+        .amie
+        .as_ref()
+        .and_then(|state| state.selected_name());
+    let Some(name) = name else {
+        return;
+    };
+    let mut arguments = std::collections::BTreeMap::new();
+    arguments.insert(
+        "name".to_string(),
+        crate::command::dispatch::parsed_input::ArgValue::Single(name.clone()),
+    );
+    app.spawn_command(
+        &format!("amie {subcommand} {name}"),
+        crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
+            path: vec!["amie".into(), subcommand.into()],
+            flags: Default::default(),
+            arguments,
+        },
+    );
 }
 
 // ─── WorkflowControlBoard special handler ────────────────────────────────────

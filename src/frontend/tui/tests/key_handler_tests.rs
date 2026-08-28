@@ -719,3 +719,401 @@ fn esc_on_parallel_yolo_modal_cancels_the_focused_slots_flag_only() {
         "the tab-level (sequential-path) flag is unrelated here"
     );
 }
+
+// ─── amie tab key handling (WI 0102) ──────────────────────────────────────
+
+/// Push the singleton amie tab (bypassing the daemon-backed
+/// `open_or_focus_amie_tab` path — these tests only need `is_amie` state, not
+/// a live gateway), focus it, and return its index.
+fn push_amie_tab(app: &mut App) -> usize {
+    let tab = Tab::new_amie(make_session());
+    app.tabs.push(tab);
+    let idx = app.tabs.len() - 1;
+    app.active_tab = idx;
+    app.focus = Focus::ExecutionWindow;
+    idx
+}
+
+fn fake_condition(name: &str) -> crate::data::fs::condition_store::Condition {
+    use crate::data::fs::condition_store::{ConditionStatus, MountScope};
+    let now = chrono::Utc::now();
+    crate::data::fs::condition_store::Condition {
+        id: name.to_string(),
+        name: name.to_string(),
+        description: "test condition".into(),
+        repo_scope: std::path::PathBuf::from("/tmp"),
+        mount_scope: MountScope::GitRoot,
+        interval_secs: 300,
+        status: ConditionStatus::Active,
+        agent: None,
+        model: None,
+        backoff_until: None,
+        created_at: now,
+        updated_at: now,
+        last_run_at: None,
+    }
+}
+
+/// Populate the active (amie) tab's snapshot with fake conditions and select
+/// the first one, so the selection-dependent actions (`a`/`Enter`/`p`/`r`/`d`)
+/// have something to act on.
+fn set_amie_conditions(app: &mut App, names: &[&str]) {
+    let state = app.active_tab().amie.as_ref().expect("active tab is amie");
+    let mut snap = state.snapshot.lock().unwrap();
+    snap.conditions = names.iter().map(|n| fake_condition(n)).collect();
+    snap.loaded = true;
+}
+
+/// An `App` whose `Engines` report no container runtime, so any code path
+/// that would otherwise touch the real amie daemon (`AmieSupervisor`,
+/// `provision_key`'s key-hash write) instead takes the sandbox-refusal
+/// fast-path deterministically, with no filesystem or process side effects —
+/// mirroring `tests/amie_sandbox_refusal.rs`'s `FakeSandboxRuntime` approach.
+fn make_app_no_container_runtime() -> App {
+    let rt = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
+    let catalogue = CommandCatalogue::get();
+    let mut engines = make_engines();
+    engines.container_runtime = None;
+    let session_manager = Arc::new(RwLock::new(SessionManager::in_memory()));
+    let tab = Tab::new(make_session());
+    App::new(catalogue, engines, session_manager, tab, rt.handle().clone())
+}
+
+/// An app with a second ordinary tab plus the amie tab active — enough tabs
+/// for Ctrl-A/Ctrl-D navigation away from the amie tab to be observable.
+fn amie_list_app() -> App {
+    let mut app = make_app();
+    app.add_tab(make_session());
+    push_amie_tab(&mut app);
+    app
+}
+
+#[test]
+fn ctrl_t_new_tab_dialog_shows_press_ctrl_a_hint() {
+    let mut app = make_app();
+    press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    match &app.active_dialog {
+        Some(Dialog::TextInput { prompt, .. }) => {
+            assert!(
+                prompt.contains("Press Ctrl-A to open amie"),
+                "New Tab prompt must hint at amie: {prompt:?}"
+            );
+        }
+        _ => panic!("Ctrl-T must open the New Tab TextInput dialog"),
+    }
+}
+
+#[test]
+fn ctrl_a_in_new_tab_dialog_focuses_existing_amie_tab_and_closes_dialog() {
+    let mut app = make_app();
+    let amie_idx = push_amie_tab(&mut app);
+    app.active_tab = 0; // back on the normal tab
+    press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
+    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert!(
+        app.active_dialog.is_none(),
+        "Ctrl-A in the New Tab dialog must close it"
+    );
+    assert_eq!(app.active_tab, amie_idx, "Ctrl-A must activate the amie tab");
+}
+
+// The load-bearing test for the Ctrl-A binding (implementation-contract.md
+// §2.8): the New Tab dialog is the ONLY thing that reroutes Ctrl-A to amie.
+// Both directions are asserted with three tabs open, so "previous tab" (tab
+// 0) and "the amie tab" (tab 2) are distinct and the two behaviors can't be
+// confused with one another.
+#[test]
+fn ctrl_a_without_dialog_switches_to_previous_tab_and_does_not_open_amie() {
+    let mut app = make_app(); // tab 0
+    app.add_tab(make_session()); // tab 1
+    let amie_idx = push_amie_tab(&mut app); // tab 2 == amie, active_tab == amie_idx
+    app.active_tab = 1; // sit on the middle (normal) tab
+    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.active_tab, 0,
+        "Ctrl-A with no dialog open must switch to the previous tab"
+    );
+    assert_ne!(app.active_tab, amie_idx);
+    assert!(
+        app.active_dialog.is_none(),
+        "Ctrl-A with no dialog open must not open any dialog"
+    );
+}
+
+#[test]
+fn ctrl_a_with_new_tab_dialog_open_opens_amie_and_does_not_switch_tabs() {
+    let mut app = make_app(); // tab 0
+    app.add_tab(make_session()); // tab 1
+    let amie_idx = push_amie_tab(&mut app); // tab 2 == amie
+    app.active_tab = 1; // sit on the middle tab: "previous" (0) != amie (2)
+    press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
+    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.active_tab, amie_idx,
+        "Ctrl-A inside the New Tab dialog must open the amie tab"
+    );
+    assert_ne!(
+        app.active_tab, 0,
+        "must not have fallen through to previous-tab navigation"
+    );
+    assert!(
+        app.active_dialog.is_none(),
+        "the New Tab dialog must be closed"
+    );
+}
+
+// ── the six amie list keys fire only in FocusContext::AmieList ────────────
+
+#[test]
+fn amie_list_enter_opens_condition_detail() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["cond-a"]);
+    press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    match &app.active_dialog {
+        Some(Dialog::AmieConditionDetail(state)) => assert_eq!(state.name, "cond-a"),
+        _ => panic!("Enter in the amie list must open the condition detail modal"),
+    }
+}
+
+#[test]
+fn amie_list_enter_is_noop_when_list_is_empty() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        app.active_dialog.is_none(),
+        "Enter on an empty amie list must not open a dialog"
+    );
+}
+
+#[test]
+fn amie_list_a_routes_to_start_amie_attach() {
+    // Force the sandbox-refusal fast-path (see `make_app_no_container_runtime`)
+    // so this stays deterministic and side-effect-free while still proving
+    // `a` reaches `start_amie_attach` rather than doing nothing.
+    let mut app = make_app_no_container_runtime();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["cond-a"]);
+    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+    assert!(
+        app.status_bar.text.contains("amie requires a container runtime"),
+        "'a' in the amie list must route to start_amie_attach: {:?}",
+        app.status_bar.text
+    );
+}
+
+#[test]
+fn amie_list_n_dispatches_amie_add_interview() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    press_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+    assert!(
+        app.active_tab().command_result_rx.is_some(),
+        "'n' in the amie list must dispatch `amie add --interview`"
+    );
+}
+
+#[test]
+fn amie_list_p_dispatches_pause() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["cond-a"]);
+    press_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+    assert!(
+        app.active_tab().command_result_rx.is_some(),
+        "'p' in the amie list must dispatch `amie pause`"
+    );
+}
+
+#[test]
+fn amie_list_r_dispatches_resume() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["cond-a"]);
+    press_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert!(
+        app.active_tab().command_result_rx.is_some(),
+        "'r' in the amie list must dispatch `amie resume`"
+    );
+}
+
+#[test]
+fn amie_list_p_and_r_are_noop_when_list_is_empty() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    press_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+    assert!(app.active_tab().command_result_rx.is_none());
+    press_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert!(app.active_tab().command_result_rx.is_none());
+}
+
+#[test]
+fn amie_list_d_opens_remove_confirm_and_only_dispatches_on_y() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["cond-a"]);
+    press_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+    match &app.active_dialog {
+        Some(Dialog::AmieRemoveConfirm { name }) => assert_eq!(name, "cond-a"),
+        _ => panic!("'d' must open Dialog::AmieRemoveConfirm"),
+    }
+    assert!(
+        app.active_tab().command_result_rx.is_none(),
+        "opening the confirmation must not itself dispatch a removal"
+    );
+    press_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    assert!(
+        app.active_dialog.is_none(),
+        "'y' must dismiss the confirmation"
+    );
+    assert!(
+        app.active_tab().command_result_rx.is_some(),
+        "'y' must dispatch `amie remove cond-a`"
+    );
+}
+
+#[test]
+fn amie_list_d_then_n_dismisses_without_dispatching() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["cond-a"]);
+    press_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+    press_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
+    assert!(app.active_dialog.is_none());
+    assert!(
+        app.active_tab().command_result_rx.is_none(),
+        "'n' must dismiss the confirmation without dispatching a removal"
+    );
+}
+
+#[test]
+fn amie_list_keys_are_inert_on_a_normal_tab() {
+    let mut app = make_app();
+    app.focus = Focus::ExecutionWindow;
+    for key in [
+        KeyCode::Enter,
+        KeyCode::Char('a'),
+        KeyCode::Char('n'),
+        KeyCode::Char('p'),
+        KeyCode::Char('r'),
+        KeyCode::Char('d'),
+    ] {
+        press_key(&mut app, key, KeyModifiers::NONE);
+    }
+    assert!(
+        app.active_dialog.is_none(),
+        "amie list keys must not fire outside FocusContext::AmieList"
+    );
+    assert_eq!(app.tabs.len(), 1, "no tab must be added or removed");
+}
+
+#[test]
+fn amie_list_arrows_move_selection_not_scroll_offset() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["a", "b", "c"]);
+    let before_scroll = app.active_tab().scroll_offset;
+    press_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.active_tab().amie.as_ref().unwrap().selected, 1);
+    assert_eq!(
+        app.active_tab().scroll_offset,
+        before_scroll,
+        "scroll_offset must be untouched while the amie list holds focus"
+    );
+    press_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    assert_eq!(app.active_tab().amie.as_ref().unwrap().selected, 0);
+}
+
+#[test]
+fn amie_list_context_not_selected_while_attach_owns_the_tabs_slots() {
+    let mut app = make_app();
+    push_amie_tab(&mut app);
+    set_amie_conditions(&mut app, &["a", "b"]);
+    app.active_tab_mut()
+        .start_container("claude".into(), "awman-abc".into(), 80, 24);
+    // With container_slots non-empty, arrow keys must fall through to the
+    // ordinary ExecutionWindow/ContainerMaximized handling instead of moving
+    // the amie selection.
+    press_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(
+        app.active_tab().amie.as_ref().unwrap().selected,
+        0,
+        "FocusContext::AmieList must not apply while an attach session owns the tab's slots"
+    );
+}
+
+// ── global Ctrl shortcuts keep their meaning while the amie list has focus ─
+// (implementation-contract.md §2.9: "the single most important regression
+// risk of adding a context")
+
+#[test]
+fn ctrl_t_still_opens_new_tab_dialog_from_amie_list() {
+    let mut app = amie_list_app();
+    press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
+}
+
+#[test]
+fn ctrl_a_still_switches_tabs_from_amie_list() {
+    let mut app = amie_list_app();
+    let amie_idx = app.active_tab;
+    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    assert_ne!(
+        app.active_tab, amie_idx,
+        "Ctrl-A must still switch tabs when the amie list holds focus"
+    );
+}
+
+#[test]
+fn ctrl_d_still_switches_tabs_from_amie_list() {
+    let mut app = amie_list_app();
+    let amie_idx = app.active_tab;
+    press_key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+    assert_ne!(
+        app.active_tab, amie_idx,
+        "Ctrl-D must still switch tabs when the amie list holds focus"
+    );
+}
+
+#[test]
+fn ctrl_m_still_cycles_container_window_from_amie_list() {
+    let mut app = amie_list_app();
+    let before = app.active_tab().container_window_state;
+    press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+    assert_ne!(
+        app.active_tab().container_window_state,
+        before,
+        "Ctrl-M must still cycle the container window from the amie list"
+    );
+}
+
+#[test]
+fn ctrl_w_from_amie_list_is_silent_noop_without_a_workflow() {
+    let mut app = amie_list_app();
+    press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    assert!(
+        app.active_dialog.is_none(),
+        "Ctrl-W with no active workflow must stay a silent no-op from the amie list"
+    );
+}
+
+#[test]
+fn ctrl_g_is_globally_intercepted_but_a_noop_on_the_amie_tab() {
+    let mut app = amie_list_app();
+    press_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.active_tab().git_sidebar_state,
+        crate::frontend::tui::git_sidebar::GitSidebarState::Closed,
+        "Ctrl-G must never open the git sidebar for the amie tab"
+    );
+}
+
+#[test]
+fn ctrl_c_still_opens_close_tab_confirm_from_amie_list() {
+    let mut app = amie_list_app();
+    press_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(matches!(app.active_dialog, Some(Dialog::CloseTabConfirm)));
+}

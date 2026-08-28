@@ -13,6 +13,7 @@
 
 pub mod amie;
 pub mod api;
+pub mod attach;
 pub mod cli;
 pub mod tui;
 

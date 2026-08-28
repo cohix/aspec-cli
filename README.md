@@ -314,6 +314,7 @@ All commands work in both TUI mode (without the `awman` prefix) and CLI mode. AP
 - [Dynamic Workflows](docs/13-dynamic-workflows.md)
 - [Cleaning Up](docs/14-cleaning-up.md)
 - [Parallel Workflows](docs/15-parallel-workflows.md)
+- [amie](docs/16-amie.md)
 - [Architecture](docs/architecture.md)
 
 ---

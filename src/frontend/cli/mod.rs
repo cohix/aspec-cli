@@ -16,10 +16,13 @@ use std::sync::Arc;
 use clap::ArgMatches;
 use tokio::sync::RwLock;
 
+use crate::command::commands::amie::daemon::AmieSupervisor;
+use crate::command::commands::amie::gateway::ConditionGateway;
 use crate::command::commands::Command;
 use crate::command::dispatch::{BuiltCommand, Dispatch, Engines};
 use crate::command::error::CommandError;
 use crate::command::CommandOutcome;
+use crate::data::config::env::Env;
 use crate::data::session::Session;
 
 mod command_frontend;
@@ -62,14 +65,26 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
         return ExitCode::from(2);
     }
     let path_strs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+    // ── amie ────────────────────────────────────────────────────────────────
+    // The interactive bare form is routed to the TUI by main.rs. Piped and
+    // explicitly non-interactive invocations report the daemon summary here.
+    if path_strs == ["amie"] {
+        return per_command::amie::run_bare(&matches, &ctx.engines).await;
+    }
+    // Attach is intentionally not a Layer-2 command: it opens a local runtime
+    // session against an existing agent, just like the exec-workflow carve-out.
+    if path_strs == ["amie", "attach"] {
+        return per_command::amie_attach::run_attach(&matches, &ctx).await;
+    }
     if path_strs == ["exec", "workflow"] {
         let build_frontend = CliFrontend::new(matches.clone());
+        let json = build_frontend.is_json_mode();
         let dispatch = Dispatch::new(build_frontend, ctx.session.clone(), ctx.engines.clone());
         return match dispatch.build_command(&path_strs) {
             Ok(BuiltCommand::ExecWorkflow(cmd)) => {
                 let frontend = CliParallelFrontend::new(CliFrontend::new(matches));
                 match cmd.run_with_frontend(Box::new(frontend)).await {
-                    Ok(outcome) => render_outcome(&CommandOutcome::ExecWorkflow(outcome)),
+                    Ok(outcome) => render_outcome(&CommandOutcome::ExecWorkflow(outcome), json),
                     Err(err) => render_error(&err),
                 }
             }
@@ -78,12 +93,75 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
         };
     }
 
+    // Under a non-container runtime, every amie entry point must fail fast with
+    // the shared sandbox refusal — the same text attach and Ctrl-A already use
+    // — instead of provisioning a key and hanging ~10s on a daemon child that
+    // will refuse to start (edge-case #1). attach ran its own check above.
+    if matches!(
+        path_strs.as_slice(),
+        [
+            "amie",
+            "add" | "list" | "show" | "remove" | "pause" | "resume" | "status"
+        ]
+    ) {
+        if let Err(error) =
+            crate::command::commands::amie::runtime_guard::require_container_tier(&ctx.engines)
+        {
+            return per_command::amie::render_failure(
+                &error,
+                per_command::amie::amie_flag(&matches, "json"),
+            );
+        }
+    }
+
     let frontend = CliFrontend::new(matches);
-    let dispatch = Dispatch::new(frontend, ctx.session, ctx.engines);
+    let json = frontend.is_json_mode();
+    let mut dispatch = Dispatch::new(frontend, ctx.session, ctx.engines);
+    if matches!(
+        path_strs.as_slice(),
+        [
+            "amie",
+            "add" | "list" | "show" | "remove" | "pause" | "resume"
+        ]
+    ) {
+        let supervisor = match AmieSupervisor::from_env(&Env::from_process()) {
+            Ok(supervisor) => supervisor,
+            Err(error) => return per_command::amie::render_failure(&error, json),
+        };
+        let gateway = match supervisor.ensure_running().await {
+            Ok(gateway) => gateway,
+            Err(error) => return per_command::amie::render_failure(&error, json),
+        };
+        dispatch = dispatch.with_amie_gateway(Arc::new(gateway) as Arc<dyn ConditionGateway>);
+    } else if path_strs == ["amie", "status"] {
+        let supervisor = match AmieSupervisor::from_env(&Env::from_process()) {
+            Ok(supervisor) => supervisor,
+            Err(error) => return per_command::amie::render_failure(&error, json),
+        };
+        let gateway = match supervisor.gateway_from_meta() {
+            Ok(gateway) => gateway,
+            Err(error) => return per_command::amie::render_failure(&error, json),
+        };
+        if let Some(gateway) = gateway {
+            dispatch = dispatch.with_amie_gateway(Arc::new(gateway) as Arc<dyn ConditionGateway>);
+        }
+    }
     match dispatch.run_command(&path_strs).await {
-        Ok(outcome) => render_outcome(&outcome),
+        Ok(outcome) => render_outcome(&outcome, json),
+        Err(err) if path_strs.first() == Some(&"amie") => {
+            per_command::amie::render_failure(&err, json)
+        }
         Err(err) => render_error(&err),
     }
+}
+
+/// True exactly for the TTY form of bare `awman amie`, which main.rs opens in
+/// the TUI. JSON implies non-interactive and therefore never takes this path.
+pub fn is_bare_amie_tui_invocation(matches: &ArgMatches) -> bool {
+    command_path_from_matches(matches) == ["amie"]
+        && output::stdin_is_tty()
+        && !per_command::amie::amie_flag(matches, "non-interactive")
+        && !per_command::amie::amie_flag(matches, "json")
 }
 
 /// Format a successful [`CommandOutcome`] to user-facing stdout text.
@@ -94,8 +172,8 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
 /// for every non-Empty variant, which surfaced raw JSON as the primary
 /// user output for `chat`, `status`, `config`, etc. Per-variant rendering
 /// now lives in [`per_command::render`].
-pub(crate) fn format_outcome(outcome: &CommandOutcome) -> Option<String> {
-    per_command::render::render(outcome)
+pub(crate) fn format_outcome(outcome: &CommandOutcome, json: bool) -> Option<String> {
+    per_command::render::render(outcome, json)
 }
 
 /// Format a [`CommandError`] to the user-visible stderr string.
@@ -322,8 +400,8 @@ pub(crate) fn format_error(err: &CommandError) -> String {
 
 /// Render a successful [`CommandOutcome`] to stdout and return the
 /// process exit code.
-fn render_outcome(outcome: &CommandOutcome) -> ExitCode {
-    if let Some(s) = format_outcome(outcome) {
+fn render_outcome(outcome: &CommandOutcome, json: bool) -> ExitCode {
+    if let Some(s) = format_outcome(outcome, json) {
         println!("{s}");
     }
     ExitCode::from(0)
@@ -505,14 +583,14 @@ mod tests {
     #[test]
     fn render_outcome_empty_is_success() {
         let outcome = crate::command::CommandOutcome::Empty;
-        let _code = render_outcome(&outcome);
+        let _code = render_outcome(&outcome, false);
     }
 
     // ─── format_outcome — snapshot-style per-variant assertions ──────────────
 
     #[test]
     fn format_outcome_empty_returns_none() {
-        assert!(format_outcome(&crate::command::CommandOutcome::Empty).is_none());
+        assert!(format_outcome(&crate::command::CommandOutcome::Empty, false).is_none());
     }
 
     #[test]
@@ -524,7 +602,7 @@ mod tests {
             watched: false,
             tip: "test tip".into(),
         });
-        let s = format_outcome(&outcome).expect("status must render text");
+        let s = format_outcome(&outcome, false).expect("status must render text");
         assert!(s.contains("AWMAN STATUS DASHBOARD"));
         assert!(!s.contains('{'), "status must not be rendered as JSON");
     }
@@ -537,7 +615,7 @@ mod tests {
             agent: Some("claude".into()),
             exit_code: Some(0),
         });
-        assert!(format_outcome(&outcome).is_none());
+        assert!(format_outcome(&outcome, false).is_none());
     }
 
     // ─── format_error — per-variant rendering assertions ─────────────────────

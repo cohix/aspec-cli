@@ -67,6 +67,11 @@ pub struct App {
     pub needs_redraw: bool,
     pub command_dialog_active: bool,
     pub runtime_handle: tokio::runtime::Handle,
+    /// Gateway for the singleton amie tab, obtained from
+    /// `AmieSupervisor::ensure_running()` when the tab is opened. Injected into
+    /// `Dispatch` for `amie` in-tab actions so they reach the daemon. `None`
+    /// until the amie tab exists.
+    pub amie_gateway: Option<Arc<dyn crate::command::commands::amie::gateway::ConditionGateway>>,
     /// Receiver for asynchronous container stats results. The middle element
     /// is the step name of the slot the sample was polled for (empty for the
     /// single/backbone slot of a plain containerized command).
@@ -114,6 +119,7 @@ impl App {
             needs_redraw: true,
             command_dialog_active: false,
             runtime_handle,
+            amie_gateway: None,
             stats_rx: Some(stats_rx),
             stats_tx,
             last_stats_poll: std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -155,9 +161,142 @@ impl App {
         }
     }
 
+    /// Focus the existing amie tab, or create the singleton one.
+    ///
+    /// On failure nothing is created: the error text — which already names
+    /// `awman api` (daemon conflict) or the sandbox runtime — is surfaced
+    /// verbatim in the status bar, never a generic "could not connect".
+    /// Idempotent: a second call focuses the tab created by the first.
+    pub fn open_or_focus_amie_tab(&mut self) {
+        if let Some(idx) = self.tabs.iter().position(|t| t.is_amie) {
+            self.active_tab = idx;
+            self.needs_redraw = true;
+            return;
+        }
+        match Self::build_amie_tab(&self.engines, &self.runtime_handle) {
+            Ok((tab, gateway)) => {
+                self.amie_gateway = Some(gateway);
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+                self.needs_redraw = true;
+            }
+            Err(message) => {
+                // The error text already names `awman api` (daemon conflict) or
+                // the sandbox runtime; surface it verbatim and open nothing.
+                self.status_bar.text = message;
+            }
+        }
+    }
+
+    /// Build the singleton amie tab: ensure the daemon is running, obtain a
+    /// gateway, construct the synthetic-session tab, and start its poller.
+    /// Shared by [`App::open_or_focus_amie_tab`] and `tui::run`'s
+    /// `InitialTab::Amie` path. On failure returns the specific error text
+    /// (naming `awman api` or the sandbox runtime), never a generic message.
+    pub(crate) fn build_amie_tab(
+        engines: &crate::command::dispatch::Engines,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> Result<
+        (
+            Tab,
+            Arc<dyn crate::command::commands::amie::gateway::ConditionGateway>,
+        ),
+        String,
+    > {
+        use crate::command::commands::amie::daemon::AmieSupervisor;
+        use crate::command::commands::amie::gateway::ConditionGateway;
+        use crate::command::commands::amie::runtime_guard::require_container_tier;
+        use crate::data::config::env::Env;
+
+        // A sandbox-class runtime cannot back amie: report the runtime error,
+        // never a generic connection failure.
+        require_container_tier(engines).map_err(|e| e.to_string())?;
+
+        let env = Env::from_process();
+        let supervisor = AmieSupervisor::from_env(&env).map_err(|e| e.to_string())?;
+
+        // `ensure_running` is async, but the caller may be on a tokio worker
+        // thread where `Handle::block_on` would panic. Drive it on the runtime
+        // and block on the result channel instead
+        // (see /awman/context/workflow/deviations.md, D-tui-3).
+        let (tx, rx) = std::sync::mpsc::channel();
+        runtime_handle.spawn(async move {
+            let _ = tx.send(supervisor.ensure_running().await);
+        });
+        let gateway = match rx.recv() {
+            Ok(Ok(gateway)) => gateway,
+            Ok(Err(error)) => return Err(error.to_string()),
+            Err(_) => return Err("amie daemon startup was interrupted".to_string()),
+        };
+
+        let session = Self::amie_synthetic_session()
+            .map_err(|error| format!("failed to open amie tab: {error}"))?;
+
+        let gateway: Arc<dyn ConditionGateway> = Arc::new(gateway);
+
+        let mut tab = Tab::new_amie(session);
+        {
+            // Ensure a runtime context so the poller's `tokio::spawn` works even
+            // when this runs off a runtime thread.
+            let _guard = runtime_handle.enter();
+            let (poller, cancel) = {
+                let state = tab
+                    .amie
+                    .as_ref()
+                    .expect("new_amie always installs amie state");
+                (
+                    crate::frontend::tui::amie_poll::AmieConditionPoller::new(
+                        gateway.clone(),
+                        state,
+                    ),
+                    state.cancel.clone(),
+                )
+            };
+            let handle = poller.start(cancel);
+            tab.amie
+                .as_mut()
+                .expect("new_amie always installs amie state")
+                .set_poll_handle(handle);
+        }
+        Ok((tab, gateway))
+    }
+
+    /// Build the amie tab's synthetic session, rooted at the amie storage root.
+    /// It exists solely to satisfy the `Tab` API; nothing rendered in the amie
+    /// tab derives from it.
+    fn amie_synthetic_session() -> Result<Session, crate::data::error::DataError> {
+        use crate::data::config::env::Env;
+        use crate::data::fs::amie_paths::AmiePaths;
+        use crate::data::session::SessionOpenOptions;
+
+        let root = AmiePaths::from_process_env()?.root().to_path_buf();
+        std::fs::create_dir_all(&root).ok();
+        Session::open_at_git_root(
+            root.clone(),
+            root,
+            SessionOpenOptions {
+                env: Some(Env::from_process()),
+                ..Default::default()
+            },
+        )
+    }
+
     /// Spawn a parsed command as an async tokio task, wiring up all channels
     /// between the event loop and the command thread.
     pub fn spawn_command(&mut self, _command_text: &str, parsed: ParsedCommandBoxInput) {
+        // WI 0102: `amie attach` has no Layer-2 command; intercept it before
+        // the ordinary Dispatch spawn, mirroring `cli::run`'s carve-out.
+        if parsed.path.as_slice() == ["amie", "attach"] {
+            let name = match parsed.arguments.get("name") {
+                Some(crate::command::dispatch::parsed_input::ArgValue::Single(name)) => {
+                    name.clone()
+                }
+                _ => String::new(),
+            };
+            crate::frontend::tui::amie_attach::start_amie_attach(self, &name);
+            return;
+        }
+
         // Capture the runtime class before borrowing the tab mutably: a
         // sandbox-class runtime (e.g. docker-sbx-experimental) labels the
         // overlay "(sandboxed)" rather than "(containerized)".
@@ -355,9 +494,19 @@ impl App {
         let session = Arc::new(RwLock::new(tab_session));
         let engines = self.engines.clone();
         let path_owned: Vec<String> = parsed.path.clone();
+        // WI 0102: in-tab `amie` actions reach the daemon through the same
+        // gateway the CLI subcommands use, injected into Dispatch. Without it
+        // they fail with 0101's "amie conditions are served by the amie daemon"
+        // error.
+        let amie_gateway = self.amie_gateway.clone();
 
         self.runtime_handle.spawn(async move {
-            let dispatch = Dispatch::new(frontend, session, engines);
+            let mut dispatch = Dispatch::new(frontend, session, engines);
+            if path_owned.first().map(String::as_str) == Some("amie") {
+                if let Some(gateway) = amie_gateway {
+                    dispatch = dispatch.with_amie_gateway(gateway);
+                }
+            }
             let path_refs: Vec<&str> = path_owned.iter().map(|s| s.as_str()).collect();
             let result = dispatch.run_command(&path_refs).await;
             let _ = result_tx.send(result);
@@ -376,7 +525,19 @@ impl App {
     /// poll for stats results, and recompute the per-tab stuck flag.
     pub fn tick_all_tabs(&mut self) {
         let active = self.active_tab;
-        for tab in self.tabs.iter_mut() {
+        for (idx, tab) in self.tabs.iter_mut().enumerate() {
+            // WI 0102: drive the amie tab's poll loop — it fetches only while
+            // focused — and publish the selected condition name for the poller
+            // so it never reads UI state directly.
+            if let Some(state) = tab.amie.as_ref() {
+                state
+                    .focused
+                    .store(idx == active, std::sync::atomic::Ordering::Relaxed);
+                if let Ok(mut selected) = state.poll_selected.lock() {
+                    *selected = state.selected_name();
+                }
+            }
+
             // Maintain container_slots before draining output (a Launched
             // event may carry the channels the drain reads) and before
             // aggregating stuck/yolo (drain_stuck_events reads slot flags).
@@ -625,6 +786,39 @@ impl App {
             }
         } else if matches!(self.active_dialog, Some(Dialog::WorkflowYoloCountdown(_))) {
             self.active_dialog = None;
+        }
+
+        // WI 0102: keep the amie condition-detail modal live from the active
+        // tab's snapshot, matching on the condition name it was opened for.
+        if matches!(self.active_dialog, Some(Dialog::AmieConditionDetail(_))) {
+            let snapshot = self.tabs[active]
+                .amie
+                .as_ref()
+                .and_then(|state| state.snapshot.lock().ok().map(|g| g.clone()));
+            if let (Some(Dialog::AmieConditionDetail(detail)), Some(snapshot)) =
+                (&mut self.active_dialog, snapshot)
+            {
+                if let Some(condition) = snapshot.conditions.iter().find(|c| c.name == detail.name)
+                {
+                    detail.condition = condition.clone();
+                }
+                detail.runs = snapshot.runs.clone();
+            }
+        }
+
+        // WI 0102: while an attach session owns the amie tab and the daemon is
+        // unreachable, surface the frozen-strip indicator (the attached
+        // container slots keep streaming from their direct runtime connections).
+        if let Some(state) = self.tabs[active].amie.as_ref() {
+            if state.attached_condition.is_some()
+                && !state
+                    .daemon_reachable
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                self.status_bar.text =
+                    "amie daemon not reachable — strip frozen; attached containers still live"
+                        .to_string();
+            }
         }
     }
 

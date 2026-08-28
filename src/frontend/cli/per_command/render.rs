@@ -38,7 +38,7 @@ use crate::command::CommandOutcome;
 /// Format a [`CommandOutcome`] into the success-path stdout text. Returns
 /// `None` when no extra output is needed (engines that stream their progress
 /// to stderr already and produce no additional summary on stdout).
-pub fn render(outcome: &CommandOutcome) -> Option<String> {
+pub fn render(outcome: &CommandOutcome, json: bool) -> Option<String> {
     match outcome {
         CommandOutcome::Empty => None,
         CommandOutcome::Status(o) => Some(render_status(o)),
@@ -55,10 +55,7 @@ pub fn render(outcome: &CommandOutcome) -> Option<String> {
         CommandOutcome::Auth(o) => render_auth(o),
         CommandOutcome::Download(o) => render_download(o),
         CommandOutcome::Clean(o) => render_clean(o),
-        CommandOutcome::Amie(o) => Some(
-            serde_json::to_string_pretty(o)
-                .unwrap_or_else(|e| format!("failed to serialize amie outcome: {e}")),
-        ),
+        CommandOutcome::Amie(o) => super::amie::render_amie(o, json),
     }
 }
 
@@ -123,7 +120,7 @@ fn render_container_row(c: &StatusContainerRow) -> Vec<String> {
     ]
 }
 
-fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+pub(crate) fn format_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let ncols = headers.len();
     let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in rows {
@@ -459,7 +456,7 @@ mod tests {
 
     #[test]
     fn render_empty_returns_none() {
-        assert!(render(&CommandOutcome::Empty).is_none());
+        assert!(render(&CommandOutcome::Empty, false).is_none());
     }
 
     #[test]

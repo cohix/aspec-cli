@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::command::commands::amie::commands::{AmieCommand, AmieCommandFrontend, AmieSubcommand};
+use crate::command::commands::amie::commands::{
+    AmieAddRequest, AmieCommand, AmieCommandFrontend, AmieSubcommand,
+};
 use crate::command::commands::amie::daemon::{
     AmieLogsFlags, AmieStartFlags, AmieStatusFlags, AmieStopFlags,
 };
@@ -598,11 +600,18 @@ impl<F: CommandFrontend> Dispatch<F> {
                 None,
                 self.engines.clone(),
             ))),
-            ["amie", "status"] => Ok(BuiltCommand::Amie(AmieCommand::new(
-                AmieSubcommand::Status(AmieStatusFlags),
-                None,
-                self.engines.clone(),
-            ))),
+            ["amie", "status"] => {
+                // Carry the injected remote gateway so Layer 2 can overlay live
+                // scheduler counts onto the pidfile-derived liveness (§9.4).
+                let gateway = self.amie_gateway.clone().map(|gateway| {
+                    Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
+                });
+                Ok(BuiltCommand::Amie(AmieCommand::new(
+                    AmieSubcommand::Status(AmieStatusFlags),
+                    gateway,
+                    self.engines.clone(),
+                )))
+            }
             ["amie", "logs"] => Ok(BuiltCommand::Amie(AmieCommand::new(
                 AmieSubcommand::Logs(AmieLogsFlags {
                     follow: self
@@ -614,48 +623,66 @@ impl<F: CommandFrontend> Dispatch<F> {
                 self.engines.clone(),
             ))),
             ["amie", "add"] => {
-                let name = self
-                    .frontend
-                    .flag_string(&canonical_refs, "name")?
-                    .ok_or_else(|| CommandError::missing_required_flag(&canonical_refs, "name"))?;
-                let description = self
-                    .frontend
-                    .flag_string(&canonical_refs, "description")?
-                    .ok_or_else(|| {
-                        CommandError::missing_required_flag(&canonical_refs, "description")
-                    })?;
-                let interval = self
-                    .frontend
-                    .flag_string(&canonical_refs, "interval")?
-                    .unwrap_or_else(|| "5m".into());
-                let interval_secs = parse_amie_interval(&canonical_refs, &interval)?;
-                let repo_scope = self
-                    .frontend
-                    .flag_path(&canonical_refs, "repo")?
-                    .unwrap_or_else(|| session.working_dir().to_path_buf());
-                let mount_scope = match self
-                    .frontend
-                    .flag_enum(&canonical_refs, "mount-scope")?
-                    .as_deref()
-                    .unwrap_or("gitroot")
-                {
-                    "cwd" => MountScope::Cwd,
-                    "gitroot" => MountScope::GitRoot,
-                    _ => unreachable!("catalogue enum validation"),
-                };
                 let gateway = self.amie_gateway.clone().map(|gateway| {
                     Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
                 });
+                let interview = self
+                    .frontend
+                    .flag_bool(&canonical_refs, "interview")?
+                    .unwrap_or(false);
+                // Interview mode collects every field in Layer 2 through the
+                // frontend trait (BLOCKER-3, §9.3), so the frontend here only
+                // records the intent. Non-interview keeps the flag-driven
+                // behaviour: required name/description, defaulted rest.
+                let request = if interview {
+                    AmieAddRequest {
+                        interview: true,
+                        prefilled: None,
+                    }
+                } else {
+                    let name = self.frontend.flag_string(&canonical_refs, "name")?.ok_or_else(
+                        || CommandError::missing_required_flag(&canonical_refs, "name"),
+                    )?;
+                    let description = self
+                        .frontend
+                        .flag_string(&canonical_refs, "description")?
+                        .ok_or_else(|| {
+                            CommandError::missing_required_flag(&canonical_refs, "description")
+                        })?;
+                    let interval = self
+                        .frontend
+                        .flag_string(&canonical_refs, "interval")?
+                        .unwrap_or_else(|| "5m".into());
+                    let interval_secs = parse_amie_interval(&canonical_refs, &interval)?;
+                    let repo_scope = self
+                        .frontend
+                        .flag_path(&canonical_refs, "repo")?
+                        .unwrap_or_else(|| session.working_dir().to_path_buf());
+                    let mount_scope = match self
+                        .frontend
+                        .flag_enum(&canonical_refs, "mount-scope")?
+                        .as_deref()
+                        .unwrap_or("gitroot")
+                    {
+                        "cwd" => MountScope::Cwd,
+                        "gitroot" => MountScope::GitRoot,
+                        _ => unreachable!("catalogue enum validation"),
+                    };
+                    AmieAddRequest {
+                        interview: false,
+                        prefilled: Some(CreateCondition {
+                            name,
+                            description,
+                            repo_scope,
+                            mount_scope,
+                            interval_secs,
+                            agent: self.frontend.flag_string(&canonical_refs, "agent")?,
+                            model: self.frontend.flag_string(&canonical_refs, "model")?,
+                        }),
+                    }
+                };
                 Ok(BuiltCommand::Amie(AmieCommand::new(
-                    AmieSubcommand::Add(CreateCondition {
-                        name,
-                        description,
-                        repo_scope,
-                        mount_scope,
-                        interval_secs,
-                        agent: self.frontend.flag_string(&canonical_refs, "agent")?,
-                        model: self.frontend.flag_string(&canonical_refs, "model")?,
-                    }),
+                    AmieSubcommand::Add(request),
                     gateway,
                     self.engines.clone(),
                 )))
@@ -673,13 +700,18 @@ impl<F: CommandFrontend> Dispatch<F> {
                                 CommandError::missing_required_argument(&canonical_refs, "name")
                             })?,
                     ),
-                    "remove" => AmieSubcommand::Remove(
-                        self.frontend
+                    "remove" => AmieSubcommand::Remove {
+                        name: self
+                            .frontend
                             .argument(&canonical_refs, "name")?
                             .ok_or_else(|| {
                                 CommandError::missing_required_argument(&canonical_refs, "name")
                             })?,
-                    ),
+                        yes: self
+                            .frontend
+                            .flag_bool(&canonical_refs, "yes")?
+                            .unwrap_or(false),
+                    },
                     "pause" => AmieSubcommand::Pause(
                         self.frontend
                             .argument(&canonical_refs, "name")?
@@ -1016,7 +1048,7 @@ fn validate_conflicts<F: CommandFrontend>(
     Ok(())
 }
 
-fn parse_amie_interval(command: &[&str], raw: &str) -> Result<u64, CommandError> {
+pub(crate) fn parse_amie_interval(command: &[&str], raw: &str) -> Result<u64, CommandError> {
     let value = raw.trim();
     let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
         (number, 1)

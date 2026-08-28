@@ -78,6 +78,81 @@ impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFronte
     ) -> Result<(), CommandError> {
         crate::frontend::amie::serve(config).await
     }
+
+    fn ask_condition_name(&mut self) -> Result<String, CommandError> {
+        require_named_input("condition name (slug)?")
+    }
+
+    fn ask_condition_description(&mut self) -> Result<String, CommandError> {
+        require_named_input("condition description?")
+    }
+
+    fn ask_condition_interval(&mut self) -> Result<String, CommandError> {
+        // Blank keeps the documented default; a value is parsed & validated in
+        // Layer 1/2, never here.
+        match super::per_command::helpers::read_line("evaluation interval [5m]?") {
+            Some(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
+            Some(_) => Ok("5m".to_string()),
+            None => Err(CommandError::InteractiveInputUnavailable {
+                prompt: "evaluation interval".into(),
+            }),
+        }
+    }
+
+    fn ask_condition_repo(&mut self) -> Result<PathBuf, CommandError> {
+        match super::per_command::helpers::read_line("repository directory [current dir]?") {
+            Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
+            Some(_) => std::env::current_dir()
+                .map_err(|error| CommandError::Other(format!("cannot resolve current dir: {error}"))),
+            None => Err(CommandError::InteractiveInputUnavailable {
+                prompt: "repository directory".into(),
+            }),
+        }
+    }
+
+    fn ask_condition_agent(&mut self) -> Result<Option<String>, CommandError> {
+        match super::per_command::helpers::read_line("leader agent (optional, Enter to skip)?") {
+            Some(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    fn ask_condition_model(&mut self) -> Result<Option<String>, CommandError> {
+        match super::per_command::helpers::read_line("leader model (optional, Enter to skip)?") {
+            Some(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    fn ask_condition_mount_scope(
+        &mut self,
+    ) -> Result<crate::data::fs::condition_store::MountScope, CommandError> {
+        use crate::data::fs::condition_store::MountScope;
+        match super::per_command::helpers::read_line("mount scope: [gitroot]/cwd?") {
+            Some(s) if s.trim().eq_ignore_ascii_case("cwd") => Ok(MountScope::Cwd),
+            Some(_) => Ok(MountScope::GitRoot),
+            None => Err(CommandError::InteractiveInputUnavailable {
+                prompt: "mount scope".into(),
+            }),
+        }
+    }
+
+    fn ask_delete_condition_dir(
+        &mut self,
+        _name: &str,
+        path: &std::path::Path,
+    ) -> Result<bool, CommandError> {
+        // No TTY (piped / --non-interactive) keeps the safe default: do not
+        // delete the persistent directory.
+        if self.non_interactive || !super::output::stdin_is_tty() {
+            return Ok(false);
+        }
+        eprintln!("awman: also delete the condition directory {}? [y/N]", path.display());
+        match super::per_command::helpers::read_line("choice [y/N]:") {
+            Some(s) => Ok(matches!(s.trim().to_lowercase().as_str(), "y" | "yes")),
+            None => Ok(false),
+        }
+    }
 }
 
 /// RAII guard: enables raw mode on creation, disables it on drop.
