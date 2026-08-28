@@ -18,6 +18,18 @@ pub enum ContainerKind {
     Agent,
 }
 
+/// Where a container came from, derived from its **name** — never a label —
+/// so the marker works identically on every runtime tier (Apple cannot read
+/// labels back).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "value")]
+pub enum ContainerSource {
+    /// An interactive `awman` session container: today's behaviour, unmarked.
+    Session,
+    /// Launched by amie for the named condition.
+    Amie(String),
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusOutcome {
     pub containers: Vec<StatusContainerRow>,
@@ -33,6 +45,7 @@ pub struct StatusContainerRow {
     pub image: String,
     pub started_at: String,
     pub kind: ContainerKind,
+    pub source: ContainerSource,
     pub tab_number: Option<u32>,
     pub stuck: bool,
     pub command_label: Option<String>,
@@ -44,8 +57,25 @@ pub struct StatusContainerRow {
     pub memory_mb: Option<f64>,
 }
 
-fn classify_container(_name: &str) -> ContainerKind {
-    ContainerKind::Agent
+impl StatusContainerRow {
+    /// `None` for a plain session container (today's behaviour, unmarked);
+    /// `Some("amie:<slug>")` for one amie launched.
+    pub fn source_label(&self) -> Option<String> {
+        match &self.source {
+            ContainerSource::Session => None,
+            ContainerSource::Amie(slug) => Some(format!("amie:{slug}")),
+        }
+    }
+}
+
+/// Derive a container's source from its **name**, the one identity channel
+/// every runtime tier honours (Docker `--filter name=`, Apple client-side
+/// prefix, sandbox `sbx ls` prefix) — never from a label.
+fn classify_source(name: &str) -> ContainerSource {
+    match crate::engine::container::naming::parse_amie_condition_slug(name) {
+        Some(slug) => ContainerSource::Amie(slug.to_string()),
+        None => ContainerSource::Session,
+    }
 }
 
 /// Optional context supplied by the TUI; CLI / API leave this `None`.
@@ -119,10 +149,14 @@ pub trait StatusCommandFrontend: UserMessageSink + Send + Sync {
                     .tab_number
                     .map(|t| format!(" [tab {t}]"))
                     .unwrap_or_default();
+                let source_col = c
+                    .source_label()
+                    .map(|label| format!(" [{label}]"))
+                    .unwrap_or_default();
                 self.write_message(UserMessage {
                     level: MessageLevel::Info,
                     text: format!(
-                        "  {indicator} {name}  {cpu}  {mem}  {img}{tab_col}",
+                        "  {indicator} {name}  {cpu}  {mem}  {img}{tab_col}{source_col}",
                         name = c.name,
                         img = c.image,
                     ),
@@ -188,7 +222,8 @@ impl Command for StatusCommand {
                         name: h.name.clone(),
                         image: h.image_tag.clone(),
                         started_at: h.started_at.to_rfc3339(),
-                        kind: classify_container(&h.name),
+                        kind: ContainerKind::Agent,
+                        source: classify_source(&h.name),
                         tab_number: None,
                         stuck: false,
                         command_label: None,
@@ -285,6 +320,7 @@ mod tests {
             tab_number: None,
             stuck: false,
             kind: ContainerKind::Agent,
+            source: ContainerSource::Session,
             command_label: None,
             cpu_percent: None,
             memory_mb: None,
@@ -314,6 +350,7 @@ mod tests {
             image: "img".into(),
             started_at: "2025-01-01T00:00:00Z".into(),
             kind: ContainerKind::Agent,
+            source: ContainerSource::Session,
             tab_number: None,
             stuck: false,
             command_label: None,
@@ -339,6 +376,7 @@ mod tests {
             image: "img".into(),
             started_at: "2025-01-01T00:00:00Z".into(),
             kind: ContainerKind::Agent,
+            source: ContainerSource::Session,
             tab_number: None,
             stuck: false,
             command_label: None,
@@ -360,7 +398,35 @@ mod tests {
 
     #[test]
     fn classify_agent_containers() {
-        assert_eq!(classify_container("awman-123-456"), ContainerKind::Agent);
-        assert_eq!(classify_container("awman-abc"), ContainerKind::Agent);
+        assert_eq!(classify_source("awman-123-456"), ContainerSource::Session);
+        assert_eq!(classify_source("awman-abc"), ContainerSource::Session);
+    }
+
+    #[test]
+    fn classify_source_marks_amie_containers() {
+        assert_eq!(
+            classify_source("awman-amie-issue-triage-12ab34cd"),
+            ContainerSource::Amie("issue-triage".to_string())
+        );
+    }
+
+    #[test]
+    fn source_label_is_none_for_session_and_marked_for_amie() {
+        let mut row = StatusContainerRow {
+            id: "abc".into(),
+            name: "awman-x".into(),
+            image: "img".into(),
+            started_at: "2025-01-01T00:00:00Z".into(),
+            kind: ContainerKind::Agent,
+            source: ContainerSource::Session,
+            tab_number: None,
+            stuck: false,
+            command_label: None,
+            cpu_percent: None,
+            memory_mb: None,
+        };
+        assert_eq!(row.source_label(), None);
+        row.source = ContainerSource::Amie("issue-triage".into());
+        assert_eq!(row.source_label().as_deref(), Some("amie:issue-triage"));
     }
 }

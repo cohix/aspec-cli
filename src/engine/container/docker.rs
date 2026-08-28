@@ -370,6 +370,58 @@ impl ContainerBackend for DockerBackend {
         args
     }
 
+    fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
+        Ok(Box::new(AttachInstance {
+            handle: handle.clone(),
+        }))
+    }
+
+    fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError> {
+        let format = "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.CreatedAt}}";
+        let output = Command::new("docker")
+            .args([
+                "ps",
+                "--filter",
+                &format!("name={prefix}"),
+                "--format",
+                format,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let output = match output {
+            Ok(o) if o.status.success() => o,
+            // Docker missing or query failed: report nothing found rather than
+            // erroring — the caller treats an empty list as "no such agents".
+            _ => return Ok(Vec::new()),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut handles: Vec<AgentHandle> = Vec::new();
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.splitn(4, '\t').collect();
+            if parts.len() < 4 {
+                continue;
+            }
+            let id = parts[0].to_string();
+            let name = parts[1].to_string();
+            if id.is_empty() && name.is_empty() {
+                continue;
+            }
+            let image_tag = parts[2].to_string();
+            let created = parts[3];
+            let started_at = chrono::DateTime::parse_from_str(created, "%Y-%m-%d %H:%M:%S %z %Z")
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            handles.push(AgentHandle {
+                id,
+                image_tag,
+                name,
+                started_at,
+            });
+        }
+        Ok(handles)
+    }
+
     fn name(&self) -> &'static str {
         "docker"
     }
@@ -726,6 +778,295 @@ impl ExecutionBackend for DockerExecution {
     }
 }
 
+// ─── Attach (re-attach into a foreign, already-running container) ───────────
+
+/// Entrypoint an attach session execs into the target container: an
+/// interactive shell alongside the running agent. `docker exec` starts a new
+/// process, so this is a shell the operator drives — the agent itself keeps
+/// running as the container's main process.
+pub(super) fn default_attach_entrypoint() -> Vec<String> {
+    vec!["bash".to_string()]
+}
+
+/// `BridgeConfig` for an attach session. Identical to `bridge_config_for`
+/// except `cancel_on_grace_expired` is `None`: the grace-expiry cancel issues
+/// `docker stop <name>`, which would be wrong for a container this process
+/// does not own. An attach session's own exit is authoritative.
+pub(super) fn attach_bridge_config(
+    grace_timeout: std::time::Duration,
+    stuck_timeout: std::time::Duration,
+) -> crate::engine::container::io_bridge::BridgeConfig {
+    crate::engine::container::io_bridge::BridgeConfig {
+        grace_timeout,
+        stuck_timeout,
+        container_start_delay: std::time::Duration::ZERO,
+        cancel_on_grace_expired: None,
+        output_tail: std::sync::Arc::new(
+            crate::engine::agent_runtime::output_tail::OutputTail::with_default_capacity(),
+        ),
+    }
+}
+
+/// Kill only the local `docker exec`/`container exec` client process. Never
+/// touches the target container — attach must never stop a container another
+/// process owns.
+pub(super) fn kill_local_exec(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        #[cfg(unix)]
+        {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid; // best-effort no-op; the container is never touched
+        }
+    }
+}
+
+/// Configured-but-not-running attach handle. `run_with_frontend` opens a
+/// `docker exec -it` session (argv from `exec_args`) and bridges it through
+/// the same PTY/piped machinery a fresh `docker run` uses — so `CliFrontend`
+/// and `TuiContainerProxy` drive an attach session unchanged.
+struct AttachInstance {
+    handle: AgentHandle,
+}
+
+impl AgentInstance for AttachInstance {
+    fn handle_preview(&self) -> AgentHandlePreview {
+        AgentHandlePreview {
+            id: self.handle.id.clone(),
+            name: self.handle.name.clone(),
+            image: self.handle.image_tag.clone(),
+        }
+    }
+
+    fn run_with_frontend(
+        self: Box<Self>,
+        mut frontend: Box<dyn crate::engine::agent_runtime::frontend::AgentFrontend>,
+    ) -> Result<AgentExecution, EngineError> {
+        let started_at = chrono::Utc::now();
+        let handle = self.handle.clone();
+
+        frontend.report_status(
+            crate::engine::agent_runtime::frontend::AgentStatus::Running {
+                container_name: handle.name.clone(),
+            },
+        );
+
+        let grace_timeout = frontend.grace_timeout();
+        let stuck_timeout = frontend.stuck_timeout();
+        let io = frontend.take_io();
+        let bridge_cfg = attach_bridge_config(grace_timeout, stuck_timeout);
+
+        let entrypoint = default_attach_entrypoint();
+        let ep_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+
+        // PTY path: pass the frontend's terminal size through as COLUMNS/LINES
+        // so the exec'd shell sees a real size. `exec_args` is the argv source.
+        if let Some((cols, rows)) = io.initial_size {
+            let cols_s = cols.to_string();
+            let rows_s = rows.to_string();
+            let argv = DockerBackend.exec_args(
+                &handle.id,
+                "/workspace",
+                &ep_refs,
+                &[("COLUMNS", &cols_s), ("LINES", &rows_s)],
+            );
+            return spawn_pty_bridged_attach(io, argv, started_at, handle, bridge_cfg);
+        }
+
+        let argv = DockerBackend.exec_args(&handle.id, "/workspace", &ep_refs, &[]);
+        spawn_piped_attach(io, argv, started_at, handle, bridge_cfg)
+    }
+}
+
+/// Spawn `docker exec -it` via `portable-pty` and bridge the PTY master to the
+/// frontend's `AgentIo`. Mirrors `spawn_pty_bridged_docker` but substitutes
+/// the exec argv and produces an `AttachExecution`.
+fn spawn_pty_bridged_attach(
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+) -> Result<AgentExecution, EngineError> {
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    let (cols, rows) = io.initial_size.expect("PTY path requires initial_size");
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|e| EngineError::Container(format!("openpty: {e}")))?;
+
+    let mut cmd = CommandBuilder::new("docker");
+    for arg in &argv {
+        cmd.arg(arg);
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|e| EngineError::Container(format!("spawn docker exec via pty: {e}")))?;
+    let child_pid = child.process_id();
+
+    let (master_arc, bridge) =
+        crate::engine::container::io_bridge::bridge_pty(io, pair, bridge_cfg)?;
+
+    let backend = AttachExecution {
+        child: None,
+        pty_child: Some(child),
+        pty_master: Some(master_arc),
+        stdin_injector: Some(bridge.stdin_injector),
+        child_pid,
+        started_at,
+    };
+    Ok(AgentExecution::new(
+        handle,
+        Box::new(backend),
+        bridge.stuck_tx,
+        Some(bridge.output_tail),
+    ))
+}
+
+/// Spawn `docker exec` with piped stdio and bridge through `AgentIo`. Mirrors
+/// `spawn_piped_docker` but substitutes the exec argv and produces an
+/// `AttachExecution`.
+fn spawn_piped_attach(
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+) -> Result<AgentExecution, EngineError> {
+    let mut cmd = Command::new("docker");
+    cmd.args(&argv);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            EngineError::ContainerRuntimeUnavailable {
+                binary: "docker".into(),
+            }
+        } else {
+            EngineError::Container(format!("spawn docker exec: {e}"))
+        }
+    })?;
+    let child_pid = Some(child.id());
+
+    let bridge = crate::engine::container::io_bridge::bridge_piped(io, &mut child, bridge_cfg);
+    // Non-interactive attach: close the child's stdin after the bridge wires up
+    // so a shell that reads to EOF exits cleanly (matches the run piped path).
+    drop(bridge.stdin_injector);
+
+    let backend = AttachExecution {
+        child: Some(child),
+        pty_child: None,
+        pty_master: None,
+        stdin_injector: None,
+        child_pid,
+        started_at,
+    };
+    Ok(AgentExecution::new(
+        handle,
+        Box::new(backend),
+        bridge.stuck_tx,
+        Some(bridge.output_tail),
+    ))
+}
+
+/// Execution backend for an attach session. Identical to `DockerExecution`
+/// except cancellation kills only the local `docker exec` client — never
+/// `docker stop <name>`, because the target container belongs to another
+/// process.
+struct AttachExecution {
+    child: Option<std::process::Child>,
+    pty_child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    pty_master: Option<std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
+    stdin_injector: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
+    /// PID of the local `docker exec` client, captured at spawn.
+    child_pid: Option<u32>,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ExecutionBackend for AttachExecution {
+    fn wait_blocking(mut self: Box<Self>) -> Result<AgentExitInfo, EngineError> {
+        if let Some(mut child) = self.pty_child.take() {
+            let status = child
+                .wait()
+                .map_err(|e| EngineError::Container(format!("wait docker exec (pty): {e}")))?;
+            self.pty_master = None;
+            let exit_code = status.exit_code().try_into().unwrap_or(-1);
+            return Ok(AgentExitInfo {
+                exit_code,
+                signal: None,
+                started_at: self.started_at,
+                ended_at: chrono::Utc::now(),
+            });
+        }
+
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| EngineError::Container("execution already waited".into()))?;
+        let status = child
+            .wait()
+            .map_err(|e| EngineError::Container(format!("wait docker exec: {e}")))?;
+
+        #[cfg(unix)]
+        clear_stdio_nonblocking();
+
+        let exit_code = status.code().unwrap_or(-1);
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+
+        Ok(AgentExitInfo {
+            exit_code,
+            signal,
+            started_at: self.started_at,
+            ended_at: chrono::Utc::now(),
+        })
+    }
+
+    fn try_inject_stdin(&self, bytes: &[u8]) -> Result<bool, EngineError> {
+        if let Some(tx) = &self.stdin_injector {
+            tx.send(bytes.to_vec())
+                .map_err(|e| EngineError::Container(format!("inject stdin: {e}")))?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    fn cancel(&self) -> Result<(), EngineError> {
+        kill_local_exec(self.child_pid);
+        Ok(())
+    }
+
+    fn cancel_handle(&self) -> Option<crate::engine::agent_runtime::execution::CancelHandle> {
+        let pid = self.child_pid;
+        Some(crate::engine::agent_runtime::execution::CancelHandle::new(
+            move || {
+                kill_local_exec(pid);
+                Ok(())
+            },
+        ))
+    }
+}
+
 /// Translate `ResolvedContainerOptions` into a `docker run` argv (without the
 /// leading `docker` binary).
 pub(super) fn build_run_argv(
@@ -756,12 +1097,15 @@ pub(super) fn build_run_argv(
     args.push("--label".into());
     args.push(AWMAN_LABEL.into());
 
-    // Session-scoped label — emitted when the option-builder threaded the
-    // session id through. Lets `list_running` attribute containers to a
-    // specific awman session.
-    if let Some(session_id) = &options.session_label {
+    // Caller-supplied labels — emitted one `--label key=value` each, in the
+    // order they were ingested, immediately after the hardcoded `awman=true`.
+    // Lets `list_running` attribute containers to a specific awman session
+    // (`awman.session=<id>`) and amie mark its background agents
+    // (`awman.amie.condition=<name>`). These are for human `docker ps`
+    // inspection only — awman never reads a label back.
+    for (key, value) in &options.labels {
         args.push("--label".into());
-        args.push(format!("awman.session={session_id}"));
+        args.push(format!("{key}={value}"));
     }
 
     // Working dir.
@@ -1073,6 +1417,88 @@ mod tests {
         assert!(argv.contains(&AWMAN_LABEL.to_string()));
         // Image is the final positional arg.
         assert_eq!(argv.last().map(String::as_str), Some("img:latest"));
+    }
+
+    /// WI 0101 §2.2: `ContainerOption::SessionLabel` became the general
+    /// `Label { key, value }`. `awman=true` must still come first, then exactly
+    /// one `--label k=v` per accumulated entry, in ingest order.
+    #[test]
+    fn build_run_argv_emits_the_awman_label_then_one_flag_per_supplied_label() {
+        let resolved = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Label {
+                key: "awman.session".into(),
+                value: "sid-1".into(),
+            },
+            ContainerOption::Label {
+                key: "awman.amie.condition".into(),
+                value: "issue-triage".into(),
+            },
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        let labels: Vec<&String> = argv
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| a.as_str() == "--label" && *i + 1 < argv.len())
+            .map(|(i, _)| &argv[i + 1])
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                &AWMAN_LABEL.to_string(),
+                &"awman.session=sid-1".to_string(),
+                &"awman.amie.condition=issue-triage".to_string(),
+            ],
+            "argv was: {argv:?}"
+        );
+        assert_eq!(
+            argv.iter().filter(|a| a.as_str() == "--label").count(),
+            3,
+            "one --label flag per label, no more"
+        );
+    }
+
+    /// Regression guard for the pre-refactor behaviour: a lone session label
+    /// still renders exactly as it did when it had its own dedicated field.
+    #[test]
+    fn build_run_argv_renders_a_lone_session_label_exactly_as_before_the_refactor() {
+        let resolved = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Label {
+                key: "awman.session".into(),
+                value: "abc-123".into(),
+            },
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        let awman = argv
+            .iter()
+            .position(|a| a == AWMAN_LABEL)
+            .expect("the hardcoded awman=true label must be present");
+        assert_eq!(argv[awman + 1], "--label");
+        assert_eq!(
+            argv[awman + 2],
+            "awman.session=abc-123",
+            "the session label must immediately follow awman=true"
+        );
+    }
+
+    #[test]
+    fn build_run_argv_emits_only_the_awman_label_when_no_labels_are_supplied() {
+        let resolved = resolve(vec![ContainerOption::Image(ImageRef::new("img:latest"))]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        assert_eq!(argv.iter().filter(|a| a.as_str() == "--label").count(), 1);
     }
 
     #[test]

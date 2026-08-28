@@ -56,6 +56,14 @@ Applies to every project on the machine unless a repo overrides it.
     "workDirs": ["/home/user/my-project"],
     "alwaysNonInteractive": false
   },
+  "amie": {
+    "agentsToModels": {
+      "claude": ["claude-opus-4-8", "claude-sonnet-4-6"]
+    },
+    "maxConcurrentEvaluations": 2,
+    "defaultLeader": "claude::claude-opus-4-8",
+    "guidance": ["Keep automated changes focused."]
+  },
   "remote": {
     "defaultAddr": "http://build-server.example.com:9876",
     "defaultAPIKey": "a3f8b2c1...",
@@ -63,6 +71,29 @@ Applies to every project on the machine unless a repo overrides it.
   }
 }
 ```
+
+### Amie daemon configuration
+
+The optional `amie` block is global, so it belongs in
+`~/.awman/config.json` (or the relocated global config file). It controls the
+agents and models available to the amie daemon and the guidance it passes to
+condition evaluations:
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `agentsToModels` | object (agent name → non-empty string array) | unset | Models available for each agent; every map key must be a valid agent name |
+| `maxConcurrentEvaluations` | positive integer | `2` | Maximum number of condition evaluations running at once |
+| `defaultLeader` | string (`agent::model`) | unset | Default agent and model for evaluations when a condition does not specify them |
+| `guidance` | non-empty string array | unset | Instructions added to every condition evaluation and generated workflow |
+
+All four keys are optional. Configuration is rejected when
+`maxConcurrentEvaluations` is zero; an `agentsToModels` entry has no models or
+contains an empty model name; `defaultLeader` is not exactly two non-empty
+components in `agent::model` form, has surrounding whitespace in either
+component, or uses an invalid agent name; or `guidance` has an empty or
+whitespace-only entry. A `guidance` list may contain at most 50 entries, and
+each entry is limited to 1,000 characters. Agent names use ASCII letters,
+digits, `-`, and `_`, and are 1–64 characters long.
 
 > **Upgrading from an old config?** The `envPassthrough` field was removed. Express environment passthrough as `env(VAR)` entries in the `overlays` array instead — see [Overlays](08-overlays.md). The old object-style `overlays` block (`{"skills": …, "directories": …}`) is also gone; `overlays` is now a flat array of overlay specs and the old format produces a parse error.
 
@@ -258,7 +289,8 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 - The XDG variables are independent — if only one is set, the other falls back to `~/.awman/`.
 - An XDG variable set to an empty string is treated as unset.
 - awman does **not** migrate existing data when you change these variables; move `~/.awman/` contents yourself if needed.
-- The API server's storage root can be moved independently with `AWMAN_API_ROOT`.
+- The shared SQLite database is `~/.awman/data/awman.db` at the default location. API logs, PID files, credentials, and session files remain under `~/.awman/api/`.
+- The API server's storage root can be moved independently with `AWMAN_API_ROOT`; this does not move the shared database.
 
 ---
 
@@ -303,6 +335,7 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `remote.defaultAddr` | string | (unset) | Default remote awman API server address | yes |
 | `remote.defaultAPIKey` | string | (unset) | API key for the default remote server; only sent when the target address matches `remote.defaultAddr` | yes |
 | `remote.savedDirs` | string array | `[]` | Remote-host paths shown in the `remote session start` picker — see [Remote Mode](10-remote-mode.md) | no (edit file) |
+| `amie` | object | (unset) | Global amie daemon settings; see [Amie daemon configuration](#amie-daemon-configuration) | no (edit file) |
 
 ### `awman config` subcommands
 
@@ -354,7 +387,7 @@ Value handling:
 |----------|---------|
 | `AWMAN_CONFIG_HOME` | Relocate the entire global home (config + data); overrides XDG variables |
 | `XDG_CONFIG_HOME` | Global config goes to `$XDG_CONFIG_HOME/awman/` |
-| `XDG_DATA_HOME` | Global data (workflows, skills, worktrees, API state) goes to `$XDG_DATA_HOME/awman/` |
+| `XDG_DATA_HOME` | Global data (workflows, skills, worktrees, API state, and the shared database) goes to `$XDG_DATA_HOME/awman/` |
 | `AWMAN_API_ROOT` | Relocate only the API server storage root |
 | `AWMAN_OVERLAYS` | Comma-separated overlay specs (e.g. `env(TOKEN),dir(/a:/b:ro)`); merged with config and flags — see [Overlays](08-overlays.md) |
 | `AWMAN_MAX_CONCURRENT_AGENTS` | Cap on concurrently-running workflow steps; beats `maxConcurrentAgents` in repo/global config, beaten by `--max-concurrent` — see [Parallel Workflows](15-parallel-workflows.md) |

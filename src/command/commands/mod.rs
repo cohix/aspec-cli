@@ -8,6 +8,7 @@
 
 pub mod agent_auth;
 pub mod agent_setup;
+pub mod amie;
 pub mod api_server;
 pub mod auth;
 pub mod chat;
@@ -17,6 +18,16 @@ pub mod config;
 pub mod download;
 pub mod exec_prompt;
 pub mod exec_workflow;
+pub(crate) mod http_core;
+// HttpCore is the shared transport seam used by daemon-facing clients and
+// must be reachable by integration consumers without exposing its module's
+// implementation registry.
+pub use http_core::HttpCore;
+pub(crate) mod dynamic_repair;
+// The WI-0092 leader/repair budget is the one decision core `exec workflow
+// --dynamic` and the amie evaluator share; both callers — and the tests that
+// prove they behave identically — reach it through this re-export.
+pub use dynamic_repair::{RepairDecision, WorkflowRepairLoop};
 pub mod init;
 pub mod mount_scope;
 pub mod new;

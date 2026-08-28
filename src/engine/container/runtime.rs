@@ -264,6 +264,21 @@ impl ContainerRuntime {
             .exec_args(container_id, working_dir, entrypoint, env_vars)
     }
 
+    /// Attach to an already-running container this process did not start.
+    /// Delegates to the backend; the returned instance runs `<cli> exec`
+    /// through the existing `run_with_frontend` path.
+    pub fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
+        self.backend.attach(handle)
+    }
+
+    /// List running awman containers whose name starts with `prefix`.
+    pub fn list_running_with_name_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<AgentHandle>, EngineError> {
+        self.backend.list_running_with_name_prefix(prefix)
+    }
+
     /// The CLI binary name for this runtime (`"docker"` or `"container"`).
     pub fn cli_binary(&self) -> &'static str {
         match self.backend.name() {
@@ -369,6 +384,14 @@ impl AgentRuntimeEngine for ContainerRuntime {
         env_vars: &[(&str, &str)],
     ) -> Vec<String> {
         ContainerRuntime::exec_args(self, agent_id, working_dir, entrypoint, env_vars)
+    }
+
+    fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
+        ContainerRuntime::attach(self, handle)
+    }
+
+    fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError> {
+        ContainerRuntime::list_running_with_name_prefix(self, prefix)
     }
 
     fn cli_binary(&self) -> &'static str {

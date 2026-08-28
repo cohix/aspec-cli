@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::data::config::env::{Env, EnvSnapshot};
 use crate::data::error::DataError;
+use crate::data::fs::daemon_paths::DaemonPaths;
+use crate::data::fs::data_paths::DataPaths;
 use crate::data::session_setup_event::SessionSetupState;
 
 /// Filename of the API sqlite database.
@@ -22,15 +24,28 @@ const SESSIONS_SUBDIR: &str = "sessions";
 const TLS_SUBDIR: &str = "tls";
 
 /// Resolves every path under the API storage root.
+///
+/// `root` owns everything under `~/.awman/api/` (pidfile, log, `sessions/`,
+/// key hash, `server.json`, TLS). `data_root` locates the shared database,
+/// which lives under `~/.awman/data/` for env-scoped construction and stays
+/// root-local for explicit-root construction (so `from_root(R).db_path()` is
+/// still `R/awman.db`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiPaths {
     root: PathBuf,
+    data_root: PathBuf,
 }
 
 impl ApiPaths {
-    /// Build a `ApiPaths` rooted at an explicit directory.
+    /// Build an `ApiPaths` rooted at an explicit directory. The database stays
+    /// root-local (`R/awman.db`), preserving every `from_root`/`at_root` test
+    /// fixture.
     pub fn from_root(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        Self {
+            data_root: root.clone(),
+            root,
+        }
     }
 
     /// Resolve from the current process environment, honouring `AWMAN_API_ROOT`
@@ -41,20 +56,26 @@ impl ApiPaths {
 
     /// Same as [`from_process_env`] but reads from a supplied env snapshot.
     ///
-    /// Precedence: `AWMAN_API_ROOT` → `AWMAN_CONFIG_HOME/api` →
-    /// `XDG_DATA_HOME/awman/api` → `$HOME/.awman/api`.
+    /// Precedence for the API root: `AWMAN_API_ROOT` → `AWMAN_CONFIG_HOME/api`
+    /// → `XDG_DATA_HOME/awman/api` → `$HOME/.awman/api`. The database is
+    /// resolved separately via `DataPaths` (`<data_home>/data/awman.db`), so it
+    /// relocates in lockstep with every other relocatable path rather than
+    /// tracking `AWMAN_API_ROOT`.
     pub fn from_env(env: &EnvSnapshot) -> Result<Self, DataError> {
-        if let Some(root) = env.api_root() {
-            return Ok(Self::from_root(root));
-        }
-        if let Some(home) = env.config_home() {
-            return Ok(Self::from_root(home.join(API_SUBDIR)));
-        }
-        if let Some(xdg) = env.xdg_data_home() {
-            return Ok(Self::from_root(xdg.join("awman").join(API_SUBDIR)));
-        }
-        let home = dirs::home_dir().ok_or(DataError::HomeNotFound)?;
-        Ok(Self::from_root(home.join(".awman").join(API_SUBDIR)))
+        let root = if let Some(root) = env.api_root() {
+            root
+        } else if let Some(home) = env.config_home() {
+            home.join(API_SUBDIR)
+        } else if let Some(xdg) = env.xdg_data_home() {
+            xdg.join("awman").join(API_SUBDIR)
+        } else {
+            dirs::home_dir()
+                .ok_or(DataError::HomeNotFound)?
+                .join(".awman")
+                .join(API_SUBDIR)
+        };
+        let data_root = DataPaths::from_env(env)?.root().to_path_buf();
+        Ok(Self { root, data_root })
     }
 
     /// The API root directory.
@@ -62,9 +83,19 @@ impl ApiPaths {
         &self.root
     }
 
-    /// Path to the API sqlite database.
+    /// Daemon-identity paths for the API daemon (key stem `api_key`).
+    pub fn daemon(&self) -> DaemonPaths {
+        DaemonPaths::new(self.root.clone(), "api_key")
+    }
+
+    /// The shared data paths (locating the database).
+    pub fn data_paths(&self) -> DataPaths {
+        DataPaths::at_root(self.data_root.clone())
+    }
+
+    /// Path to the shared sqlite database.
     pub fn db_path(&self) -> PathBuf {
-        self.root.join(API_DB_FILENAME)
+        self.data_root.join(API_DB_FILENAME)
     }
 
     /// Directory holding per-session subdirectories.
@@ -126,26 +157,26 @@ impl ApiPaths {
         self.tls_dir().join("fingerprint.sha256")
     }
 
-    /// API server PID file.
+    /// API server PID file. Delegates to `DaemonPaths` (`<root>/awman.pid`).
     pub fn pid_file(&self) -> PathBuf {
-        self.root.join("awman.pid")
+        self.daemon().pid_file()
     }
 
-    /// Sidecar metadata for the running server (port, scheme). Written next
-    /// to the PID file so `api status` can HTTP-probe the right
-    /// endpoint without needing CLI flags.
+    /// Sidecar metadata for the running server (port, scheme). Delegates to
+    /// `DaemonPaths` (`<root>/server.json`).
     pub fn server_meta_file(&self) -> PathBuf {
-        self.root.join("server.json")
+        self.daemon().server_meta_file()
     }
 
-    /// API server log file.
+    /// API server log file. Delegates to `DaemonPaths` (`<root>/awman.log`).
     pub fn log_file(&self) -> PathBuf {
-        self.root.join("awman.log")
+        self.daemon().log_file()
     }
 
-    /// API key hash file (mode 0o600 on Unix).
+    /// API key hash file (mode 0o600 on Unix). Delegates to `DaemonPaths`
+    /// (`<root>/api_key.hash`).
     pub fn api_key_hash_file(&self) -> PathBuf {
-        self.root.join("api_key.hash")
+        self.daemon().key_hash_file()
     }
 
     /// Workflow state file for a single command run.

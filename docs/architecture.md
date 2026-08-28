@@ -589,7 +589,7 @@ impl SqliteSessionStore {
 }
 ```
 
-`SqliteSessionStore::open(root)` creates the database at `<root>/awman.db`, enables WAL mode, and runs schema migrations idempotently. The schema has two tables: `sessions` and `commands`.
+`SqliteSessionStore::open_at(path)` opens the database at `path`, enables WAL mode, and runs schema migrations idempotently. The database is shared by API mode and the amie daemon and lives at `<data_home>/data/awman.db`; it carries the `sessions` and `commands` tables plus amie's `amie_conditions` and `amie_runs`.
 
 `SessionRecord` and `CommandRecord` are plain structs (no Arc, no async) that carry the persisted metadata fields.
 
@@ -603,7 +603,7 @@ pub struct ApiPaths { root: PathBuf }
 impl ApiPaths {
     pub fn from_env(env: &EnvSnapshot) -> Result<Self, DataError>;
     pub fn root(&self) -> &Path;
-    pub fn db_path(&self) -> PathBuf;          // <root>/awman.db
+    pub fn db_path(&self) -> PathBuf;          // <data_home>/data/awman.db (shared)
     pub fn log_path(&self) -> PathBuf;         // <root>/awman.log
     pub fn pid_path(&self) -> PathBuf;         // <root>/awman.pid
     pub fn tls_dir(&self) -> PathBuf;          // <root>/tls/

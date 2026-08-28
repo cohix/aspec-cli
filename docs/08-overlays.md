@@ -528,6 +528,11 @@ The three scopes:
 | **repo** | `~/.awman/context/repo/{owner}/{repo}/` | Project-specific architecture notes, gotchas, accumulated team knowledge | All agents working on this repo |
 | **workflow** | `~/.awman/context/workflow/` (per workflow invocation) | Shared state and coordination between steps in a multi-agent workflow | All steps in the same workflow run |
 
+The amie daemon keeps each condition's context in a separate sibling directory,
+`~/.awman/amie/conditions/{name}/`, alongside `context(global)` rather than
+inside it. A condition's directory is long-lived: it is created once and reused
+for every evaluation of that condition. It is never recreated for each run.
+
 ### When to use each scope
 
 **Global context** (`context(global)`) — standing guidance that applies everywhere: personal coding style, common gotchas you've learned to avoid, architectural patterns you always want followed, links to frequently-referenced docs. Example: a `~/.awman/context/global/coding-style.md` that says "Always use async/await, never callbacks." Every agent you run, in any project, reads it.

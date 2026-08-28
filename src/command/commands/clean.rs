@@ -66,6 +66,11 @@ pub struct CleanSummary {
     pub containers: Vec<CleanContainer>,
     pub repo_workflows: Vec<CleanPath>,
     pub context_dirs: Vec<CleanPath>,
+    /// Retained `awman.db*.pre-migration` backups left behind when the shared
+    /// database was relocated out of the legacy API root. They are never read
+    /// by awman; the live database at `DataPaths::db_path()` is never a
+    /// candidate here.
+    pub pre_migration_backups: Vec<CleanPath>,
     pub images: Vec<CleanImage>,
     /// Whether the container runtime was reachable during discovery. When
     /// `false`, the container/image categories were skipped.
@@ -78,6 +83,7 @@ impl CleanSummary {
         self.containers.len()
             + self.repo_workflows.len()
             + self.context_dirs.len()
+            + self.pre_migration_backups.len()
             + self.images.len()
     }
 
@@ -114,6 +120,15 @@ impl CleanSummary {
             ));
             for d in &self.context_dirs {
                 lines.push(format!("  - {}", d.label));
+            }
+        }
+        if !self.pre_migration_backups.is_empty() {
+            lines.push(format!(
+                "Pre-migration database backups ({}):",
+                self.pre_migration_backups.len()
+            ));
+            for b in &self.pre_migration_backups {
+                lines.push(format!("  - {}", b.label));
             }
         }
         if !self.images.is_empty() {
@@ -367,6 +382,15 @@ impl CleanCommand {
             ),
         }
 
+        // ─── Category 5: retained pre-migration database backups ─────────────
+        //
+        // The database relocation renames the legacy originals aside as
+        // `awman.db{,-wal,-shm}.pre-migration` under the old API root. They are
+        // a one-release safety net that awman never reads. Only those three
+        // exact filenames are candidates, and the live shared database is
+        // explicitly excluded so this rule can never touch it.
+        discover_pre_migration_backups(sink, &mut summary);
+
         summary
     }
 
@@ -417,7 +441,20 @@ impl CleanCommand {
             }
         }
 
-        // 4. Dangling images (last, so container references are gone).
+        // 4. Retained pre-migration database backups.
+        for b in &summary.pre_migration_backups {
+            match remove_path(&b.path) {
+                Ok(()) => result.deleted += 1,
+                Err(e) => {
+                    result.errors += 1;
+                    result
+                        .error_details
+                        .push(format!("{}: {e}", b.path.display()));
+                }
+            }
+        }
+
+        // 5. Dangling images (last, so container references are gone).
         if let Some(runtime) = self.engines.container_runtime.as_ref() {
             for img in &summary.images {
                 match runtime.remove_image(&img.id) {
@@ -579,6 +616,52 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
     }
 }
+
+/// Discover the three retained `*.pre-migration` database backups under the
+/// legacy API root. The live shared database is never a candidate: it lives
+/// under `DataPaths::db_path()` and carries no `.pre-migration` suffix, and the
+/// explicit inequality check below makes that guarantee unconditional.
+fn discover_pre_migration_backups(sink: &mut dyn CleanCommandFrontend, summary: &mut CleanSummary) {
+    let api_paths = match crate::data::fs::ApiPaths::from_process_env() {
+        Ok(paths) => paths,
+        Err(e) => {
+            emit(
+                sink,
+                MessageLevel::Warning,
+                format!("clean: cannot resolve the API root: {e}"),
+            );
+            return;
+        }
+    };
+    collect_pre_migration_backups(&api_paths, summary);
+}
+
+/// The pure half of the rule, so the never-touch-the-live-database guarantee is
+/// directly testable against a fixture rather than the process environment.
+fn collect_pre_migration_backups(
+    api_paths: &crate::data::fs::ApiPaths,
+    summary: &mut CleanSummary,
+) {
+    let live_db = api_paths.db_path();
+    for name in PRE_MIGRATION_BACKUP_FILENAMES {
+        let path = api_paths.root().join(name);
+        // Defensive: never offer a live database for deletion.
+        if path == live_db || !path.is_file() {
+            continue;
+        }
+        summary.pre_migration_backups.push(CleanPath {
+            label: name.to_string(),
+            path,
+        });
+    }
+}
+
+/// The exact backup filenames `DataPaths::migrate_legacy_db` leaves behind.
+const PRE_MIGRATION_BACKUP_FILENAMES: [&str; 3] = [
+    "awman.db.pre-migration",
+    "awman.db-wal.pre-migration",
+    "awman.db-shm.pre-migration",
+];
 
 #[cfg(test)]
 mod tests {
@@ -757,6 +840,10 @@ mod tests {
                 path: PathBuf::from("/y"),
                 label: "y".into(),
             }],
+            pre_migration_backups: vec![CleanPath {
+                path: PathBuf::from("/api/awman.db.pre-migration"),
+                label: "awman.db.pre-migration".into(),
+            }],
             images: vec![CleanImage {
                 id: "img1".into(),
                 repo_tag: "t".into(),
@@ -764,7 +851,7 @@ mod tests {
             }],
             docker_available: true,
         };
-        assert_eq!(s.total_items(), 5);
+        assert_eq!(s.total_items(), 6);
     }
 
     #[test]
@@ -834,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn summary_render_all_four_categories() {
+    fn summary_render_all_categories() {
         let s = CleanSummary {
             containers: vec![CleanContainer {
                 id: "c1".into(),
@@ -848,6 +935,10 @@ mod tests {
                 path: PathBuf::from("/d"),
                 label: "d".into(),
             }],
+            pre_migration_backups: vec![CleanPath {
+                path: PathBuf::from("/api/awman.db.pre-migration"),
+                label: "awman.db.pre-migration".into(),
+            }],
             images: vec![CleanImage {
                 id: "i1".into(),
                 repo_tag: "tag:1".into(),
@@ -859,7 +950,61 @@ mod tests {
         assert!(r.contains("Stopped containers"));
         assert!(r.contains("Completed repo workflow files"));
         assert!(r.contains("Completed workflow context directories"));
+        assert!(r.contains("Pre-migration database backups"));
+        assert!(r.contains("awman.db.pre-migration"));
         assert!(r.contains("Dangling images"));
+    }
+
+    #[test]
+    fn discovery_offers_only_the_three_pre_migration_backups_and_never_the_live_database() {
+        let home = TempDir::new().unwrap();
+        let api_root = home.path().join("api");
+        let data_root = home.path().join("data");
+        std::fs::create_dir_all(&api_root).unwrap();
+        std::fs::create_dir_all(&data_root).unwrap();
+        for name in [
+            "awman.db.pre-migration",
+            "awman.db-wal.pre-migration",
+            "awman.db-shm.pre-migration",
+        ] {
+            std::fs::write(api_root.join(name), b"backup").unwrap();
+        }
+        // A live database in the legacy root and in the shared root: neither is
+        // a backup, so neither may ever be offered for deletion.
+        std::fs::write(api_root.join("awman.db"), b"legacy-live").unwrap();
+        std::fs::write(data_root.join("awman.db"), b"shared-live").unwrap();
+
+        let paths = crate::data::fs::ApiPaths::from_env(
+            &crate::data::config::env::EnvSnapshot::with_overrides([(
+                crate::data::config::env::AWMAN_CONFIG_HOME,
+                home.path().to_str().unwrap(),
+            )]),
+        )
+        .unwrap();
+        let mut summary = CleanSummary::default();
+        collect_pre_migration_backups(&paths, &mut summary);
+
+        let mut labels: Vec<&str> = summary
+            .pre_migration_backups
+            .iter()
+            .map(|b| b.label.as_str())
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(
+            labels,
+            vec![
+                "awman.db-shm.pre-migration",
+                "awman.db-wal.pre-migration",
+                "awman.db.pre-migration",
+            ]
+        );
+        assert!(
+            summary
+                .pre_migration_backups
+                .iter()
+                .all(|b| b.path != paths.db_path() && !b.path.ends_with("awman.db")),
+            "clean must never offer a live database for deletion"
+        );
     }
 
     // ─── Helper function tests ────────────────────────────────────────────────

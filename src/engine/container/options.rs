@@ -163,9 +163,14 @@ pub enum ContainerOption {
     /// Container-side `$HOME` remapped from `/root` when a non-root `USER`
     /// directive is detected in the agent's Dockerfile.
     DockerfileUser(String),
-    /// Session identifier — emitted as `--label awman.session=<id>` so
-    /// `list_running` can attribute containers to a specific awman session.
-    SessionLabel(String),
+    /// A container label — emitted as `--label <key>=<value>`. Used to
+    /// attribute containers (e.g. `awman.session=<id>` so `list_running` can
+    /// map a container to an awman session, or `awman.amie.condition=<name>`
+    /// for amie's background agents). Multiple labels accumulate.
+    Label {
+        key: String,
+        value: String,
+    },
     /// Per-agent mode flags (yolo, auto, plan) — emitted as literal argv
     /// strings after the entrypoint in `build_run_argv`.
     AgentModeFlags(Vec<String>),
@@ -320,7 +325,9 @@ pub struct ResolvedContainerOptions {
     pub model: Option<ModelFlagForm>,
     pub non_interactive_flag: Option<String>,
     pub dockerfile_user: Option<String>,
-    pub session_label: Option<String>,
+    /// Container labels accumulated from `ContainerOption::Label`, emitted as
+    /// one `--label key=value` each (after the hardcoded `awman=true`).
+    pub labels: Vec<(String, String)>,
     pub agent_mode_flags: Vec<String>,
     pub disallowed_tools_flag: Option<String>,
     pub allowed_tools_flag: Option<String>,
@@ -386,7 +393,7 @@ impl ResolvedContainerOptions {
             ContainerOption::Model { flag } => self.model = Some(flag),
             ContainerOption::NonInteractivePrintFlag(v) => self.non_interactive_flag = Some(v),
             ContainerOption::DockerfileUser(v) => self.dockerfile_user = Some(v),
-            ContainerOption::SessionLabel(v) => self.session_label = Some(v),
+            ContainerOption::Label { key, value } => self.labels.push((key, value)),
             ContainerOption::AgentModeFlags(v) => self.agent_mode_flags.extend(v),
             ContainerOption::DisallowedToolsFlag(v) => self.disallowed_tools_flag = Some(v),
             ContainerOption::AllowedToolsFlag(v) => self.allowed_tools_flag = Some(v),

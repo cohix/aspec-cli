@@ -70,6 +70,16 @@ pub struct CliFrontend {
     pub(crate) container_stdin_tx: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
+#[async_trait::async_trait]
+impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFrontend {
+    async fn serve_amie_daemon(
+        &mut self,
+        config: crate::command::commands::amie::commands::AmieServeConfig,
+    ) -> Result<(), CommandError> {
+        crate::frontend::amie::serve(config).await
+    }
+}
+
 /// RAII guard: enables raw mode on creation, disables it on drop.
 pub(crate) struct RawModeGuard;
 

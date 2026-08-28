@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::data::session::Session;
+use crate::engine::agent_runtime::execution::{AgentExitInfo, ExecutionBackend, StuckEvent};
 use crate::engine::agent_runtime::{
     AgentExecution, AgentFrontend, AgentHandle, AgentHandlePreview, AgentInstance,
     AgentRuntimeEngine, AgentStats, Capabilities, DindSupport, ResolvedAgentOptions,
@@ -154,6 +155,20 @@ impl AgentRuntimeEngine for SandboxRuntime {
         args
     }
 
+    fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
+        Ok(Box::new(SandboxAttachInstance {
+            handle: handle.clone(),
+            cli_binary: self.backend.cli_binary(),
+        }))
+    }
+
+    fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError> {
+        // Sandboxes have no server-side name filter; list and filter by name.
+        let mut running = self.backend.list_running()?;
+        running.retain(|h| h.name.starts_with(prefix));
+        Ok(running)
+    }
+
     fn cli_binary(&self) -> &'static str {
         self.backend.cli_binary()
     }
@@ -188,6 +203,334 @@ impl AgentInstance for SandboxAgentInstance {
         // The interactive launch (session config, credential injection, kit
         // selection, PTY-bridged `sbx run`) lives in the dsbx driver.
         super::dsbx::run_interactive(self.options, frontend)
+    }
+}
+
+// ─── Attach (re-attach into a foreign, already-running sandbox) ─────────────
+//
+// Sandbox attach exists for cross-tier `AgentRuntimeEngine` completeness and
+// the tier-parity tests; amie itself refuses to run under the sandbox tier
+// (see Part 5). The sandbox tier carries its own minimal PTY bridge here
+// rather than reaching into the dsbx driver's private one, keeping the
+// WI-0090 layering rule (no `src/engine/container/` import) intact.
+
+/// Configured-but-not-running sandbox attach handle. `run_with_frontend`
+/// opens an `sbx exec -it <name> bash` session and bridges it to the frontend.
+struct SandboxAttachInstance {
+    handle: AgentHandle,
+    cli_binary: &'static str,
+}
+
+/// Build the `sbx exec` argv, mirroring `SandboxRuntime::exec_args`:
+/// `exec -it [--env K=V…] <name> <entrypoint…>`.
+fn sbx_attach_argv(name: &str, env_vars: &[(&str, &str)], entrypoint: &[&str]) -> Vec<String> {
+    let mut args = vec!["exec".to_string(), "-it".to_string()];
+    for (k, v) in env_vars {
+        args.push("--env".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    args.push(name.to_string());
+    args.extend(entrypoint.iter().map(|s| s.to_string()));
+    args
+}
+
+/// Kill only the local `sbx exec` client — never `sbx stop`, because attach
+/// does not own the sandbox.
+fn kill_local_sbx_exec(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        #[cfg(unix)]
+        {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+        }
+    }
+}
+
+impl AgentInstance for SandboxAttachInstance {
+    fn handle_preview(&self) -> AgentHandlePreview {
+        AgentHandlePreview {
+            id: self.handle.id.clone(),
+            name: self.handle.name.clone(),
+            image: self.handle.image_tag.clone(),
+        }
+    }
+
+    fn run_with_frontend(
+        self: Box<Self>,
+        mut frontend: Box<dyn AgentFrontend>,
+    ) -> Result<AgentExecution, EngineError> {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+        let started_at = chrono::Utc::now();
+        let handle = self.handle.clone();
+
+        frontend.report_status(
+            crate::engine::agent_runtime::frontend::AgentStatus::Running {
+                container_name: handle.name.clone(),
+            },
+        );
+
+        let io = frontend.take_io();
+        let (stuck_tx, _) = tokio::sync::broadcast::channel::<StuckEvent>(8);
+        let stuck_tx = std::sync::Arc::new(stuck_tx);
+
+        // PTY path: pass the frontend's terminal size through as COLUMNS/LINES.
+        if let Some((cols, rows)) = io.initial_size {
+            let cols_s = cols.to_string();
+            let rows_s = rows.to_string();
+            let argv = sbx_attach_argv(
+                &handle.id,
+                &[("COLUMNS", &cols_s), ("LINES", &rows_s)],
+                &["bash"],
+            );
+            let pty_system = native_pty_system();
+            let pair = pty_system
+                .openpty(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| EngineError::Sandbox(format!("openpty: {e}")))?;
+            let mut cmd = CommandBuilder::new(self.cli_binary);
+            for arg in &argv {
+                cmd.arg(arg);
+            }
+            let child = pair
+                .slave
+                .spawn_command(cmd)
+                .map_err(|e| EngineError::Sandbox(format!("spawn sbx exec via pty: {e}")))?;
+            let child_pid = child.process_id();
+            let master = bridge_attach_pty(io, pair)?;
+            let backend = SandboxAttachExecution {
+                child: None,
+                pty_child: Some(child),
+                pty_master: Some(master),
+                child_pid,
+                started_at,
+            };
+            return Ok(AgentExecution::new(
+                handle,
+                Box::new(backend),
+                stuck_tx,
+                None,
+            ));
+        }
+
+        // Piped path.
+        let argv = sbx_attach_argv(&handle.id, &[], &["bash"]);
+        let mut cmd = std::process::Command::new(self.cli_binary);
+        cmd.args(&argv);
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| EngineError::Sandbox(format!("spawn sbx exec: {e}")))?;
+        let child_pid = Some(child.id());
+        bridge_attach_piped(io, &mut child);
+        let backend = SandboxAttachExecution {
+            child: Some(child),
+            pty_child: None,
+            pty_master: None,
+            child_pid,
+            started_at,
+        };
+        Ok(AgentExecution::new(
+            handle,
+            Box::new(backend),
+            stuck_tx,
+            None,
+        ))
+    }
+}
+
+type SbxPtyMaster = std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>;
+
+/// Wire a PTY master to the frontend's channels: reader thread (PTY→stdout),
+/// writer task (stdin→PTY), resize task.
+fn bridge_attach_pty(
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    pair: portable_pty::PtyPair,
+) -> Result<SbxPtyMaster, EngineError> {
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| EngineError::Sandbox(format!("clone sbx pty reader: {e}")))?;
+    let mut writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| EngineError::Sandbox(format!("take sbx pty writer: {e}")))?;
+
+    let stdout_tx = io.stdout;
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdout_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut stdin_rx = io.stdin_rx;
+    tokio::spawn(async move {
+        use std::io::Write;
+        while let Some(bytes) = stdin_rx.recv().await {
+            if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                break;
+            }
+        }
+    });
+
+    let master_arc: SbxPtyMaster = std::sync::Arc::new(std::sync::Mutex::new(pair.master));
+    if let Some(mut resize_rx) = io.resize {
+        let master_for_resize = std::sync::Arc::clone(&master_arc);
+        tokio::spawn(async move {
+            use portable_pty::PtySize;
+            while let Some((cols, rows)) = resize_rx.recv().await {
+                if let Ok(master) = master_for_resize.lock() {
+                    let _ = master.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+            }
+        });
+    }
+    Ok(master_arc)
+}
+
+/// Wire a piped child's stdio to the frontend's channels.
+fn bridge_attach_piped(
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    child: &mut std::process::Child,
+) {
+    if let Some(child_stdout) = child.stdout.take() {
+        let stdout_tx = io.stdout;
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut reader = child_stdout;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stdout_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    if let Some(child_stderr) = child.stderr.take() {
+        let stderr_tx = io.stderr;
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut reader = child_stderr;
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if stderr_tx.send(buf[..n].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    if let Some(child_stdin) = child.stdin.take() {
+        let mut stdin_rx = io.stdin_rx;
+        tokio::spawn(async move {
+            use std::io::Write;
+            let mut writer = child_stdin;
+            while let Some(bytes) = stdin_rx.recv().await {
+                if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                    break;
+                }
+            }
+        });
+    }
+}
+
+/// Execution backend for a sandbox attach session. Cancellation kills only the
+/// local `sbx exec` client — never `sbx stop`, because the target sandbox
+/// belongs to another process.
+struct SandboxAttachExecution {
+    child: Option<std::process::Child>,
+    pty_child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    pty_master: Option<SbxPtyMaster>,
+    child_pid: Option<u32>,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ExecutionBackend for SandboxAttachExecution {
+    fn wait_blocking(mut self: Box<Self>) -> Result<AgentExitInfo, EngineError> {
+        if let Some(mut child) = self.pty_child.take() {
+            let status = child
+                .wait()
+                .map_err(|e| EngineError::Sandbox(format!("wait sbx exec (pty): {e}")))?;
+            self.pty_master = None;
+            let exit_code = status.exit_code().try_into().unwrap_or(-1);
+            return Ok(AgentExitInfo {
+                exit_code,
+                signal: None,
+                started_at: self.started_at,
+                ended_at: chrono::Utc::now(),
+            });
+        }
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| EngineError::Sandbox("execution already waited".into()))?;
+        let status = child
+            .wait()
+            .map_err(|e| EngineError::Sandbox(format!("wait sbx exec: {e}")))?;
+        let exit_code = status.code().unwrap_or(-1);
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        Ok(AgentExitInfo {
+            exit_code,
+            signal,
+            started_at: self.started_at,
+            ended_at: chrono::Utc::now(),
+        })
+    }
+
+    fn cancel(&self) -> Result<(), EngineError> {
+        kill_local_sbx_exec(self.child_pid);
+        Ok(())
+    }
+
+    fn cancel_handle(&self) -> Option<crate::engine::agent_runtime::execution::CancelHandle> {
+        let pid = self.child_pid;
+        Some(crate::engine::agent_runtime::execution::CancelHandle::new(
+            move || {
+                kill_local_sbx_exec(pid);
+                Ok(())
+            },
+        ))
     }
 }
 

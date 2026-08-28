@@ -84,6 +84,11 @@ Two JSON files: `<git root>/.awman/config.json` (per-repo, committed) and `~/.aw
 | `awman api start\|status\|logs\|kill` | HTTP API server | [09](09-api-mode.md) |
 | `awman remote …` | Client for a remote awman server | [10](10-remote-mode.md) |
 
+`awman status` marks ordinary containers as `session`. Containers launched by
+the amie daemon carry an `amie:<condition>` source marker, such as
+`amie:issue-triage`, so background evaluations are identifiable even if you
+have never configured amie.
+
 ### Key locations
 
 | Path | Contents |

@@ -55,6 +55,10 @@ pub fn render(outcome: &CommandOutcome) -> Option<String> {
         CommandOutcome::Auth(o) => render_auth(o),
         CommandOutcome::Download(o) => render_download(o),
         CommandOutcome::Clean(o) => render_clean(o),
+        CommandOutcome::Amie(o) => Some(
+            serde_json::to_string_pretty(o)
+                .unwrap_or_else(|e| format!("failed to serialize amie outcome: {e}")),
+        ),
     }
 }
 
@@ -79,7 +83,16 @@ pub fn render_status(o: &StatusOutcome) -> String {
         out.push_str("  No code agents running.\n");
         out.push_str("  To start one: awman exec workflow <file>  or  awman chat\n");
     } else {
-        let headers = ["●", "Container", "ID", "Image", "CPU%", "Mem MB", "Started"];
+        let headers = [
+            "●",
+            "Container",
+            "ID",
+            "Image",
+            "CPU%",
+            "Mem MB",
+            "Started",
+            "Source",
+        ];
         let rows: Vec<Vec<String>> = o.containers.iter().map(render_container_row).collect();
         out.push_str(&format_table(&headers, &rows));
     }
@@ -106,6 +119,7 @@ fn render_container_row(c: &StatusContainerRow) -> Vec<String> {
         cpu,
         mem,
         c.started_at.clone(),
+        c.source_label().unwrap_or_else(|| "session".to_string()),
     ]
 }
 
@@ -440,7 +454,7 @@ fn render_download(o: &DownloadOutcome) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::commands::status::{ContainerKind, StatusOutcome};
+    use crate::command::commands::status::{ContainerKind, ContainerSource, StatusOutcome};
     use crate::engine::step_status::StepStatus;
 
     #[test]
@@ -470,6 +484,7 @@ mod tests {
                 image: "awman/dev:latest".into(),
                 started_at: "2025-01-01T00:00:00Z".into(),
                 kind: ContainerKind::Agent,
+                source: ContainerSource::Session,
                 tab_number: None,
                 stuck: false,
                 command_label: None,
@@ -482,6 +497,45 @@ mod tests {
         let s = render_status(&o);
         assert!(s.contains("CODE AGENTS"), "{s}");
         assert!(s.contains("awman-1"), "{s}");
+    }
+
+    #[test]
+    fn render_status_marks_amie_container_and_leaves_session_row_plain() {
+        let o = StatusOutcome {
+            containers: vec![
+                StatusContainerRow {
+                    id: "abc1234567890".into(),
+                    name: "awman-1-2".into(),
+                    image: "awman/dev:latest".into(),
+                    started_at: "2025-01-01T00:00:00Z".into(),
+                    kind: ContainerKind::Agent,
+                    source: ContainerSource::Session,
+                    tab_number: None,
+                    stuck: false,
+                    command_label: None,
+                    cpu_percent: None,
+                    memory_mb: None,
+                },
+                StatusContainerRow {
+                    id: "def1234567890".into(),
+                    name: "awman-amie-issue-triage-12ab34cd".into(),
+                    image: "awman/dev:latest".into(),
+                    started_at: "2025-01-01T00:00:00Z".into(),
+                    kind: ContainerKind::Agent,
+                    source: ContainerSource::Amie("issue-triage".into()),
+                    tab_number: None,
+                    stuck: false,
+                    command_label: None,
+                    cpu_percent: None,
+                    memory_mb: None,
+                },
+            ],
+            watched: false,
+            tip: "test tip".into(),
+        };
+        let s = render_status(&o);
+        assert!(s.contains("amie:issue-triage"), "{s}");
+        assert!(s.contains("session"), "{s}");
     }
 
     #[test]

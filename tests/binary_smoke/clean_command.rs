@@ -350,6 +350,55 @@ fn clean_yes_empty_repo_exits_zero() {
 }
 
 /// `awman clean --dry-run --yes` — `--yes` is silently ignored with dry-run.
+/// Migration safety copies belong to the old API root and are the only
+/// database files clean may remove. The live shared database stays untouched.
+#[test]
+fn clean_removes_pre_migration_backups_and_preserves_live_database() {
+    let repo = tempfile::tempdir().unwrap();
+    git_init(repo.path());
+    let home = tempfile::tempdir().unwrap();
+    let api_root = home.path().join("api");
+    let data_root = home.path().join("data");
+    std::fs::create_dir_all(&api_root).unwrap();
+    std::fs::create_dir_all(&data_root).unwrap();
+    for suffix in ["", "-wal", "-shm"] {
+        std::fs::write(
+            api_root.join(format!("awman.db{suffix}.pre-migration")),
+            format!("backup-{suffix}"),
+        )
+        .unwrap();
+    }
+    let live_path = data_root.join("awman.db");
+    let live_bytes = b"live database must survive clean".to_vec();
+    std::fs::write(&live_path, &live_bytes).unwrap();
+
+    let out = Command::new(awman_bin())
+        .args(["clean", "--yes"])
+        .current_dir(repo.path())
+        .env("AWMAN_CONFIG_HOME", home.path())
+        .stdin(null_stdin())
+        .output()
+        .expect("awman clean");
+    assert!(
+        out.status.success(),
+        "awman clean must remove migration backups; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for suffix in ["", "-wal", "-shm"] {
+        assert!(
+            !api_root
+                .join(format!("awman.db{suffix}.pre-migration"))
+                .exists(),
+            "pre-migration backup {suffix:?} must be removed"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&live_path).unwrap(),
+        live_bytes,
+        "clean must not touch the live shared database"
+    );
+}
+
 #[test]
 fn clean_dry_run_and_yes_deletes_nothing() {
     let repo = tempfile::tempdir().unwrap();

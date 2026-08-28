@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::data::config::env::{Env, EnvSnapshot};
-use crate::data::config::repo::{ApiConfig, RemoteConfig};
+use crate::data::config::repo::{AmieConfig, ApiConfig, RemoteConfig};
 use crate::data::error::DataError;
 
 /// Filename of the global config inside the resolved global directory.
@@ -34,6 +34,8 @@ pub struct GlobalConfig {
     pub legacy_env_passthrough: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<ApiConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amie: Option<AmieConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,6 +124,9 @@ impl GlobalConfig {
                 ));
             }
         }
+        if let Some(amie) = &cfg.amie {
+            amie.validate()?;
+        }
         Ok(cfg)
     }
 
@@ -146,7 +151,7 @@ impl GlobalConfig {
 mod tests {
     use super::*;
     use crate::data::config::env::AWMAN_CONFIG_HOME;
-    use crate::data::config::repo::{ApiConfig, RemoteConfig};
+    use crate::data::config::repo::{AmieConfig, ApiConfig, RemoteConfig};
 
     fn isolated_env(home_dir: &std::path::Path) -> EnvSnapshot {
         EnvSnapshot::with_overrides([(AWMAN_CONFIG_HOME, home_dir.to_str().unwrap())])
@@ -175,6 +180,15 @@ mod tests {
             api: Some(ApiConfig {
                 work_dirs: Some(vec!["/work".to_string()]),
                 always_non_interactive: Some(true),
+            }),
+            amie: Some(AmieConfig {
+                agents_to_models: Some(std::collections::HashMap::from([(
+                    "claude".to_string(),
+                    vec!["claude-opus-4-8".to_string()],
+                )])),
+                max_concurrent_evaluations: Some(2),
+                default_leader: Some("claude::claude-opus-4-8".to_string()),
+                guidance: Some(vec!["Keep changes focused.".to_string()]),
             }),
             remote: Some(RemoteConfig {
                 default_addr: Some("http://localhost:7777".to_string()),
@@ -222,6 +236,20 @@ mod tests {
 
         let cfg = GlobalConfig::load_with(&env).unwrap();
         assert_eq!(cfg.max_concurrent_agents, Some(8));
+    }
+
+    #[test]
+    fn load_rejects_invalid_amie_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = isolated_env(tmp.path());
+        let path = GlobalConfig::path_with(&env).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"amie":{"maxConcurrentEvaluations":0}}"#).unwrap();
+
+        let err = GlobalConfig::load_with(&env).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("amie.maxConcurrentEvaluations must be >= 1"));
     }
 
     #[test]

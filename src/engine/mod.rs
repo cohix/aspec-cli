@@ -10,6 +10,7 @@
 
 pub mod agent;
 pub mod agent_runtime;
+pub mod amie;
 pub mod auth;
 pub mod container;
 pub mod context_prompt;

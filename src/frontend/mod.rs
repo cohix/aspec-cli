@@ -11,6 +11,7 @@
 //! Frontends contain NO business logic; every behavioral decision lives in
 //! Layer 2.
 
+pub mod amie;
 pub mod api;
 pub mod cli;
 pub mod tui;

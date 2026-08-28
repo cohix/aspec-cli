@@ -99,30 +99,28 @@ async fn spawn_router(
 // ─── Dispatch catalogue unit tests ────────────────────────────────────────────
 
 #[test]
-fn catalogue_api_allowed_commands_is_exactly_exec_workflow_and_exec_prompt() {
+fn catalogue_api_allowed_commands_includes_exec_and_amie_commands() {
     let cat = CommandCatalogue::get();
     let allowed = cat.api_allowed_commands();
 
+    let expected = [
+        ("exec", "prompt"),
+        ("exec", "workflow"),
+        ("amie", "start"),
+        ("amie", "stop"),
+        ("amie", "status"),
+        ("amie", "logs"),
+        ("amie", "add"),
+        ("amie", "list"),
+        ("amie", "show"),
+        ("amie", "remove"),
+        ("amie", "pause"),
+        ("amie", "resume"),
+    ];
     assert_eq!(
-        allowed.len(),
-        2,
-        "expected exactly 2 API-allowed commands, got {}: {:?}",
-        allowed.len(),
-        allowed
-    );
-
-    let has_exec_workflow = allowed
-        .iter()
-        .any(|(p, s)| *p == "exec" && *s == "workflow");
-    let has_exec_prompt = allowed.iter().any(|(p, s)| *p == "exec" && *s == "prompt");
-
-    assert!(
-        has_exec_workflow,
-        "api_allowed_commands must include (\"exec\", \"workflow\"); got {allowed:?}"
-    );
-    assert!(
-        has_exec_prompt,
-        "api_allowed_commands must include (\"exec\", \"prompt\"); got {allowed:?}"
+        allowed.as_slice(),
+        expected,
+        "API-allowed command set changed unexpectedly: {allowed:?}"
     );
 }
 

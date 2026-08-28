@@ -9,9 +9,18 @@ use std::path::PathBuf;
 use crate::command::commands::Command;
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
-use crate::data::fs::api_process;
+use crate::data::config::env::Env;
+use crate::data::fs::daemon_guard::{AcquireError, DaemonGuard, DaemonKind};
+use crate::data::fs::daemon_process::{
+    self, DaemonProcess, ServerMeta, Termination, API_PLIST_LABEL, API_UNIT_NAME,
+};
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::engine::auth::TlsMaterial;
+
+/// Build the API daemon's process handle from its paths.
+fn api_daemon(api_paths: &crate::data::fs::ApiPaths) -> DaemonProcess {
+    DaemonProcess::new(api_paths.daemon(), API_UNIT_NAME, API_PLIST_LABEL)
+}
 
 /// Configuration handed from the `api start` command to Layer 3's
 /// `serve_until_shutdown`. Lives in Layer 2 so the trait signature does
@@ -160,12 +169,23 @@ async fn run_start(
     frontend: &mut dyn ApiServerCommandFrontend,
     api_paths: &crate::data::fs::ApiPaths,
 ) -> Result<ApiServerOutcome, CommandError> {
-    let pid_path = api_paths.pid_file();
+    let daemon = api_daemon(api_paths);
 
     // Check if already running.
-    if let Some(pid) = api_process::check_already_running(&pid_path)? {
+    if let Some(pid) = daemon.running_pid()? {
         return Err(CommandError::ApiServerAlreadyRunning { pid });
     }
+
+    // Cross-daemon guard — the actual `check()`s happen at the two points that
+    // truly start a server (background spawn, foreground claim), so
+    // `--refresh-key` and other non-serving early returns are unaffected.
+    // Built from the *supplied* `api_paths` so the pidfile the guard claims is
+    // the same one `run_kill`/`run_status` read.
+    let guard = DaemonGuard::with_paths(
+        DaemonKind::Api,
+        api_paths,
+        &crate::data::fs::AmiePaths::from_env(&Env::from_process()).map_err(CommandError::Data)?,
+    );
 
     // Resolve workdirs by merging CLI --workdirs with the global API config.
     let config_workdirs: Vec<String> = crate::data::config::global::GlobalConfig::load()
@@ -223,6 +243,8 @@ async fn run_start(
 
     // Background mode: spawn a child process and exit.
     if flags.background {
+        // Refuse to start if the amie daemon is running.
+        guard.check().map_err(CommandError::Data)?;
         let binary = std::env::current_exe()
             .map_err(|e| CommandError::Other(format!("cannot determine awman binary: {e}")))?;
         let mut args = vec![
@@ -242,22 +264,21 @@ async fn run_start(
             args.push(w.clone());
         }
 
-        let log_path = api_paths.log_file();
-        let child_pid = api_process::spawn_background(&binary, &args, &log_path)?;
+        let child_pid = daemon.spawn_detached(&binary, &args)?;
         if child_pid > 0 {
             // Use exclusive write so a racing parallel `api start --background`
             // can't trample the PID we just spawned.
-            if !api_process::write_pid_exclusive(&pid_path, child_pid)? {
-                if let Some(existing) = api_process::read_pid(&pid_path)? {
+            if !daemon.claim_pidfile(child_pid)? {
+                if let Some(existing) = daemon.read_pid()? {
                     if existing != child_pid
-                        && api_process::is_process_alive(existing)
-                        && api_process::pid_is_awman(existing)
+                        && daemon_process::is_process_alive(existing)
+                        && daemon_process::pid_is_awman(existing)
                     {
                         return Err(CommandError::ApiServerAlreadyRunning { pid: existing });
                     }
                 }
                 // Stale or matching — overwrite.
-                api_process::write_pid(&pid_path, child_pid)?;
+                daemon.force_write_pidfile(child_pid)?;
             }
         }
 
@@ -274,19 +295,16 @@ async fn run_start(
         }));
     }
 
-    // Foreground mode: write PID race-safely, boot HTTP server, clean up on
-    // exit. If the exclusive write loses the race against another fresh
-    // start, surface ApiServerAlreadyRunning rather than overwriting.
-    if !api_process::write_pid_exclusive(&pid_path, std::process::id())? {
-        if let Some(existing) = api_process::read_pid(&pid_path)? {
-            if api_process::is_process_alive(existing) && api_process::pid_is_awman(existing) {
-                return Err(CommandError::ApiServerAlreadyRunning { pid: existing });
-            }
-        }
-        // Stale file slipped through — clean up and retake.
-        api_process::clear_pid(&pid_path)?;
-        api_process::write_pid(&pid_path, std::process::id())?;
-    }
+    // Foreground mode: claim the machine through the one typed cross-daemon
+    // rule (`DaemonGuard::acquire`: shared startup lock → check → pidfile claim
+    // → re-check), then boot the HTTP server and clean up on exit. This command
+    // owns only the mapping onto its own already-running error.
+    guard
+        .acquire(std::process::id())
+        .map_err(|error| match error {
+            AcquireError::AlreadyRunning { pid } => CommandError::ApiServerAlreadyRunning { pid },
+            other => CommandError::Data(other.into_data_error()),
+        })?;
 
     // TLS material: generate or load now (unless explicitly skipped) so the
     // bind_ip warning surfaces BEFORE we hand off to serve_until_shutdown.
@@ -329,15 +347,11 @@ async fn run_start(
 
     // Persist server metadata so `api status` and remote clients can
     // probe the right endpoint.
-    let meta_path = api_paths.server_meta_file();
-    let _ = api_process::write_server_meta(
-        &meta_path,
-        &api_process::ServerMeta {
-            port: flags.port,
-            bind_ip: bind_ip.to_string(),
-            scheme: scheme.to_string(),
-        },
-    );
+    let _ = daemon.write_meta(&ServerMeta {
+        port: flags.port,
+        bind_ip: bind_ip.to_string(),
+        scheme: scheme.to_string(),
+    });
 
     frontend.write_message(UserMessage {
         level: MessageLevel::Info,
@@ -363,8 +377,8 @@ async fn run_start(
     let serve_result = frontend.serve_until_shutdown(config).await;
 
     // Always clean up PID + meta files.
-    let _ = api_process::clear_pid(&pid_path);
-    let _ = api_process::clear_server_meta(&meta_path);
+    let _ = daemon.release_pidfile();
+    let _ = daemon.clear_meta();
 
     serve_result?;
 
@@ -380,42 +394,37 @@ fn run_kill(
     api_paths: &crate::data::fs::ApiPaths,
     frontend: &mut dyn ApiServerCommandFrontend,
 ) -> Result<ApiServerOutcome, CommandError> {
-    let pid_path = api_paths.pid_file();
+    let daemon = api_daemon(api_paths);
 
-    let pid = match api_process::read_pid(&pid_path)? {
-        Some(pid) => pid,
-        None => {
+    // Termination is a `DaemonProcess` operation; this command only maps the
+    // typed outcome onto its own messages.
+    let pid = match daemon.terminate_running()? {
+        Termination::NotRunning => {
             frontend.write_message(UserMessage {
                 level: MessageLevel::Warning,
                 text: "No API server is running (no PID file found).".to_string(),
             });
             return Err(CommandError::ApiServerNotRunning);
         }
+        Termination::StalePidFile { pid } => {
+            frontend.write_message(UserMessage {
+                level: MessageLevel::Warning,
+                text: format!("Stale PID file removed (PID {pid} was not running)."),
+            });
+            return Err(CommandError::ApiServerNotRunning);
+        }
+        Termination::NotAwman { pid } => {
+            frontend.write_message(UserMessage {
+                level: MessageLevel::Warning,
+                text: format!(
+                    "PID {pid} is alive but is not an awman server; stale PID file cleaned up."
+                ),
+            });
+            return Err(CommandError::ApiServerNotRunning);
+        }
+        Termination::Terminated { pid } => pid,
     };
-
-    if !api_process::is_process_alive(pid) {
-        api_process::clear_pid(&pid_path)?;
-        frontend.write_message(UserMessage {
-            level: MessageLevel::Warning,
-            text: format!("Stale PID file removed (PID {pid} was not running)."),
-        });
-        return Err(CommandError::ApiServerNotRunning);
-    }
-
-    if !api_process::pid_is_awman(pid) {
-        api_process::clear_pid(&pid_path)?;
-        frontend.write_message(UserMessage {
-            level: MessageLevel::Warning,
-            text: format!(
-                "PID {pid} is alive but is not an awman server; stale PID file cleaned up."
-            ),
-        });
-        return Err(CommandError::ApiServerNotRunning);
-    }
-
-    api_process::kill_process(pid)?;
-    api_process::clear_pid(&pid_path)?;
-    let _ = api_process::clear_server_meta(&api_paths.server_meta_file());
+    let _ = daemon.clear_meta();
 
     frontend.write_message(UserMessage {
         level: MessageLevel::Success,
@@ -464,14 +473,13 @@ fn run_logs(
 async fn run_status(
     api_paths: &crate::data::fs::ApiPaths,
 ) -> Result<ApiServerOutcome, CommandError> {
-    let pid_path = api_paths.pid_file();
-    let meta_path = api_paths.server_meta_file();
+    let daemon = api_daemon(api_paths);
 
-    let pid = match api_process::check_already_running(&pid_path)? {
+    let pid = match daemon.running_pid()? {
         Some(pid) => pid,
         None => {
             // Cleanup any orphan meta file when no server is running.
-            let _ = api_process::clear_server_meta(&meta_path);
+            let _ = daemon.clear_meta();
             return Ok(ApiServerOutcome::Status(ApiServerStatusOutcome {
                 running: false,
                 pid: None,
@@ -482,7 +490,7 @@ async fn run_status(
         }
     };
 
-    let meta = api_process::read_server_meta(&meta_path)?;
+    let meta = daemon.read_meta()?;
     let bound_addr = meta
         .as_ref()
         .map(|m| format!("{}://{}:{}", m.scheme, m.bind_ip, m.port));
@@ -755,12 +763,11 @@ mod tests {
                 self.tls_was_present = Some(config.tls_material.is_some());
                 // Capture the persisted scheme BEFORE run_start's post-serve
                 // cleanup removes the meta file.
-                self.persisted_scheme = crate::data::fs::api_process::read_server_meta(
-                    &self.api_paths.server_meta_file(),
-                )
-                .ok()
-                .flatten()
-                .map(|m| m.scheme);
+                self.persisted_scheme = api_daemon(&self.api_paths)
+                    .read_meta()
+                    .ok()
+                    .flatten()
+                    .map(|m| m.scheme);
                 Ok(())
             }
         }
@@ -844,7 +851,9 @@ mod tests {
         let pid_path = api_paths.pid_file();
 
         // Write a PID that can't possibly be alive.
-        crate::data::fs::api_process::write_pid(&pid_path, u32::MAX - 1).unwrap();
+        api_daemon(&api_paths)
+            .force_write_pidfile(u32::MAX - 1)
+            .unwrap();
 
         let mut frontend = NullFrontend {
             messages: Vec::new(),
@@ -889,7 +898,9 @@ mod tests {
         // On platforms where pid_is_awman returns false for the test binary,
         // check_already_running will treat it as stale; that's still a
         // useful signal — running=false, responsive=false.
-        crate::data::fs::api_process::write_pid(&api_paths.pid_file(), std::process::id()).unwrap();
+        api_daemon(&api_paths)
+            .force_write_pidfile(std::process::id())
+            .unwrap();
 
         let result = run_status(&api_paths).await.unwrap();
         if let ApiServerOutcome::Status(outcome) = result {

@@ -8,6 +8,7 @@ pub mod command_frontend;
 pub mod event_bus;
 pub mod queue_worker;
 pub mod routes;
+pub mod serve;
 pub mod session_setup;
 
 use crate::command::commands::api_server::ApiServeConfig;
@@ -24,8 +25,20 @@ pub async fn serve(config: ApiServeConfig) -> Result<(), CommandError> {
     let api_paths = ApiPaths::from_process_env().map_err(CommandError::Data)?;
     api_paths.ensure_root().map_err(CommandError::Data)?;
 
-    tracing::info!(root = %api_paths.root().display(), "Opening session store");
-    let store = SqliteSessionStore::open(api_paths.root()).map_err(CommandError::Data)?;
+    // The database is shared with the amie daemon and lives under
+    // `<data_home>/data/`. Relocate a pre-amie `<api_root>/awman.db` *before*
+    // any connection is opened, exactly as the amie daemon does — otherwise the
+    // two daemons would open different files and API-mode data would appear to
+    // vanish after amie migrated it.
+    let data_paths = api_paths.data_paths();
+    let migration = data_paths
+        .migrate_legacy_db(api_paths.root())
+        .map_err(CommandError::Data)?;
+    tracing::info!(migration = ?migration, "api database migration outcome");
+
+    let db_path = api_paths.db_path();
+    tracing::info!(db = %db_path.display(), "Opening session store");
+    let store = SqliteSessionStore::open_at(&db_path).map_err(CommandError::Data)?;
 
     // Startup cleanup: remove closed sessions older than 24 hours.
     if let Ok(deleted) = store.delete_closed_sessions_older_than(24) {
@@ -43,19 +56,11 @@ pub async fn serve(config: ApiServeConfig) -> Result<(), CommandError> {
     let auth_engine =
         crate::engine::auth::AuthEngine::with_paths(auth_paths.clone(), api_paths.clone());
 
-    let auth_mode = if config.dangerously_skip_auth {
-        routes::AuthMode::Disabled
-    } else {
-        let hash = auth_engine.read_api_key_hash()?.ok_or_else(|| {
-            CommandError::Other(
-                "No API key hash on disk. Run `awman api start --refresh-key` to generate one."
-                    .into(),
-            )
-        })?;
-        routes::AuthMode::Enabled {
-            key_hash: hash.as_str().to_string(),
-        }
-    };
+    let auth_mode = serve::resolve_auth_mode(
+        &api_paths.daemon(),
+        config.dangerously_skip_auth,
+        "awman api start --refresh-key",
+    )?;
     let auth_enabled = matches!(auth_mode, routes::AuthMode::Enabled { .. });
 
     // Construct Layer 1 engines for dispatch. The container runtime is
@@ -279,74 +284,17 @@ pub async fn serve(config: ApiServeConfig) -> Result<(), CommandError> {
         "awman API mode listening — binding HTTP listener"
     );
 
-    // Spawn the shutdown signal as a background task — we trigger
-    // axum-server's graceful shutdown handle when it fires.
-    let server_handle = axum_server::Handle::new();
-    let shutdown_handle = server_handle.clone();
-    tokio::spawn(async move {
-        let ctrl_c = tokio::signal::ctrl_c();
-        #[cfg(unix)]
-        {
-            let mut sigterm =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!("Failed to install SIGTERM handler: {e}");
-                        return;
-                    }
-                };
-            tokio::select! {
-                _ = ctrl_c => { tracing::info!("Received SIGINT, shutting down"); }
-                _ = sigterm.recv() => { tracing::info!("Received SIGTERM, shutting down"); }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = ctrl_c.await;
-            tracing::info!("Received SIGINT, shutting down");
-        }
-        shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
-    });
-
-    let serve_result = if let Some(tls) = config.tls_material.clone() {
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
-            tls.cert_pem.into_bytes(),
-            tls.key_pem.into_bytes(),
-        )
-        .await
-        .map_err(|e| CommandError::Other(format!("TLS setup: {e}")))?;
-        axum_server::bind_rustls(addr, rustls_config)
-            .handle(server_handle.clone())
-            .serve(app.into_make_service())
-            .await
-    } else {
-        axum_server::bind(addr)
-            .handle(server_handle.clone())
-            .serve(app.into_make_service())
-            .await
-    };
-
-    serve_result.map_err(|e| {
-        if let Some(io) = e.raw_os_error() {
-            // Linux EADDRINUSE = 98, macOS = 48, Windows = 10048
-            if matches!(io, 98 | 48 | 10048) {
-                return CommandError::Other(format!(
-                    "Port {} is already in use. Use --port to choose a different port.",
-                    config.port
-                ));
-            }
-        }
-        if e.to_string()
-            .to_lowercase()
-            .contains("address already in use")
-        {
-            return CommandError::Other(format!(
-                "Port {} is already in use. Use --port to choose a different port.",
-                config.port
-            ));
-        }
-        CommandError::Other(format!("Server error: {e}"))
-    })?;
+    // Bind, serve, and handle graceful shutdown via the shared daemon bootstrap.
+    // The EADDRINUSE mapping and SIGINT/SIGTERM handling live in `serve_router`.
+    serve::serve_router(
+        app,
+        serve::ServeOptions {
+            addr,
+            tls: config.tls_material.clone(),
+            shutdown_grace: std::time::Duration::from_secs(30),
+        },
+    )
+    .await?;
 
     tracing::info!(
         port = config.port,

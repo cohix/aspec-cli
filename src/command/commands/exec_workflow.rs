@@ -35,6 +35,8 @@ use crate::engine::workflow::factory::{AgentExecutionFactory, WorkflowRuntimeCon
 use crate::engine::workflow::frontend::WorkflowFrontend;
 use crate::engine::workflow::{EngineRequest, WorkflowEngine};
 
+use super::dynamic_repair::{RepairDecision, WorkflowRepairLoop};
+
 #[derive(Debug, Clone)]
 pub struct ExecWorkflowCommandFlags {
     /// The positional workflow path. `None` is only valid with `--dynamic`,
@@ -2072,14 +2074,16 @@ impl ExecWorkflowCommand {
         shared.lock().unwrap().set_engine_sender(engine_tx);
 
         // ── Leader + repair loop (WI-0092 §9). ──────────────────────────────
-        let mut attempt = 0usize;
-        let mut current_prompt = leader_prompt.clone();
+        //
+        // The attempt budget, the repair-prompt substitution, and the
+        // exhaustion message live in the one shared `WorkflowRepairLoop`; amie's
+        // unattended evaluator drives the same object. Only the *driving* of the
+        // leader container (stuck → yolo countdown → control board) is specific
+        // to this interactive caller.
+        let mut repair = WorkflowRepairLoop::new(generated_path.clone(), leader_prompt.clone());
         let validated_workflow = loop {
-            let label = if attempt == 0 {
-                "leader".to_string()
-            } else {
-                format!("leader-repair-{attempt}")
-            };
+            let label = repair.label();
+            let current_prompt = repair.prompt().to_string();
             let drive = self
                 .drive_leader_agent(
                     Arc::clone(&shared),
@@ -2122,9 +2126,7 @@ impl ExecWorkflowCommand {
                     // Discard any partial workflow.toml and relaunch a fresh
                     // leader with the original prompt (the repair budget resets
                     // — a user restart is not a validation failure).
-                    let _ = std::fs::remove_file(&generated_path);
-                    attempt = 0;
-                    current_prompt = leader_prompt.clone();
+                    repair.restart();
                     shared.lock().unwrap().write_message(UserMessage {
                         level: MessageLevel::Info,
                         text: "Restarting the dynamic workflow leader agent…".into(),
@@ -2145,25 +2147,19 @@ impl ExecWorkflowCommand {
             // Validate: file present → parse → agent validation.
             let result = validate_generated_workflow(&generated_path, &leader_session, &paths);
 
-            match result {
-                Ok(wf) => break wf,
-                Err(err) => {
-                    attempt += 1;
-                    if attempt > 3 {
-                        return Err(CommandError::Other(format!(
-                            "leader agent failed to produce a valid workflow.toml after 3 repair \
-                             attempts; last error: {err}; file is at {}",
-                            generated_path.display()
-                        )));
-                    }
+            match repair.record(result) {
+                RepairDecision::Accepted(wf) => break *wf,
+                RepairDecision::Exhausted(message) => {
+                    return Err(CommandError::Other(message));
+                }
+                RepairDecision::Retry { attempt, error } => {
                     shared.lock().unwrap().write_message(UserMessage {
                         level: MessageLevel::Warning,
                         text: format!(
-                            "workflow.toml validation failed (attempt {attempt}/3): {err}"
+                            "workflow.toml validation failed (attempt {attempt}/{}): {error}",
+                            WorkflowRepairLoop::MAX_REPAIR_ATTEMPTS
                         ),
                     });
-                    current_prompt =
-                        crate::data::dynamic_workflow_assets::build_repair_prompt(&err);
                 }
             }
         };
@@ -2570,7 +2566,7 @@ fn worktree_git_status(worktree: &std::path::Path) -> String {
 /// building it from `.awman/Dockerfile.<agent>` when missing (WI-0092 §9b).
 /// A missing Dockerfile is a hard error; a build failure is a hard error and
 /// is never routed through the repair loop.
-fn ensure_agent_image(
+pub(crate) fn ensure_agent_image(
     engines: &Engines,
     git_root: &std::path::Path,
     paths: &crate::data::RepoDockerfilePaths,

@@ -12,6 +12,9 @@ pub const AWMAN_CONFIG_HOME: &str = "AWMAN_CONFIG_HOME";
 /// `AWMAN_API_ROOT` — overrides the API storage root directory.
 pub const AWMAN_API_ROOT: &str = "AWMAN_API_ROOT";
 
+/// `AWMAN_AMIE_ROOT` — overrides the amie storage root directory.
+pub const AWMAN_AMIE_ROOT: &str = "AWMAN_AMIE_ROOT";
+
 /// `AWMAN_OVERLAYS` — comma-separated list of overlay specs.
 pub const AWMAN_OVERLAYS: &str = "AWMAN_OVERLAYS";
 
@@ -81,6 +84,11 @@ impl EnvSnapshot {
         self.get(AWMAN_API_ROOT).map(PathBuf::from)
     }
 
+    /// `AWMAN_AMIE_ROOT` as a `PathBuf` if set.
+    pub fn amie_root(&self) -> Option<PathBuf> {
+        self.get(AWMAN_AMIE_ROOT).map(PathBuf::from)
+    }
+
     /// `AWMAN_OVERLAYS` raw string if set.
     pub fn overlays(&self) -> Option<&str> {
         self.get(AWMAN_OVERLAYS)
@@ -133,6 +141,7 @@ impl Env {
         let keys = [
             AWMAN_CONFIG_HOME,
             AWMAN_API_ROOT,
+            AWMAN_AMIE_ROOT,
             AWMAN_OVERLAYS,
             AWMAN_REMOTE_ADDR,
             AWMAN_REMOTE_SESSION,

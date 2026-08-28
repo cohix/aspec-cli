@@ -28,6 +28,29 @@ pub const LEADER_PROMPT_MD: &str = include_str!("../assets/dynamic/leader-prompt
 /// The repair prompt template. Substituted with `{{validation_error}}`.
 pub const LEADER_REPAIR_PROMPT: &str = include_str!("../assets/dynamic/leader-repair-prompt.md");
 
+/// The condition-evaluation leader prompt. Unlike a dynamic work-item leader,
+/// this agent first reports whether the condition is met.
+pub const AMIE_LEADER_PROMPT_MD: &str = include_str!("../assets/dynamic/amie-leader-prompt.md");
+
+/// Construct the amie evaluation-leader prompt.
+pub fn build_amie_leader_prompt(
+    condition_name: &str,
+    condition_description: &str,
+    repo_mount_path: &str,
+    available_agents: &str,
+    guidance: Option<&[String]>,
+) -> String {
+    AMIE_LEADER_PROMPT_MD
+        .replace("{{condition_name}}", condition_name)
+        .replace("{{condition_description}}", condition_description)
+        .replace("{{repo_mount_path}}", repo_mount_path)
+        .replace("{{available_agents}}", available_agents)
+        .replace(
+            "{{developer_guidance}}",
+            &build_developer_guidance(guidance),
+        )
+}
+
 /// Construct the leader prompt by substituting the runtime template variables
 /// into [`LEADER_PROMPT_MD`].
 pub fn build_leader_prompt(

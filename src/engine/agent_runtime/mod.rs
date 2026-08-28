@@ -122,6 +122,22 @@ pub trait AgentRuntimeEngine: Send + Sync {
         env_vars: &[(&str, &str)],
     ) -> Vec<String>;
 
+    /// Attach to an already-running agent this process did not start.
+    ///
+    /// Returns a `Box<dyn AgentInstance>` so the result flows into the same
+    /// `run_with_frontend(Box<dyn AgentFrontend>) -> AgentExecution` path a
+    /// freshly-built instance uses — `CliFrontend` and `TuiContainerProxy`
+    /// both drive an attach session unchanged. The instance opens an
+    /// `exec`/`sbx exec` session (argv from `exec_args`); its execution never
+    /// stops the target on grace-expiry, because this process does not own it.
+    fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError>;
+
+    /// Enumerate running agents whose container/sandbox name starts with
+    /// `prefix`. Every tier can honour this: Docker `ps --filter name=`,
+    /// Apple's client-side prefix predicate, sandbox `sbx ls` name filter.
+    /// The name prefix is the one identity channel all three tiers share.
+    fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError>;
+
     /// Name of the CLI binary this runtime drives ("docker", "container", "sbx").
     fn cli_binary(&self) -> &'static str;
 }

@@ -57,6 +57,15 @@ pub(super) trait ContainerBackend: Send + Sync {
         env_vars: &[(&str, &str)],
     ) -> Vec<String>;
 
+    /// Attach to an already-running container this process did not start,
+    /// via `<cli> exec` (argv from `exec_args`). The returned instance's
+    /// execution never issues `stop`/`rm` on grace-expiry — the container
+    /// belongs to another process.
+    fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError>;
+
+    /// List running awman containers whose name starts with `prefix`.
+    fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError>;
+
     /// Static name used by `ContainerRuntime::runtime_name`.
     fn name(&self) -> &'static str;
 

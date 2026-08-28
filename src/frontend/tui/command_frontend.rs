@@ -101,6 +101,9 @@ pub struct TuiCommandFrontend {
     pub(crate) last_config_edit_field: Option<String>,
 }
 
+#[async_trait::async_trait]
+impl crate::command::commands::amie::commands::AmieCommandFrontend for TuiCommandFrontend {}
+
 impl TuiCommandFrontend {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
