@@ -39,11 +39,21 @@ RUN apt-get update \
 # correct prebuilt binary for the current architecture. The installer drops the
 # binary under the invoking user's ~/.local/bin; copy it into /usr/local/bin so
 # it is on PATH for every user (including the runtime `awman` user below).
+#
+# The installer also unpacks a `codex-code-mode-host` helper (required for
+# Codex's Code Mode tool execution) into its release directory, but upstream's
+# install.sh only symlinks it into ~/.local/bin on macOS — on Linux it stays
+# un-linked, so Code Mode fails closed with "host executable was not found"
+# even though the binary was downloaded. Install it from the release
+# directory explicitly so Code Mode works from this Linux-based image too.
 RUN curl -fsSL --retry 5 --retry-delay 2 --retry-max-time 120 \
         https://chatgpt.com/codex/install.sh | sh \
     && codex_bin="$(command -v codex || true)" \
     && [ -n "$codex_bin" ] || codex_bin="$HOME/.local/bin/codex" \
-    && install -m 0755 "$codex_bin" /usr/local/bin/codex
+    && install -m 0755 "$codex_bin" /usr/local/bin/codex \
+    && install -m 0755 \
+        "$HOME/.codex/packages/standalone/current/bin/codex-code-mode-host" \
+        /usr/local/bin/codex-code-mode-host
 
 # ── awman user + workspace (idempotent against a base that already created it) ─
 # Outer braces keep the && chain associated with the user-creation block,
@@ -63,4 +73,5 @@ WORKDIR /workspace
 # ── Smoke test: run as the runtime user so we verify the binary is on PATH and
 # executable from the actual entrypoint context, not just for root. ───────────
 RUN test -x "$(command -v codex)" \
-    && test -x "$(command -v bwrap)"
+    && test -x "$(command -v bwrap)" \
+    && test -x "$(command -v codex-code-mode-host)"
