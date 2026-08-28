@@ -132,6 +132,12 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
             Ok(gateway) => gateway,
             Err(error) => return per_command::amie::render_failure(&error, json),
         };
+        // A first run mints the bearer key. Disclose it on stderr — stdout
+        // belongs to `--json` consumers, and this is the only moment the
+        // plaintext exists outside the daemon's hash file.
+        if let Some(setup) = supervisor.take_generated_key_setup() {
+            eprintln!("{setup}");
+        }
         dispatch = dispatch.with_amie_gateway(Arc::new(gateway) as Arc<dyn ConditionGateway>);
     } else if path_strs == ["amie", "status"] {
         let supervisor = match AmieSupervisor::from_env(&Env::from_process()) {

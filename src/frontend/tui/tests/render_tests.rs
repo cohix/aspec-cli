@@ -257,7 +257,16 @@ fn amie_condition_detail_modal_renders_over_the_body_and_stays_live() {
         snap.conditions = vec![fake_condition("cond-a")];
         snap.loaded = true;
     }
-    let condition = app.active_tab().amie.as_ref().unwrap().snapshot.lock().unwrap().conditions[0].clone();
+    let condition = app
+        .active_tab()
+        .amie
+        .as_ref()
+        .unwrap()
+        .snapshot
+        .lock()
+        .unwrap()
+        .conditions[0]
+        .clone();
     app.active_dialog = Some(Dialog::AmieConditionDetail(
         crate::frontend::tui::dialogs::AmieDetailState {
             name: "cond-a".to_string(),

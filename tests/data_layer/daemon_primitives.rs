@@ -73,6 +73,7 @@ fn daemon_process_pidfile_and_server_meta_round_trip() {
         port: 3210,
         bind_ip: "127.0.0.1".into(),
         scheme: "http".into(),
+        auth_disabled: false,
     };
     assert_eq!(process.read_meta().unwrap(), None);
     process.write_meta(&meta).unwrap();

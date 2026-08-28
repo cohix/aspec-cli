@@ -102,8 +102,9 @@ impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFronte
     fn ask_condition_repo(&mut self) -> Result<PathBuf, CommandError> {
         match super::per_command::helpers::read_line("repository directory [current dir]?") {
             Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
-            Some(_) => std::env::current_dir()
-                .map_err(|error| CommandError::Other(format!("cannot resolve current dir: {error}"))),
+            Some(_) => std::env::current_dir().map_err(|error| {
+                CommandError::Other(format!("cannot resolve current dir: {error}"))
+            }),
             None => Err(CommandError::InteractiveInputUnavailable {
                 prompt: "repository directory".into(),
             }),
@@ -147,7 +148,10 @@ impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFronte
         if self.non_interactive || !super::output::stdin_is_tty() {
             return Ok(false);
         }
-        eprintln!("awman: also delete the condition directory {}? [y/N]", path.display());
+        eprintln!(
+            "awman: also delete the condition directory {}? [y/N]",
+            path.display()
+        );
         match super::per_command::helpers::read_line("choice [y/N]:") {
             Some(s) => Ok(matches!(s.trim().to_lowercase().as_str(), "y" | "yes")),
             None => Ok(false),

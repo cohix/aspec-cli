@@ -50,6 +50,15 @@ pub struct StatusBar {
     pub text: String,
 }
 
+/// Everything [`App::build_amie_tab`] produces. `key_setup` is `Some` only on
+/// the run that minted the amie bearer key, and carries the shell snippet the
+/// caller must show before it is lost — the plaintext key exists nowhere else.
+pub struct AmieTabBuild {
+    pub tab: Tab,
+    pub gateway: Arc<dyn crate::command::commands::amie::gateway::ConditionGateway>,
+    pub key_setup: Option<String>,
+}
+
 /// Central TUI state. Contains NO business logic — only UI state.
 pub struct App {
     pub tabs: Vec<Tab>,
@@ -181,10 +190,16 @@ impl App {
             return;
         }
         match Self::build_amie_tab(&self.engines, &self.runtime_handle) {
-            Ok((tab, gateway)) => {
-                self.amie_gateway = Some(gateway);
-                self.tabs.push(tab);
+            Ok(build) => {
+                self.amie_gateway = Some(build.gateway);
+                self.tabs.push(build.tab);
                 self.active_tab = self.tabs.len() - 1;
+                if let Some(body) = build.key_setup {
+                    self.active_dialog = Some(Dialog::Notice {
+                        title: "amie authentication".to_string(),
+                        body,
+                    });
+                }
                 self.needs_redraw = true;
             }
             Err(message) => {
@@ -203,13 +218,7 @@ impl App {
     pub(crate) fn build_amie_tab(
         engines: &crate::command::dispatch::Engines,
         runtime_handle: &tokio::runtime::Handle,
-    ) -> Result<
-        (
-            Tab,
-            Arc<dyn crate::command::commands::amie::gateway::ConditionGateway>,
-        ),
-        String,
-    > {
+    ) -> Result<AmieTabBuild, String> {
         use crate::command::commands::amie::daemon::AmieSupervisor;
         use crate::command::commands::amie::gateway::ConditionGateway;
         use crate::command::commands::amie::runtime_guard::require_container_tier;
@@ -220,21 +229,28 @@ impl App {
         require_container_tier(engines).map_err(|e| e.to_string())?;
 
         let env = Env::from_process();
-        let supervisor = AmieSupervisor::from_env(&env).map_err(|e| e.to_string())?;
+        let supervisor = Arc::new(AmieSupervisor::from_env(&env).map_err(|e| e.to_string())?);
 
         // `ensure_running` is async, but the caller may be on a tokio worker
         // thread where `Handle::block_on` would panic. Drive it on the runtime
         // and block on the result channel instead
         // (see /awman/context/workflow/deviations.md, D-tui-3).
         let (tx, rx) = std::sync::mpsc::channel();
-        runtime_handle.spawn(async move {
-            let _ = tx.send(supervisor.ensure_running().await);
-        });
+        {
+            let supervisor = supervisor.clone();
+            runtime_handle.spawn(async move {
+                let _ = tx.send(supervisor.ensure_running().await);
+            });
+        }
         let gateway = match rx.recv() {
             Ok(Ok(gateway)) => gateway,
             Ok(Err(error)) => return Err(error.to_string()),
             Err(_) => return Err("amie daemon startup was interrupted".to_string()),
         };
+        // A first run mints the bearer key here. It has to be shown, or the
+        // user is left with a daemon they cannot authenticate to from any
+        // later process; the caller raises it as a dismissable modal.
+        let key_setup = supervisor.take_generated_key_setup();
 
         let session = Self::amie_synthetic_session()
             .map_err(|error| format!("failed to open amie tab: {error}"))?;
@@ -265,7 +281,11 @@ impl App {
                 .expect("new_amie always installs amie state")
                 .set_poll_handle(handle);
         }
-        Ok((tab, gateway))
+        Ok(AmieTabBuild {
+            tab,
+            gateway,
+            key_setup,
+        })
     }
 
     /// Build the amie tab's synthetic session, rooted at the amie storage root.

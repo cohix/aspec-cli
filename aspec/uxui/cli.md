@@ -140,7 +140,7 @@ belong to `awman amie` itself; pass them before a subcommand when using one:
 | `remove <name>` | `<name>` (required string) | `-y, --yes` (bool, default `false`). |
 | `pause <name>` | `<name>` (required string) | — |
 | `resume <name>` | `<name>` (required string) | — |
-| `start` | — | `--port <n>` (u16, default `0`; `0` selects an OS-assigned port), `--background` (bool, default `false`), `--refresh-key` (bool, default `false`), `--dangerously-skip-auth` (bool, default `false`). |
+| `start` | — | `--port <n>` (u16, default `0`; `0` selects an OS-assigned port), `--background` (bool, default `false`), `--refresh-key` (bool, default `false`), `--dangerously-skip-auth` (bool, default `false`). On the first start — and with `--refresh-key` — a bearer key is minted and printed once as a shell-export snippet for `AWMAN_AMIE_KEY`, tailored to the user's `SHELL`. `--dangerously-skip-auth` mints no key, writes no hash, warns that auth is off, and is acceptable only because the daemon binds `127.0.0.1` exclusively. |
 | `stop` (alias `kill`) | — | — |
 | `status` | — | `--json` (bool, default `false`). |
 | `logs` | — | `-f, --follow` (bool, default `false`). |
@@ -165,6 +165,6 @@ belong to `awman amie` itself; pass them before a subcommand when using one:
 
 - Per-repo config: `<git-root>/.awman/config.json`.
 - Global config: `$HOME/.awman/config.json`.
-- Environment overrides: `AWMAN_*` variables (notably `AWMAN_OVERLAYS`, `AWMAN_API_KEY`, `AWMAN_API_ROOT`).
+- Environment overrides: `AWMAN_*` variables (notably `AWMAN_OVERLAYS`, `AWMAN_API_KEY`, `AWMAN_AMIE_KEY`, `AWMAN_API_ROOT`).
 
 Precedence (highest to lowest): CLI flag → environment variable → repo config → global config → built-in default.

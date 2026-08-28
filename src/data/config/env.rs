@@ -27,6 +27,11 @@ pub const AWMAN_REMOTE_SESSION: &str = "AWMAN_REMOTE_SESSION";
 /// `AWMAN_API_KEY` — API key for the remote API server.
 pub const AWMAN_API_KEY: &str = "AWMAN_API_KEY";
 
+/// `AWMAN_AMIE_KEY` — bearer key the CLI and TUI authenticate to the amie
+/// daemon with. Minted on the daemon's first start and printed once as a
+/// shell-export snippet; see `awman amie start`.
+pub const AWMAN_AMIE_KEY: &str = "AWMAN_AMIE_KEY";
+
 /// `AWMAN_MAX_CONCURRENT_AGENTS` — overrides the max-concurrent-agents cap
 /// for workflow execution.
 pub const AWMAN_MAX_CONCURRENT_AGENTS: &str = "AWMAN_MAX_CONCURRENT_AGENTS";
@@ -36,6 +41,10 @@ pub const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 
 /// `XDG_DATA_HOME` — XDG base directory for user-specific data files.
 pub const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
+
+/// `SHELL` — the user's login shell. Read only to tailor the shell snippet
+/// printed alongside a freshly minted amie key; never to execute anything.
+pub const SHELL: &str = "SHELL";
 
 /// Frozen snapshot of every env var awman reads.
 ///
@@ -109,9 +118,19 @@ impl EnvSnapshot {
         self.get(AWMAN_API_KEY)
     }
 
+    /// `AWMAN_AMIE_KEY` if set and non-empty.
+    pub fn amie_key(&self) -> Option<&str> {
+        self.get(AWMAN_AMIE_KEY).filter(|v| !v.is_empty())
+    }
+
     /// `AWMAN_MAX_CONCURRENT_AGENTS` parsed as a `usize`, if set and valid.
     pub fn max_concurrent_agents(&self) -> Option<usize> {
         self.get(AWMAN_MAX_CONCURRENT_AGENTS)?.parse().ok()
+    }
+
+    /// `SHELL` if set and non-empty.
+    pub fn shell(&self) -> Option<&str> {
+        self.get(SHELL).filter(|v| !v.is_empty())
     }
 
     /// `XDG_CONFIG_HOME` as a `PathBuf` if set and non-empty.
@@ -146,9 +165,11 @@ impl Env {
             AWMAN_REMOTE_ADDR,
             AWMAN_REMOTE_SESSION,
             AWMAN_API_KEY,
+            AWMAN_AMIE_KEY,
             AWMAN_MAX_CONCURRENT_AGENTS,
             XDG_CONFIG_HOME,
             XDG_DATA_HOME,
+            SHELL,
         ];
         let mut values = HashMap::new();
         for k in keys {

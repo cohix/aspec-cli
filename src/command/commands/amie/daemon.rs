@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::command::commands::amie::commands::{AmieCommandFrontend, AmieServeConfig};
 use crate::command::commands::amie::gateway::{DaemonStatus, RemoteConditionGateway};
+use crate::command::commands::amie::key_setup;
 use crate::command::commands::http_core::HttpCore;
 use crate::command::commands::Command;
 use crate::command::dispatch::Engines;
@@ -109,9 +110,13 @@ pub struct AmieSupervisor {
     process: DaemonProcess,
     guard: DaemonGuard,
     paths: AmiePaths,
+    env: EnvSnapshot,
     /// A bearer key minted by this process because none existed yet. It is
-    /// deliberately never printed from here — see `provision_key`.
+    /// deliberately never printed from here — see `provision_key`. Callers that
+    /// own a terminal drain it via [`AmieSupervisor::take_generated_key_setup`].
     generated_key: std::sync::Mutex<Option<ApiKey>>,
+    /// Set once the minted key has been handed to a frontend for display.
+    key_disclosed: std::sync::atomic::AtomicBool,
 }
 
 impl AmieSupervisor {
@@ -121,7 +126,9 @@ impl AmieSupervisor {
             process: amie_process(&paths),
             guard: DaemonGuard::for_daemon(DaemonKind::Amie, env)?,
             paths,
+            env: env.clone(),
             generated_key: std::sync::Mutex::new(None),
+            key_disclosed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -134,6 +141,27 @@ impl AmieSupervisor {
             .clone()
     }
 
+    /// Take the setup snippet for a key this supervisor minted, if it minted
+    /// one and has not handed it out yet. `None` on every later call, so a
+    /// caller may print the result unconditionally.
+    ///
+    /// The key itself stays in place — this supervisor still needs it to
+    /// authenticate — but the *disclosure* happens exactly once, so two
+    /// frontends sharing a supervisor cannot both print the same secret.
+    pub fn take_generated_key_setup(&self) -> Option<String> {
+        let key = self.generated_key()?;
+        if self
+            .key_disclosed
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some(key_setup::render_key_setup(
+            key.as_str(),
+            key_setup::ShellFlavor::from_env(&self.env),
+        ))
+    }
+
     /// Resolve the bearer key this process will authenticate with.
     ///
     /// On a first run there is no `amie_key.hash` yet. The key MUST be minted
@@ -142,13 +170,18 @@ impl AmieSupervisor {
     /// (launchd) or the journal (systemd-run) and would persist the plaintext
     /// key in a file `awman amie logs` prints verbatim.
     fn provision_key(&self) -> Result<Option<ApiKey>, CommandError> {
-        if let Ok(key) = std::env::var("AWMAN_AMIE_KEY") {
-            if !key.is_empty() {
-                return Ok(Some(ApiKey::from_string(key)));
-            }
+        if let Some(key) = self.env.amie_key() {
+            return Ok(Some(ApiKey::from_string(key.to_string())));
         }
         if let Some(key) = self.generated_key() {
             return Ok(Some(key));
+        }
+        // A daemon started with `--dangerously-skip-auth` checks no bearer
+        // token, so minting one here would write an `amie_key.hash` whose
+        // plaintext nobody holds — and the next auth-enabled start would then
+        // demand a key the user was never shown.
+        if self.daemon_auth_disabled()? {
+            return Ok(None);
         }
         if self.process.paths().read_key_hash()?.is_some() {
             // A hash exists but this process was given no key; the request will
@@ -167,6 +200,20 @@ impl AmieSupervisor {
             .lock()
             .expect("amie generated-key mutex poisoned") = Some(key.clone());
         Ok(Some(key))
+    }
+
+    /// Whether the daemon that is currently running published a sidecar saying
+    /// it serves unauthenticated. `false` when no daemon is running, when it
+    /// published no sidecar, or when the sidecar predates the flag — every one
+    /// of which means "assume auth is required".
+    fn daemon_auth_disabled(&self) -> Result<bool, CommandError> {
+        if self.process.running_pid()?.is_none() {
+            return Ok(false);
+        }
+        Ok(self
+            .process
+            .read_meta()?
+            .is_some_and(|meta| meta.auth_disabled))
     }
 
     /// Discover the existing daemon endpoint, if its metadata sidecar is present.
@@ -239,17 +286,32 @@ async fn run_start(
             "amie daemon is already running (PID {pid})"
         )));
     }
+    // `--dangerously-skip-auth` mints nothing and writes no hash: the flag is
+    // for this run only, so a later plain `start` still finds whatever hash was
+    // on disk before. It is tolerable because amie binds 127.0.0.1 exclusively.
+    if flags.dangerously_skip_auth {
+        frontend.write_message(UserMessage {
+            level: MessageLevel::Warning,
+            text: "Authentication is DISABLED (--dangerously-skip-auth). Any process \
+                   on this machine can drive amie. The daemon still binds to loopback \
+                   (127.0.0.1) only, so it is unreachable from the network."
+                .into(),
+        });
+    }
     if flags.refresh_key
         || (!flags.dangerously_skip_auth && process.paths().read_key_hash()?.is_none())
     {
         let key = engines.auth_engine.generate_api_key()?;
         let hash = engines.auth_engine.hash_api_key(&key);
         process.paths().write_key_hash(hash.as_str())?;
+        // The plaintext key is disclosed exactly here, in the foreground
+        // process that owns a terminal — never in the detached child, whose
+        // stdout lands in a log file `awman amie logs` prints verbatim.
         frontend.write_message(UserMessage {
             level: MessageLevel::Info,
-            text: format!(
-                "amie API key (store it; it will not be shown again): {}",
-                key.as_str()
+            text: key_setup::render_key_setup(
+                key.as_str(),
+                key_setup::ShellFlavor::from_env(&Env::from_process()),
             ),
         });
         if flags.refresh_key {

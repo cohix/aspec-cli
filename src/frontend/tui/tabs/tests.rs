@@ -1311,7 +1311,10 @@ fn project_name_is_amie_regardless_of_session_basename() {
 fn new_amie_starts_no_git_poll() {
     let tab = make_amie_tab();
     assert!(tab.is_amie, "Tab::new_amie must set is_amie");
-    assert!(tab.amie.is_some(), "Tab::new_amie must install AmieTabState");
+    assert!(
+        tab.amie.is_some(),
+        "Tab::new_amie must install AmieTabState"
+    );
     assert!(
         tab.git_poll_root.is_none(),
         "Tab::new_amie must not start a git poll (no meaningful diff for the amie storage root)"

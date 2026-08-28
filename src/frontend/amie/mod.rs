@@ -121,6 +121,7 @@ pub async fn serve_with(
                 port: addr.port(),
                 bind_ip: "127.0.0.1".into(),
                 scheme: "http".into(),
+                auth_disabled: config.dangerously_skip_auth,
             })?;
             *state
                 .bound_addr

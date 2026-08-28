@@ -103,14 +103,13 @@ impl AmieCommandFrontend for TuiCommandFrontend {
         }
     }
 
-    fn ask_delete_condition_dir(
-        &mut self,
-        name: &str,
-        path: &Path,
-    ) -> Result<bool, CommandError> {
+    fn ask_delete_condition_dir(&mut self, name: &str, path: &Path) -> Result<bool, CommandError> {
         let response = self.ask_dialog(DialogRequest::YesNo {
             title: format!("Delete {name} directory?"),
-            body: format!("Also delete the persistent condition directory {}?", path.display()),
+            body: format!(
+                "Also delete the persistent condition directory {}?",
+                path.display()
+            ),
         })?;
         Ok(matches!(response, DialogResponse::Yes))
     }

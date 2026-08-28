@@ -330,6 +330,68 @@ shared database as API mode, at `~/.awman/data/awman.db` — see
 
 ---
 
+## Authenticating to the daemon
+
+amie serves its condition data over a small HTTP surface on loopback, and the
+CLI and TUI are clients of it. By default that surface requires a bearer key.
+
+### The key and `AWMAN_AMIE_KEY`
+
+The first time the daemon starts, it mints a key, stores only its SHA-256 hash
+in `~/.awman/amie/amie_key.hash`, and prints the plaintext **once** together
+with the shell snippet that makes it usable:
+
+```
+╔════════════════════════════════════════════════════════════════════╗
+║  amie API key (store this — it will not be shown again)            ║
+║  954ec30c6719074e0ea952588461d079f97675424b8ecb53b5cbe76a9f06c96b  ║
+╚════════════════════════════════════════════════════════════════════╝
+
+Add this to ~/.zshrc so the awman CLI and TUI can authenticate to amie:
+
+    export AWMAN_AMIE_KEY=954ec30c6719074e0ea952588461d079f97675424b8ecb53b5cbe76a9f06c96b
+```
+
+Add that line to your shell startup file and reload it. Every later
+`awman amie` command — and the amie TUI tab — reads `AWMAN_AMIE_KEY` from the
+environment and sends it as the bearer token. Without it the daemon answers
+`401 Unauthorized`.
+
+The snippet is tailored to your ``: zsh gets `~/.zshrc`, bash gets
+`~/.bashrc`, and fish gets `set -gx AWMAN_AMIE_KEY …` for
+`~/.config/fish/config.fish`.
+
+Only the hash is stored, so a lost key cannot be recovered — mint a new one:
+
+```sh
+awman amie stop
+awman amie start --refresh-key   # prints a fresh key and snippet, then exits
+awman amie start
+```
+
+### Running without a key — `--dangerously-skip-auth`
+
+If you would rather not manage a key at all:
+
+```sh
+awman amie start --dangerously-skip-auth
+```
+
+This mints no key, writes no hash, and accepts unauthenticated requests. It is
+a reasonable choice on a single-user machine because **the amie daemon binds to
+127.0.0.1 exclusively** — there is no flag to expose it on another interface,
+so nothing off the machine can reach it. What it does give up is isolation from
+other local processes and users on the same host: any of them can drive amie,
+which means launching agent containers against your repo. Prefer the key on
+shared or multi-user machines.
+
+The flag applies to the run it is passed to. It leaves any existing
+`amie_key.hash` untouched, so a later plain `awman amie start` requires a key
+again. While a skip-auth daemon is running, the CLI and TUI notice and send no
+bearer token rather than minting a key you would never see.
+
+---
+
 ## Watching for amie's own containers
 
 Containers amie launches — both the evaluation agent and the workflow it

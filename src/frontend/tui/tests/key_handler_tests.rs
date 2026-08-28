@@ -776,7 +776,13 @@ fn make_app_no_container_runtime() -> App {
     engines.container_runtime = None;
     let session_manager = Arc::new(RwLock::new(SessionManager::in_memory()));
     let tab = Tab::new(make_session());
-    App::new(catalogue, engines, session_manager, tab, rt.handle().clone())
+    App::new(
+        catalogue,
+        engines,
+        session_manager,
+        tab,
+        rt.handle().clone(),
+    )
 }
 
 /// An app with a second ordinary tab plus the amie tab active — enough tabs
@@ -815,7 +821,10 @@ fn ctrl_a_in_new_tab_dialog_focuses_existing_amie_tab_and_closes_dialog() {
         app.active_dialog.is_none(),
         "Ctrl-A in the New Tab dialog must close it"
     );
-    assert_eq!(app.active_tab, amie_idx, "Ctrl-A must activate the amie tab");
+    assert_eq!(
+        app.active_tab, amie_idx,
+        "Ctrl-A must activate the amie tab"
+    );
 }
 
 // The load-bearing test for the Ctrl-A binding (implementation-contract.md
@@ -899,7 +908,9 @@ fn amie_list_a_routes_to_start_amie_attach() {
     set_amie_conditions(&mut app, &["cond-a"]);
     press_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
     assert!(
-        app.status_bar.text.contains("amie requires a container runtime"),
+        app.status_bar
+            .text
+            .contains("amie requires a container runtime"),
         "'a' in the amie list must route to start_amie_attach: {:?}",
         app.status_bar.text
     );

@@ -32,6 +32,10 @@ pub(crate) async fn run_bare(matches: &ArgMatches, engines: &Engines) -> ExitCod
         Ok(gateway) => gateway,
         Err(error) => return render_failure(&error, json),
     };
+    // Disclosed on stderr so `--json` stdout stays machine-parseable.
+    if let Some(setup) = supervisor.take_generated_key_setup() {
+        eprintln!("{setup}");
+    }
     match gateway.status().await {
         Ok(status) => {
             if let Some(output) = render_amie(&AmieOutcome::Status(status), json) {
@@ -135,6 +139,12 @@ pub(crate) fn render_amie(outcome: &AmieOutcome, json: bool) -> Option<String> {
             ))
         }
         AmieOutcome::Logs { log_path } => Some(format!("Tailing amie logs at {log_path}")),
+        // `--refresh-key` returns before anything is started, so saying
+        // "started" here would contradict the key snippet just printed.
+        AmieOutcome::Started {
+            refreshed_key: true,
+            ..
+        } => Some("amie API key regenerated. Start the daemon with `awman amie start`.".into()),
         AmieOutcome::Started {
             port, background, ..
         } => Some(if *background {

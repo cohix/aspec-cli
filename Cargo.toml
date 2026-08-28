@@ -156,3 +156,7 @@ path = "tests/amie_attach_frontends.rs"
 [[test]]
 name = "amie_blockers"
 path = "tests/amie_blockers.rs"
+
+[[test]]
+name = "amie_auth_key"
+path = "tests/amie_auth_key.rs"

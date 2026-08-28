@@ -145,6 +145,13 @@ pub enum Dialog {
         title: String,
         body: String,
     },
+    /// One-shot informational modal with no command thread behind it: Enter and
+    /// Esc simply dismiss it. Used for the amie key-setup snippet, which must
+    /// be readable long enough to copy and must not scroll away in a status bar.
+    Notice {
+        title: String,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone)]

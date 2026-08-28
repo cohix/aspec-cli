@@ -985,7 +985,7 @@ const AMIE_START: CommandSpec = CommandSpec {
         FlagSpec {
             long: "refresh-key",
             short: None,
-            help: "Regenerate the amie daemon API key.",
+            help: "Regenerate the amie key and print its AWMAN_AMIE_KEY export snippet.",
             kind: FlagKind::Bool,
             default: FlagDefault::Bool(false),
             frontends: FrontendVisibility::All,
@@ -996,7 +996,7 @@ const AMIE_START: CommandSpec = CommandSpec {
         FlagSpec {
             long: "dangerously-skip-auth",
             short: None,
-            help: "Disable authentication for this execution.",
+            help: "Skip key creation and authentication for this run (loopback-only).",
             kind: FlagKind::Bool,
             default: FlagDefault::Bool(false),
             frontends: FrontendVisibility::All,

@@ -748,6 +748,31 @@ pub(super) fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Fr
             )));
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
+        dialogs::Dialog::Notice { title, body } => {
+            let body_lines = body.lines().count() as u16;
+            let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
+            // The amie key snippet contains a box-drawn banner and an indented
+            // export line; size to the widest line so neither wraps.
+            let max_body_width = body
+                .lines()
+                .map(unicode_width::UnicodeWidthStr::width)
+                .max()
+                .unwrap_or(40) as u16;
+            let width = max_body_width
+                .max(title_w)
+                .saturating_add(6)
+                .clamp(55, area.width.saturating_sub(4));
+            let height = (body_lines + 6).min(area.height.saturating_sub(2)).max(8);
+            let dialog_area = dialogs::centered_fixed(width, height, area);
+            let inner = dialogs::render_dialog_frame(title, Color::Yellow, dialog_area, frame);
+            let mut lines: Vec<Line> = body.lines().map(Line::from).collect();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  [Enter] dismiss",
+                Style::default().fg(Color::DarkGray),
+            )));
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        }
     }
 }
 

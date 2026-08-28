@@ -98,10 +98,24 @@ pub async fn run(
             (app, true)
         }
         InitialTab::Amie => match App::build_amie_tab(&ctx.engines, &runtime_handle) {
-            Ok((tab, gateway)) => {
-                let mut app =
-                    App::new(catalogue, ctx.engines, session_manager, tab, runtime_handle);
-                app.amie_gateway = Some(gateway);
+            Ok(build) => {
+                let key_setup = build.key_setup;
+                let mut app = App::new(
+                    catalogue,
+                    ctx.engines,
+                    session_manager,
+                    build.tab,
+                    runtime_handle,
+                );
+                app.amie_gateway = Some(build.gateway);
+                // First run: the bearer key was minted a moment ago and lives
+                // only in memory. Show it before the event loop starts.
+                if let Some(body) = key_setup {
+                    app.active_dialog = Some(Dialog::Notice {
+                        title: "amie authentication".to_string(),
+                        body,
+                    });
+                }
                 (app, false)
             }
             Err(message) => {

@@ -351,6 +351,7 @@ async fn run_start(
         port: flags.port,
         bind_ip: bind_ip.to_string(),
         scheme: scheme.to_string(),
+        auth_disabled: flags.dangerously_skip_auth,
     });
 
     frontend.write_message(UserMessage {

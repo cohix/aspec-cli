@@ -32,6 +32,12 @@ pub struct ServerMeta {
     pub port: u16,
     pub bind_ip: String,
     pub scheme: String,
+    /// True when the daemon was started with `--dangerously-skip-auth` and is
+    /// therefore serving unauthenticated. Clients read this to avoid minting a
+    /// bearer key (and writing a key hash) the running daemon will never check.
+    /// Absent in sidecars written by older versions, which always required auth.
+    #[serde(default)]
+    pub auth_disabled: bool,
 }
 
 /// Typed owner of one daemon's PID / meta / spawn lifecycle.
@@ -624,6 +630,7 @@ mod tests {
             port: 8080,
             bind_ip: "127.0.0.1".into(),
             scheme: "https".into(),
+            auth_disabled: false,
         };
         d.write_meta(&meta).unwrap();
         assert_eq!(d.read_meta().unwrap(), Some(meta));

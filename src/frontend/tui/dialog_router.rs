@@ -26,6 +26,10 @@ pub(super) fn handle_dialog_submit(app: &mut App) {
             app.active_dialog = None;
             app.should_quit = true;
         }
+        // No command thread is waiting on a Notice: Enter just closes it.
+        Some(Dialog::Notice { .. }) => {
+            app.active_dialog = None;
+        }
 
         Some(Dialog::TextInput { editor, .. }) if is_command => {
             let text = editor.text.clone();
@@ -536,7 +540,8 @@ pub(super) fn handle_dialog_char(app: &mut App, c: char) {
         | Some(Dialog::KindSelect { .. })
         | Some(Dialog::YesNo { .. })
         | Some(Dialog::YesNoCancel { .. })
-        | Some(Dialog::FatalError { .. }) => {}
+        | Some(Dialog::FatalError { .. })
+        | Some(Dialog::Notice { .. }) => {}
 
         None => {}
     }

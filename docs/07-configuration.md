@@ -393,6 +393,7 @@ Value handling:
 | `AWMAN_MAX_CONCURRENT_AGENTS` | Cap on concurrently-running workflow steps; beats `maxConcurrentAgents` in repo/global config, beaten by `--max-concurrent` — see [Parallel Workflows](15-parallel-workflows.md) |
 | `AWMAN_REMOTE_ADDR` | Remote API server address; beats `remote.defaultAddr`, beaten by `--remote-addr` |
 | `AWMAN_API_KEY` | Remote API key; beats `remote.defaultAPIKey`, beaten by `--api-key` |
+| `AWMAN_AMIE_KEY` | Bearer key the CLI and TUI authenticate to the amie daemon with; printed once as a shell snippet on the daemon's first start — see [amie: Authenticating to the daemon](16-amie.md#authenticating-to-the-daemon) |
 | `AWMAN_REMOTE_SESSION` | Sticky session id for `remote exec` commands; beaten by `--session` |
 
 ---
