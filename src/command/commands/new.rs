@@ -6,6 +6,9 @@ use serde::Serialize;
 use crate::command::commands::prompt_templates::{
     render_skill_interview_prompt, render_workflow_interview_prompt,
 };
+use crate::command::commands::skill_library::{
+    pull_all_libraries, pull_library, resolve_pull_target, PullOutcome,
+};
 use crate::command::commands::{resolve_agent, Command};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
@@ -35,6 +38,9 @@ pub struct NewSkillFlags {
     pub interview: bool,
     pub non_interactive: bool,
     pub global: bool,
+    pub pull: Option<String>,
+    pub pull_all: bool,
+    pub subdir: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,11 +64,26 @@ pub struct NewWorkflowOutcome {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PullLibraryOutcome {
+    pub slug: String,
+    pub dir: String,
+    pub updated: bool,
+    pub skills_found: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct NewSkillOutcome {
     pub interview: bool,
     pub global: bool,
     pub path: Option<String>,
+    /// `true` when this run was a `--pull`/`--pull-all` library operation
+    /// rather than skill creation. `libraries` alone cannot carry that
+    /// distinction: `--pull-all` with nothing pulled yet also yields an empty
+    /// list, and rendering it as a created skill would be wrong.
+    pub pull: bool,
+    pub libraries: Vec<PullLibraryOutcome>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -469,145 +490,286 @@ impl Command for NewCommand {
                 })
             }
             NewSubcommand::Skill(f) => {
-                frontend.write_message(UserMessage {
-                    level: MessageLevel::Info,
-                    text: "new skill: starting skill creation".into(),
-                });
-                let name = frontend.ask_skill_name().unwrap_or_else(|_| "skill".into());
-                let session = if !f.global || f.interview {
-                    Some(self.session.clone())
-                } else {
-                    None
-                };
-                let git_root = session.as_ref().map(|s| s.git_root().to_path_buf());
-                let skill_dirs = match SkillDirs::from_process_env(git_root) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        frontend.write_message(UserMessage {
-                            level: MessageLevel::Error,
-                            text: format!("new skill: failed to resolve skill dirs: {e}"),
-                        });
-                        return Err(CommandError::from(e));
-                    }
-                };
-                let dir = if f.global {
-                    skill_dirs.global_dir().join(&name)
-                } else {
-                    skill_dirs.repo_dir().unwrap().join(&name)
-                };
-                let _ = std::fs::create_dir_all(&dir);
-                let path = dir.join("SKILL.md");
-
-                if f.interview {
-                    let skeleton = format!("# Skill: {name}\n\n## Description\n\n## Body\n");
-                    let _ = std::fs::write(&path, skeleton);
-                    let session = session.as_ref().unwrap();
-                    let agent = match resolve_agent(&None, session) {
-                        Ok(a) => a,
-                        Err(e) => {
+                if f.pull_all {
+                    let skill_dirs = match SkillDirs::from_process_env(None) {
+                        Ok(dirs) => dirs,
+                        Err(error) => {
                             frontend.write_message(UserMessage {
                                 level: MessageLevel::Error,
-                                text: format!("new skill: failed to resolve agent: {e}"),
+                                text: format!("new skill: failed to resolve skill dirs: {error}"),
                             });
-                            return Err(e);
+                            return Err(CommandError::from(error));
                         }
                     };
+                    let slugs = skill_dirs.list_libraries();
+                    let results = pull_all_libraries(&self.engines.git_engine, &skill_dirs);
+                    let mut libraries = Vec::with_capacity(results.len());
+                    let mut successes = 0usize;
+                    let mut failures = 0usize;
+
+                    for (slug, result) in slugs.into_iter().zip(results) {
+                        match result {
+                            Ok(outcome) => {
+                                frontend.write_message(pull_success_message(&outcome));
+                                successes += 1;
+                                libraries.push(pull_library_outcome(outcome));
+                            }
+                            Err(error) => {
+                                frontend.write_message(UserMessage {
+                                    level: MessageLevel::Error,
+                                    text: format!("Failed to pull '{slug}': {error}"),
+                                });
+                                failures += 1;
+                                let dir = skill_dirs.library_dir(&slug).display().to_string();
+                                libraries.push(PullLibraryOutcome {
+                                    slug,
+                                    dir,
+                                    updated: false,
+                                    skills_found: Vec::new(),
+                                    error: Some(error.to_string()),
+                                });
+                            }
+                        }
+                    }
+
+                    if libraries.is_empty() {
+                        frontend.write_message(UserMessage {
+                            level: MessageLevel::Info,
+                            text: "no skill libraries pulled yet".to_string(),
+                        });
+                    } else {
+                        frontend.write_message(UserMessage {
+                            level: if failures == 0 {
+                                MessageLevel::Info
+                            } else {
+                                MessageLevel::Error
+                            },
+                            text: format!(
+                                "Skill library refresh complete: {successes} succeeded, {failures} failed."
+                            ),
+                        });
+                    }
+
+                    NewOutcome::Skill(NewSkillOutcome {
+                        interview: false,
+                        global: false,
+                        path: None,
+                        pull: true,
+                        libraries,
+                    })
+                } else if let Some(target) = &f.pull {
+                    let skill_dirs = match SkillDirs::from_process_env(None) {
+                        Ok(dirs) => dirs,
+                        Err(error) => {
+                            frontend.write_message(UserMessage {
+                                level: MessageLevel::Error,
+                                text: format!("new skill: failed to resolve skill dirs: {error}"),
+                            });
+                            return Err(CommandError::from(error));
+                        }
+                    };
+                    let outcome = match resolve_pull_target(target)
+                        .map_err(CommandError::Other)
+                        .and_then(|target| {
+                            pull_library(
+                                &self.engines.git_engine,
+                                &skill_dirs,
+                                target,
+                                f.subdir.as_deref(),
+                            )
+                        }) {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            frontend.write_message(UserMessage {
+                                level: MessageLevel::Error,
+                                text: format!("new skill: failed to pull skill library: {error}"),
+                            });
+                            return Err(error);
+                        }
+                    };
+                    frontend.write_message(pull_success_message(&outcome));
+                    let path = outcome.dir.display().to_string();
+                    NewOutcome::Skill(NewSkillOutcome {
+                        interview: false,
+                        global: false,
+                        path: Some(path),
+                        pull: true,
+                        libraries: vec![pull_library_outcome(outcome)],
+                    })
+                } else {
                     frontend.write_message(UserMessage {
                         level: MessageLevel::Info,
-                        text: format!("new skill: launching interview agent '{}'", agent.as_str()),
+                        text: "new skill: starting skill creation".into(),
                     });
-                    let credentials =
-                        match self.engines.auth_engine.resolve_agent_auth(session, &agent) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                frontend.write_message(UserMessage {
-                                    level: MessageLevel::Error,
-                                    text: format!("new skill: failed to resolve agent auth: {e}"),
-                                });
-                                return Err(CommandError::from(e));
-                            }
-                        };
-                    let summary = frontend.ask_skill_summary().unwrap_or_default();
-                    let path_str = path.display().to_string();
-                    let prompt = render_skill_interview_prompt(&path_str, &summary);
-                    let run_opts = AgentRunOptions {
-                        initial_prompt: Some(prompt),
-                        non_interactive: f.non_interactive,
-                        env_passthrough: None,
-                        ..Default::default()
-                    };
-                    // Sandbox-class runtimes: agent spawn lands in WI 0090.
-                    self.engines
-                        .require_container_runtime()
-                        .map_err(CommandError::from)?;
-                    let mut options = match self
-                        .engines
-                        .agent_engine
-                        .build_options(session, &agent, &run_opts)
-                    {
-                        Ok(o) => o,
-                        Err(e) => {
-                            frontend.write_message(UserMessage {
-                                level: MessageLevel::Error,
-                                text: format!("new skill: failed to build agent options: {e}"),
-                            });
-                            return Err(CommandError::from(e));
-                        }
-                    };
-                    if !credentials.env_vars.is_empty() {
-                        options.push(ContainerOption::AgentCredentials {
-                            env_vars: credentials.env_vars,
-                        });
-                    }
-                    let instance =
-                        match crate::engine::agent_runtime::ResolvedAgentOptions::container(options)
-                            .and_then(|o| self.engines.runtime.build(o))
-                        {
-                            Ok(i) => i,
-                            Err(e) => {
-                                frontend.write_message(UserMessage {
-                                    level: MessageLevel::Error,
-                                    text: format!("new skill: failed to build container: {e}"),
-                                });
-                                return Err(CommandError::from(e));
-                            }
-                        };
-                    frontend.set_pty_active(true);
-                    let cf = frontend.container_frontend_for_pty();
-                    let mut execution = match instance.run_with_frontend(cf) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            frontend.set_pty_active(false);
-                            frontend.replay_queued();
-                            frontend.write_message(UserMessage {
-                                level: MessageLevel::Error,
-                                text: format!("new skill: failed to run container: {e}"),
-                            });
-                            return Err(CommandError::from(e));
-                        }
-                    };
-                    let _ = execution.wait().await;
-                    frontend.set_pty_active(false);
-                    frontend.replay_queued();
-                } else {
-                    let body = frontend.ask_skill_body().unwrap_or_default();
-                    let content = if body.is_empty() {
-                        format!("# Skill: {name}\n\n## Description\n\n## Body\n")
+                    let name = frontend.ask_skill_name().unwrap_or_else(|_| "skill".into());
+                    let session = if !f.global || f.interview {
+                        Some(self.session.clone())
                     } else {
-                        format!("# Skill: {name}\n\n{body}\n")
+                        None
                     };
-                    let _ = std::fs::write(&path, content);
-                }
+                    let git_root = session.as_ref().map(|s| s.git_root().to_path_buf());
+                    let skill_dirs = match SkillDirs::from_process_env(git_root) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            frontend.write_message(UserMessage {
+                                level: MessageLevel::Error,
+                                text: format!("new skill: failed to resolve skill dirs: {e}"),
+                            });
+                            return Err(CommandError::from(e));
+                        }
+                    };
+                    let dir = if f.global {
+                        skill_dirs.global_dir().join(&name)
+                    } else {
+                        skill_dirs.repo_dir().unwrap().join(&name)
+                    };
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = dir.join("SKILL.md");
 
-                NewOutcome::Skill(NewSkillOutcome {
-                    interview: f.interview,
-                    global: f.global,
-                    path: Some(path.display().to_string()),
-                })
+                    if f.interview {
+                        let skeleton = format!("# Skill: {name}\n\n## Description\n\n## Body\n");
+                        let _ = std::fs::write(&path, skeleton);
+                        let session = session.as_ref().unwrap();
+                        let agent = match resolve_agent(&None, session) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                frontend.write_message(UserMessage {
+                                    level: MessageLevel::Error,
+                                    text: format!("new skill: failed to resolve agent: {e}"),
+                                });
+                                return Err(e);
+                            }
+                        };
+                        frontend.write_message(UserMessage {
+                            level: MessageLevel::Info,
+                            text: format!(
+                                "new skill: launching interview agent '{}'",
+                                agent.as_str()
+                            ),
+                        });
+                        let credentials =
+                            match self.engines.auth_engine.resolve_agent_auth(session, &agent) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    frontend.write_message(UserMessage {
+                                        level: MessageLevel::Error,
+                                        text: format!(
+                                            "new skill: failed to resolve agent auth: {e}"
+                                        ),
+                                    });
+                                    return Err(CommandError::from(e));
+                                }
+                            };
+                        let summary = frontend.ask_skill_summary().unwrap_or_default();
+                        let path_str = path.display().to_string();
+                        let prompt = render_skill_interview_prompt(&path_str, &summary);
+                        let run_opts = AgentRunOptions {
+                            initial_prompt: Some(prompt),
+                            non_interactive: f.non_interactive,
+                            env_passthrough: None,
+                            ..Default::default()
+                        };
+                        // Sandbox-class runtimes: agent spawn lands in WI 0090.
+                        self.engines
+                            .require_container_runtime()
+                            .map_err(CommandError::from)?;
+                        let mut options = match self
+                            .engines
+                            .agent_engine
+                            .build_options(session, &agent, &run_opts)
+                        {
+                            Ok(o) => o,
+                            Err(e) => {
+                                frontend.write_message(UserMessage {
+                                    level: MessageLevel::Error,
+                                    text: format!("new skill: failed to build agent options: {e}"),
+                                });
+                                return Err(CommandError::from(e));
+                            }
+                        };
+                        if !credentials.env_vars.is_empty() {
+                            options.push(ContainerOption::AgentCredentials {
+                                env_vars: credentials.env_vars,
+                            });
+                        }
+                        let instance =
+                            match crate::engine::agent_runtime::ResolvedAgentOptions::container(
+                                options,
+                            )
+                            .and_then(|o| self.engines.runtime.build(o))
+                            {
+                                Ok(i) => i,
+                                Err(e) => {
+                                    frontend.write_message(UserMessage {
+                                        level: MessageLevel::Error,
+                                        text: format!("new skill: failed to build container: {e}"),
+                                    });
+                                    return Err(CommandError::from(e));
+                                }
+                            };
+                        frontend.set_pty_active(true);
+                        let cf = frontend.container_frontend_for_pty();
+                        let mut execution = match instance.run_with_frontend(cf) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                frontend.set_pty_active(false);
+                                frontend.replay_queued();
+                                frontend.write_message(UserMessage {
+                                    level: MessageLevel::Error,
+                                    text: format!("new skill: failed to run container: {e}"),
+                                });
+                                return Err(CommandError::from(e));
+                            }
+                        };
+                        let _ = execution.wait().await;
+                        frontend.set_pty_active(false);
+                        frontend.replay_queued();
+                    } else {
+                        let body = frontend.ask_skill_body().unwrap_or_default();
+                        let content = if body.is_empty() {
+                            format!("# Skill: {name}\n\n## Description\n\n## Body\n")
+                        } else {
+                            format!("# Skill: {name}\n\n{body}\n")
+                        };
+                        let _ = std::fs::write(&path, content);
+                    }
+
+                    NewOutcome::Skill(NewSkillOutcome {
+                        interview: f.interview,
+                        global: f.global,
+                        path: Some(path.display().to_string()),
+                        pull: false,
+                        libraries: Vec::new(),
+                    })
+                }
             }
         };
         frontend.replay_queued();
         Ok(outcome)
+    }
+}
+
+fn pull_success_message(outcome: &PullOutcome) -> UserMessage {
+    UserMessage {
+        level: MessageLevel::Info,
+        text: format!(
+            "Pulled '{}' into {} ({} skill(s) found under {}/): {}",
+            outcome.slug,
+            outcome.dir.display(),
+            outcome.skills_found.len(),
+            outcome.subdir,
+            outcome.skills_found.join(", ")
+        ),
+    }
+}
+
+fn pull_library_outcome(outcome: PullOutcome) -> PullLibraryOutcome {
+    PullLibraryOutcome {
+        slug: outcome.slug,
+        dir: outcome.dir.display().to_string(),
+        updated: outcome.was_update,
+        skills_found: outcome.skills_found,
+        error: None,
     }
 }
 
@@ -979,6 +1141,9 @@ mod tests {
                 interview: false,
                 non_interactive: false,
                 global: false,
+                pull: None,
+                pull_all: false,
+                subdir: None,
             }),
             engines,
             session,
@@ -1023,6 +1188,9 @@ mod tests {
                 interview: false,
                 non_interactive: false,
                 global: false,
+                pull: None,
+                pull_all: false,
+                subdir: None,
             }),
             engines,
             session,

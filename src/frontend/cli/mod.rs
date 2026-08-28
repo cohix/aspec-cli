@@ -131,6 +131,13 @@ pub(crate) fn format_error(err: &CommandError) -> String {
                 command.join(" ")
             )
         }
+        CommandError::UnexpectedArgument { command, argument } => {
+            format!(
+                "unexpected argument '{argument}' for command `{}`\n  try `awman {} --help`",
+                command.join(" "),
+                command.join(" ")
+            )
+        }
         CommandError::MutuallyExclusive { command, a, b } => {
             format!(
                 "flags --{a} and --{b} cannot be used together on `{}`",
@@ -326,7 +333,24 @@ fn render_outcome(outcome: &CommandOutcome) -> ExitCode {
     if let Some(s) = format_outcome(outcome) {
         println!("{s}");
     }
-    ExitCode::from(0)
+    ExitCode::from(outcome_exit_code(outcome))
+}
+
+/// Pure mapping from a successful [`CommandOutcome`] to a process exit code.
+///
+/// Some commands deliberately complete without short-circuiting on per-item
+/// failures and report those failures inside the outcome instead — today,
+/// `new skill --pull-all`, which must still refresh every reachable library
+/// when one upstream is gone. Their aggregate status has to reach scripts and
+/// CI as a non-zero exit code even though the command itself returned `Ok`.
+fn outcome_exit_code(outcome: &CommandOutcome) -> u8 {
+    let failed = match outcome {
+        CommandOutcome::New(crate::command::commands::new::NewOutcome::Skill(skill)) => {
+            skill.libraries.iter().any(|lib| lib.error.is_some())
+        }
+        _ => false,
+    };
+    u8::from(failed)
 }
 
 /// Render a [`CommandError`] to stderr and return the corresponding
@@ -354,6 +378,7 @@ pub(crate) fn error_exit_code(err: &CommandError) -> u8 {
         | CommandError::UnknownFlag { .. }
         | CommandError::MissingRequiredFlag { .. }
         | CommandError::MissingRequiredArgument { .. }
+        | CommandError::UnexpectedArgument { .. }
         | CommandError::MutuallyExclusive { .. }
         | CommandError::InvalidFlagValue { .. }
         | CommandError::InvalidArgumentValue { .. }

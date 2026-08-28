@@ -326,6 +326,61 @@ impl GitEngine {
         Ok(())
     }
 
+    /// Read the URL configured for `remote` in `repo_dir`, exactly as stored
+    /// in that repository's git config.
+    ///
+    /// Deliberately uses `git config --get remote.<name>.url` rather than
+    /// `git remote get-url`: the latter applies the user's `url.*.insteadOf`
+    /// rewrites, which would mask the stored value this is meant to inspect.
+    pub fn remote_url(&self, repo_dir: &Path, remote: &str) -> Result<String, EngineError> {
+        let key = format!("remote.{remote}.url");
+        let output = Command::new("git")
+            .args(["config", "--get", &key])
+            .current_dir(repo_dir)
+            .output()
+            .map_err(|e| EngineError::Git(format!("invoke `git config --get {key}`: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(EngineError::Git(format!(
+                "git config --get {key} failed: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Fetch the latest commit from `origin` and reset the worktree to the
+    /// remote's default branch. This intentionally discards local changes in
+    /// a managed library clone.
+    pub fn pull_latest(&self, repo_dir: &Path) -> Result<(), EngineError> {
+        let fetch = Command::new("git")
+            .args(["fetch", "origin"])
+            .current_dir(repo_dir)
+            .output()
+            .map_err(|e| EngineError::Git(format!("invoke `git fetch origin`: {e}")))?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            return Err(EngineError::Git(format!(
+                "git fetch origin failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        let reset = Command::new("git")
+            .args(["reset", "--hard", "origin/HEAD"])
+            .current_dir(repo_dir)
+            .output()
+            .map_err(|e| EngineError::Git(format!("invoke `git reset --hard origin/HEAD`: {e}")))?;
+        if !reset.status.success() {
+            let stderr = String::from_utf8_lossy(&reset.stderr);
+            return Err(EngineError::Git(format!(
+                "git reset --hard origin/HEAD failed: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    }
+
     /// Check out `branch` if it already exists locally or on a remote;
     /// otherwise create it from HEAD. Returns the disposition:
     /// `"checked-out"` for an existing branch (local or remote-tracking) or
@@ -629,6 +684,33 @@ impl GitEngine {
         Ok(())
     }
 
+    /// Logged variant of [`pull_latest`]. Streams each command and its
+    /// combined stdout/stderr through `sink`.
+    pub fn pull_latest_logged(
+        &self,
+        repo_dir: &Path,
+        sink: &mut dyn UserMessageSink,
+    ) -> Result<(), EngineError> {
+        let fetch = run_git_logged(&["fetch", "origin"], repo_dir, sink)?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            return Err(EngineError::Git(format!(
+                "git fetch origin failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        let reset = run_git_logged(&["reset", "--hard", "origin/HEAD"], repo_dir, sink)?;
+        if !reset.status.success() {
+            let stderr = String::from_utf8_lossy(&reset.stderr);
+            return Err(EngineError::Git(format!(
+                "git reset --hard origin/HEAD failed: {}",
+                stderr.trim()
+            )));
+        }
+        Ok(())
+    }
+
     /// Logged variant of [`checkout_or_create_branch`]. Forwards every git
     /// invocation and its output to `sink`. The first `git checkout <branch>`
     /// failure is expected (it's how we detect "branch doesn't exist yet") so
@@ -881,5 +963,116 @@ mod tests {
         assert_eq!(actual, expected, "should resolve to main repo .git dir");
 
         g.remove_worktree(repo_tmp.path(), &wt_path).unwrap();
+    }
+
+    // ─── pull_latest ──────────────────────────────────────────────────────────
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to invoke git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Create a local upstream: a `source` working repo pushed to a `bare`
+    /// repo. The `bare` repo's `file://` URL is a network-free stand-in for a
+    /// GitHub remote. Returns `(source, bare)`; keep both alive for the test.
+    fn setup_upstream() -> (tempfile::TempDir, tempfile::TempDir) {
+        let source = tempfile::tempdir().unwrap();
+        init_repo(source.path());
+        let bare = tempfile::tempdir().unwrap();
+        run_git(bare.path(), &["init", "--bare"]);
+        // Deterministic default branch regardless of the host git version.
+        run_git(source.path(), &["branch", "-M", "main"]);
+        let bare_url = format!("file://{}", bare.path().display());
+        run_git(source.path(), &["remote", "add", "origin", &bare_url]);
+        run_git(source.path(), &["push", "-u", "origin", "main"]);
+        // Point the bare repo's HEAD at main so `origin/HEAD` resolves on clone.
+        run_git(bare.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        (source, bare)
+    }
+
+    fn bare_url(bare: &tempfile::TempDir) -> String {
+        format!("file://{}", bare.path().display())
+    }
+
+    #[test]
+    fn pull_latest_picks_up_new_upstream_commit() {
+        let (source, bare) = setup_upstream();
+        let g = GitEngine::new();
+        let work = tempfile::tempdir().unwrap();
+        let clone_dir = work.path().join("clone");
+        g.clone_repo(&bare_url(&bare), None, &clone_dir).unwrap();
+        assert!(
+            !clone_dir.join("NEW.md").exists(),
+            "new file must not exist before the upstream commit is pulled"
+        );
+
+        // Add a commit upstream and push it.
+        std::fs::write(source.path().join("NEW.md"), "new upstream content").unwrap();
+        run_git(source.path(), &["add", "."]);
+        run_git(source.path(), &["commit", "-m", "add NEW.md"]);
+        run_git(source.path(), &["push", "origin", "main"]);
+
+        g.pull_latest(&clone_dir)
+            .expect("pull_latest must succeed against a reachable remote");
+        assert!(
+            clone_dir.join("NEW.md").exists(),
+            "pull_latest must bring the new upstream commit into the working tree"
+        );
+    }
+
+    #[test]
+    fn pull_latest_hard_resets_dirty_working_tree() {
+        let (_source, bare) = setup_upstream();
+        let g = GitEngine::new();
+        let work = tempfile::tempdir().unwrap();
+        let clone_dir = work.path().join("clone");
+        g.clone_repo(&bare_url(&bare), None, &clone_dir).unwrap();
+
+        // `init_repo` committed README.md == "init". Dirty it locally.
+        std::fs::write(clone_dir.join("README.md"), "LOCAL UNCOMMITTED EDIT").unwrap();
+
+        g.pull_latest(&clone_dir)
+            .expect("pull_latest must succeed and discard local changes");
+        assert_eq!(
+            std::fs::read_to_string(clone_dir.join("README.md")).unwrap(),
+            "init",
+            "a dirty working tree must be hard-reset back to the upstream content"
+        );
+    }
+
+    #[test]
+    fn pull_latest_errors_on_nonexistent_dir() {
+        let g = GitEngine::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let err = g
+            .pull_latest(&missing)
+            .expect_err("pull_latest on a non-existent dir must error");
+        assert!(
+            matches!(err, EngineError::Git(_)),
+            "must be EngineError::Git; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn pull_latest_errors_on_non_git_dir() {
+        let g = GitEngine::new();
+        let tmp = tempfile::tempdir().unwrap();
+        // A real directory that is not a git repository.
+        let err = g
+            .pull_latest(tmp.path())
+            .expect_err("pull_latest on a non-git dir must error");
+        assert!(
+            matches!(err, EngineError::Git(_)),
+            "must be EngineError::Git; got {err:?}"
+        );
     }
 }

@@ -795,7 +795,7 @@ fn parse_args_exec_prompt_single_positional() {
 /// argument and the `workflow` path flag.
 #[test]
 fn parse_args_exec_workflow_maps_first_positional() {
-    let f = make_frontend("exec workflow", &["build.toml", "ignored"]);
+    let f = make_frontend("exec workflow", &["build.toml"]);
     assert_eq!(
         f.argument(&["exec", "workflow"], "workflow")
             .unwrap()
@@ -811,12 +811,27 @@ fn parse_args_exec_workflow_maps_first_positional() {
 /// PINS: `specs amend` maps the first positional to the `work_item` argument.
 #[test]
 fn parse_args_specs_amend_maps_work_item() {
-    let f = make_frontend("specs amend", &["0097", "extra"]);
+    let f = make_frontend("specs amend", &["0097"]);
     assert_eq!(
         f.argument(&["specs", "amend"], "work_item")
             .unwrap()
             .as_deref(),
         Some("0097")
+    );
+}
+
+/// PINS: a positional the command never declared is a usage error in the
+/// raw-args projection, matching clap. Silently dropping it broke the
+/// projection parity this suite exists to guarantee.
+#[test]
+fn parse_args_rejects_positional_beyond_declared_arguments() {
+    let f = make_frontend("specs amend", &["0097", "extra"]);
+    let err = f
+        .argument(&["specs", "amend"], "work_item")
+        .expect_err("an undeclared extra positional must be a usage error");
+    assert!(
+        format!("{err}").contains("extra"),
+        "the error must name the stray token; got: {err}"
     );
 }
 

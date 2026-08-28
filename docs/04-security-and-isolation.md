@@ -139,7 +139,7 @@ awman exec workflow path/to/workflow.toml --worktree --overlay "ssh()"          
 
 The `--overlay` flag mounts additional host resources into the agent container beyond the default Git repository mount. Supported overlay types:
 
-- `skill()` — mount your global awman skills directory (`~/.awman/skills/`) as slash commands
+- `skill(*)` / `skill(name)` — mount all hand-authored global skills or selected skills and pulled libraries
 - `dir(host_path:container_path[:ro|rw])` — mount a host directory
 
 This lets you give an agent access to a personal skills library, a reference dataset, a shared prompts directory, or any other host resource without permanently modifying any config file.
@@ -159,16 +159,16 @@ dir(host_path:container_path[:ro|rw])
 ### Skills overlay
 
 ```
-skill()
+skill(*)
 ```
 
-Mounts `~/.awman/skills/` read-only into the agent's native skills directory (determined by agent type). No arguments allowed.
+Mounts hand-authored skills from `~/.awman/skills/` read-only into the agent's native skills directory (determined by agent type). Pulled libraries under `~/.awman/skills/.library/` are not included by `skill(*)`; reference a whole library or one of its skills explicitly with `skill(library)` or `skill(library/skill)`.
 
 ### Basic examples
 
 ```sh
 # Mount your personal skills library
-awman exec workflow path/to/workflow.toml --overlay "skill()"
+awman exec workflow path/to/workflow.toml --overlay "skill(*)"
 
 # Mount a reference dataset read-only
 awman exec workflow path/to/workflow.toml --overlay "dir(/data/reference:/mnt/reference:ro)"
@@ -177,8 +177,8 @@ awman exec workflow path/to/workflow.toml --overlay "dir(/data/reference:/mnt/re
 awman chat --overlay "dir(~/prompts:/mnt/prompts:rw)"
 
 # Skills + directories (repeated flag or comma-separated — both are equivalent)
-awman exec workflow path/to/workflow.toml --overlay "skill()" --overlay "dir(/data/ref:/mnt/ref:ro)" --overlay "dir(~/snippets:/mnt/snippets)"
-awman exec workflow path/to/workflow.toml --overlay "skill(),dir(/data/ref:/mnt/ref:ro),dir(~/snippets:/mnt/snippets)"
+awman exec workflow path/to/workflow.toml --overlay "skill(*)" --overlay "dir(/data/ref:/mnt/ref:ro)" --overlay "dir(~/snippets:/mnt/snippets)"
+awman exec workflow path/to/workflow.toml --overlay "skill(*),dir(/data/ref:/mnt/ref:ro),dir(~/snippets:/mnt/snippets)"
 ```
 
 Available on all agent-launching commands: `chat`, `exec prompt`, and `exec workflow`.
@@ -188,7 +188,7 @@ Available on all agent-launching commands: `chat`, `exec prompt`, and `exec work
 Set `AWMAN_OVERLAYS` in your shell profile to apply overlays automatically to every agent session regardless of which repo you're working in. It uses the same format as `--overlay` — a comma-separated list of typed overlay expressions:
 
 ```sh
-export AWMAN_OVERLAYS="skill(),dir(~/personal-prompts:/mnt/prompts),dir(/data/shared-fixtures:/mnt/fixtures:ro)"
+export AWMAN_OVERLAYS="skill(*),dir(~/personal-prompts:/mnt/prompts),dir(/data/shared-fixtures:/mnt/fixtures:ro)"
 ```
 
 ### Config-based overlays
@@ -253,10 +253,10 @@ In the TUI command box, use comma-separated syntax when specifying multiple over
 
 ```
 # Correct: comma-separated in one value
-exec workflow path/to/workflow.toml --overlay "skill(),dir(/data/ref:/mnt/ref:ro),dir(~/prompts:/mnt/prompts)"
+exec workflow path/to/workflow.toml --overlay "skill(*),dir(/data/ref:/mnt/ref:ro),dir(~/prompts:/mnt/prompts)"
 
 # Incorrect in TUI (second value silently overwrites first):
-exec workflow path/to/workflow.toml --overlay "skill()" --overlay "dir(/data/ref:/mnt/ref:ro)"
+exec workflow path/to/workflow.toml --overlay "skill(*)" --overlay "dir(/data/ref:/mnt/ref:ro)"
 ```
 
 On the CLI, both repeated flags and comma-separated syntax are equivalent.

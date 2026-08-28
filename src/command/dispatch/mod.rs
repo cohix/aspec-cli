@@ -849,11 +849,30 @@ impl<F: CommandFrontend> Dispatch<F> {
                     .frontend
                     .flag_bool(&canonical_refs, "global")?
                     .unwrap_or(false);
+                let pull = self.frontend.flag_string(&canonical_refs, "pull")?;
+                let pull_all = self
+                    .frontend
+                    .flag_bool(&canonical_refs, "pull-all")?
+                    .unwrap_or(false);
+                let subdir = self.frontend.flag_string(&canonical_refs, "subdir")?;
+                if subdir.is_some() && pull.is_none() && !pull_all {
+                    return Err(CommandError::InvalidFlagValue {
+                        command: canonical_refs
+                            .iter()
+                            .map(|value| (*value).to_string())
+                            .collect(),
+                        flag: "subdir".to_string(),
+                        reason: "--subdir requires --pull <repo>".to_string(),
+                    });
+                }
                 Ok(BuiltCommand::New(NewCommand::new(
                     NewSubcommand::Skill(NewSkillFlags {
                         interview,
                         non_interactive,
                         global,
+                        pull,
+                        pull_all,
+                        subdir,
                     }),
                     self.engines.clone(),
                     session.clone(),

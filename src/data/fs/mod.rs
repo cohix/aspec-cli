@@ -20,6 +20,7 @@ pub mod log_dirs;
 pub mod overlay_paths;
 pub mod path_guard;
 pub mod skill_dirs;
+pub mod skill_library;
 pub mod workflow_dirs;
 pub mod workflow_state;
 

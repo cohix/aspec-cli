@@ -138,7 +138,7 @@ Mount additional host resources into the agent container. Accepts typed overlay 
 
 - `dir(host_path:container_path[:ro|rw])` — mount a host directory (permission defaults to `:ro`)
 - `env(VAR)` — pass a host environment variable into the container
-- `skill(name)` / `skill(*)` — mount a named skill or all global skills
+- `skill(name)` / `skill(*)` — mount a named skill, pulled library, or all hand-authored global skills
 - `ssh()` — mount `~/.ssh` read-only (for Git operations over SSH)
 
 May be repeated or comma-separated. Available on `chat`, `exec prompt`, and `exec workflow`.
@@ -305,6 +305,55 @@ awman new skill --global
 
 Writes to `~/.awman/skills/<name>/SKILL.md` instead of the current repo. Use this to maintain a personal library of skills that travel with you across projects.
 
+### Pulled skill libraries
+
+You can pull a published skills library from GitHub into your global skills store:
+
+```sh
+awman new skill --pull https://github.com/obra/superpowers
+awman new skill --pull github.com/obra/superpowers
+awman new skill --pull obra/superpowers
+```
+
+All three forms refer to the same repository. The library is stored at `~/.awman/skills/.library/superpowers/`; the final repository name is used as the library name. By default, awman looks for skill directories under the repository's `skills/` folder.
+
+To refresh a library you have already pulled, use its short name:
+
+```sh
+awman new skill --pull superpowers
+```
+
+To refresh every pulled library:
+
+```sh
+awman new skill --pull-all
+```
+
+If the skills are in a different folder, provide a relative path inside the repository with `--subdir`:
+
+```sh
+awman new skill --pull github.com/example/team-skills --subdir .agents/skills
+```
+
+The selected subdirectory is remembered, so later `--pull team-skills` and `--pull-all` refreshes continue to use it. A successful pull reports the destination, the subdirectory, and the skills it found, in this form:
+
+```
+Pulled 'team-skills' into <library-directory> (3 skill(s) found under .agents/skills/): review, test, release
+```
+
+`--pull-all` continues refreshing the other libraries if one library fails and reports the number that succeeded and failed, for example `Skill library refresh complete: 2 succeeded, 1 failed.` Every reachable library is still refreshed, but the command exits non-zero when any library failed, so a scripted or CI refresh notices. When none have been pulled, it reports `no skill libraries pulled yet` and exits successfully. A short-name refresh for a library that has not been pulled yet reports that the library has not been pulled and directs you to use the full GitHub slug.
+
+Pulled libraries are fetched, managed content. Refreshing one hard-resets its directory to the upstream version, so hand edits inside `~/.awman/skills/.library/` are discarded. Put personal skills in `~/.awman/skills/<name>/` instead. Pull operations are non-interactive, run entirely on the host as plain `git` commands (no container is launched), and do not create or edit a skill body.
+
+awman only ever refreshes directories it created under `~/.awman/skills/.library/`, and never deletes or overwrites anything else. A pull is refused, with the offending path named, when:
+
+- the target already holds something that is not an awman-managed clone (no `.git/` or no `.awman.json`);
+- the target is a symlink rather than a real directory;
+- the library was pulled from a different owner with the same repository name;
+- the clone's git `origin` no longer matches the source recorded in its `.awman.json`.
+
+In each case, remove the named directory yourself if you want to replace it.
+
 To make global skills available inside agent containers, enable the skills overlay via config:
 
 ```json
@@ -327,6 +376,9 @@ Once enabled, your global skills appear as slash commands. See [Overlays](08-ove
 |------|-------------|
 | `--interview` | Let a code agent complete the skill body from a short summary |
 | `--global` | Write to `~/.awman/skills/<name>/` instead of the current repo |
+| `--pull <repo>` | Pull a GitHub skills library, or refresh one by its short name |
+| `--pull-all` | Refresh every previously-pulled skills library |
+| `--subdir <path>` | Use a different relative folder inside the pulled repository instead of `skills/` |
 
 ### Edge cases
 

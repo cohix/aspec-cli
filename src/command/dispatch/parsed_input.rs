@@ -176,6 +176,30 @@ pub fn parse(
         }
     }
 
+    // Keep the TUI command box in parity with the clap and API projections:
+    // all frontends must reject mutually-exclusive catalogue flags before a
+    // command is built or any host-side operation can run.
+    for flag in current.flags {
+        if !flags.contains_key(flag.long) {
+            continue;
+        }
+        if let Some(conflicting) = flag
+            .conflicts_with
+            .iter()
+            .find(|conflicting| flags.contains_key::<str>(*conflicting))
+        {
+            let path_strs: Vec<&str> = path.iter().map(|segment| segment.as_str()).collect();
+            return Err(CommandError::InvalidFlagValue {
+                command: path_strs
+                    .iter()
+                    .map(|segment| (*segment).to_string())
+                    .collect(),
+                flag: flag.long.to_string(),
+                reason: format!("--{} conflicts with --{}", flag.long, conflicting),
+            });
+        }
+    }
+
     // Map positional tokens onto declared arguments.
     let mut arguments: BTreeMap<String, ArgValue> = BTreeMap::new();
     let mut pos_idx = 0;
@@ -202,6 +226,13 @@ pub fn parse(
         }
     }
     let _ = last_was_var;
+
+    // Keep parity with clap and the API projection: a positional the command
+    // never declared is a usage error, not a token to drop on the floor.
+    if let Some(extra) = positionals.get(pos_idx) {
+        let path_strs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        return Err(CommandError::unexpected_argument(&path_strs, extra.clone()));
+    }
 
     Ok(ParsedCommandBoxInput {
         path,
@@ -265,6 +296,23 @@ mod tests {
         let cat = CommandCatalogue::get();
         let err = parse("status --bogus", cat).unwrap_err();
         assert!(matches!(err, CommandError::UnknownFlag { .. }));
+    }
+
+    /// The TUI command box must reject a positional the command never declared,
+    /// exactly as clap and the API projection do. `new skill` declares none, so
+    /// a stray skill name next to `--pull` is a usage error (WI-0103).
+    #[test]
+    fn parse_rejects_positional_the_command_never_declared() {
+        let cat = CommandCatalogue::get();
+        let err = parse("new skill --pull owner/library accidental-name", cat)
+            .expect_err("new skill takes no positional argument");
+        assert!(
+            matches!(
+                &err,
+                CommandError::UnexpectedArgument { argument, .. } if argument == "accidental-name"
+            ),
+            "expected UnexpectedArgument naming the stray name, got: {err:?}"
+        );
     }
 
     #[test]

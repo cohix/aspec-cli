@@ -389,7 +389,7 @@ fn render_new(o: &NewOutcome) -> Option<String> {
     match o {
         NewOutcome::Spec(s) => Some(render_new_spec(s)),
         NewOutcome::Workflow(w) => Some(render_new_workflow(w)),
-        NewOutcome::Skill(s) => Some(render_new_skill(s)),
+        NewOutcome::Skill(s) => render_new_skill(s),
     }
 }
 
@@ -408,12 +408,19 @@ fn render_new_workflow(o: &NewWorkflowOutcome) -> String {
     }
 }
 
-fn render_new_skill(o: &NewSkillOutcome) -> String {
+fn render_new_skill(o: &NewSkillOutcome) -> Option<String> {
+    // `--pull` / `--pull-all` create nothing and are not repo-scoped: they
+    // clone or refresh a managed library under the global skills store, and
+    // already reported each library through the message sink. Rendering a
+    // "Created skill (repo)" summary here would contradict both.
+    if o.pull {
+        return None;
+    }
     let scope = if o.global { "global" } else { "repo" };
-    match &o.path {
+    Some(match &o.path {
         Some(p) => format!("Created skill ({scope}): {p}"),
         None => format!("Skill created ({scope})."),
-    }
+    })
 }
 
 // ─── specs / auth / download ─────────────────────────────────────────────────
@@ -887,7 +894,9 @@ mod tests {
 
     // ── render_new ────────────────────────────────────────────────────────────
 
-    use crate::command::commands::new::{NewSkillOutcome, NewSpecOutcome, NewWorkflowOutcome};
+    use crate::command::commands::new::{
+        NewSkillOutcome, NewSpecOutcome, NewWorkflowOutcome, PullLibraryOutcome,
+    };
 
     #[test]
     fn render_new_spec_with_path_shows_created_path() {
@@ -942,10 +951,60 @@ mod tests {
             interview: false,
             global: true,
             path: Some("/home/user/.awman/skills/my-skill/SKILL.md".into()),
+            pull: false,
+            libraries: vec![],
         };
-        let s = render_new_skill(&o);
+        let s = render_new_skill(&o).expect("skill creation must render a summary line");
         assert!(s.contains("global"), "must mention global scope");
         assert!(s.contains("SKILL.md"), "path must appear");
+    }
+
+    /// A `--pull` run clones a managed library into the *global* store and
+    /// already reported it through the message sink. It must never render the
+    /// "Created skill (repo)" creation line (WI-0103 remediation).
+    #[test]
+    fn render_new_skill_pull_renders_no_creation_line() {
+        let o = NewSkillOutcome {
+            interview: false,
+            global: false,
+            path: Some("/home/user/.awman/skills/.library/superpowers".into()),
+            pull: true,
+            libraries: vec![PullLibraryOutcome {
+                slug: "superpowers".into(),
+                dir: "/home/user/.awman/skills/.library/superpowers".into(),
+                updated: false,
+                skills_found: vec!["brainstorming".into()],
+                error: None,
+            }],
+        };
+        assert_eq!(
+            render_new_skill(&o),
+            None,
+            "a pull must not render a skill-creation line"
+        );
+        assert_eq!(
+            render_new(&NewOutcome::Skill(o)),
+            None,
+            "the NewOutcome renderer must pass the pull's silence through"
+        );
+    }
+
+    /// `--pull-all` with nothing pulled yet has no libraries *and* no path;
+    /// it must still not be rendered as "Skill created (repo)."
+    #[test]
+    fn render_new_skill_empty_pull_all_renders_no_creation_line() {
+        let o = NewSkillOutcome {
+            interview: false,
+            global: false,
+            path: None,
+            pull: true,
+            libraries: vec![],
+        };
+        assert_eq!(
+            render_new_skill(&o),
+            None,
+            "an empty --pull-all must not claim a skill was created"
+        );
     }
 
     // ── render_specs ──────────────────────────────────────────────────────────

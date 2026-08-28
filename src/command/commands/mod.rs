@@ -35,6 +35,7 @@ pub mod prompt_templates;
 pub mod ready;
 pub mod remote;
 pub(crate) mod remote_client;
+pub mod skill_library;
 pub mod specs;
 pub mod status;
 pub mod status_tips;
@@ -245,6 +246,23 @@ fn parse_single_typed_overlay(expr: &str) -> Result<TypedOverlay, String> {
             if args == "*" {
                 Ok(TypedOverlay::Skill(SkillSpec::All))
             } else {
+                if args.matches('/').count() > 1 {
+                    return Err(format!(
+                        "skill(name) supports at most one '/' (library/skill); got '{args}'"
+                    ));
+                }
+                // Each segment must be a single, contained path component:
+                // an empty, '.' or '..' segment is joined onto a host skills
+                // path at mount time and would resolve somewhere the reference
+                // never named (e.g. `skill(lib/..)` = the whole clone).
+                if args
+                    .split('/')
+                    .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+                {
+                    return Err(format!(
+                        "skill(name) segments must not be empty, '.' or '..'; got '{args}'"
+                    ));
+                }
                 Ok(TypedOverlay::Skill(SkillSpec::Named(args.to_string())))
             }
         }
@@ -682,6 +700,77 @@ mod skill_parser_tests {
             result,
             vec![TypedOverlay::Skill(SkillSpec::Named("myskill".to_string()))]
         );
+    }
+
+    #[test]
+    fn skill_library_slash_skill_parses_to_named() {
+        // `skill(library/skill)` (exactly one slash) is a valid single-skill
+        // reference into a pulled library — it parses as a Named spec.
+        let result = parse_overlay_list("skill(superpowers/brainstorming)").unwrap();
+        assert_eq!(
+            result,
+            vec![TypedOverlay::Skill(SkillSpec::Named(
+                "superpowers/brainstorming".to_string()
+            ))]
+        );
+    }
+
+    #[test]
+    fn skill_with_two_slashes_is_rejected() {
+        // More than one slash is ambiguous (`library/skill` is the deepest
+        // form) and must be rejected at parse time with a descriptive error.
+        let err = parse_overlay_list("skill(a/b/c)").unwrap_err();
+        assert!(
+            err.contains("at most one '/'") && err.contains("a/b/c"),
+            "error must explain the one-slash limit and echo the bad value; got: {err}"
+        );
+    }
+
+    /// Segments are joined onto host skills paths at mount time, so a `.`,
+    /// `..` or empty segment would resolve somewhere the reference never named
+    /// — `skill(superpowers/..)` would mount the whole managed clone, `.git/`
+    /// included (WI-0103 remediation).
+    #[test]
+    fn skill_with_traversal_or_empty_segments_is_rejected() {
+        for bad in [
+            "superpowers/..",
+            "superpowers/.",
+            "../superpowers",
+            "./superpowers",
+            "superpowers/",
+            "/superpowers",
+            "..",
+            ".",
+        ] {
+            let expr = format!("skill({bad})");
+            let err = parse_overlay_list(&expr)
+                .err()
+                .unwrap_or_else(|| panic!("'{expr}' must be rejected at parse time"));
+            assert!(
+                err.contains("must not be empty, '.' or '..'"),
+                "'{expr}' must be rejected with the segment rule; got: {err}"
+            );
+        }
+    }
+
+    /// The new segment rule must not narrow what already parsed.
+    #[test]
+    fn skill_ordinary_names_still_parse_after_segment_validation() {
+        for good in [
+            "lint",
+            "superpowers",
+            "superpowers/brainstorming",
+            "my.skill",
+        ] {
+            let expr = format!("skill({good})");
+            let parsed = parse_overlay_list(&expr)
+                .unwrap_or_else(|e| panic!("'{expr}' must still parse; got error: {e}"));
+            assert_eq!(
+                parsed,
+                vec![TypedOverlay::Skill(SkillSpec::Named(good.to_string()))],
+                "'{expr}' must parse to the same named skill as before"
+            );
+        }
     }
 
     #[test]
