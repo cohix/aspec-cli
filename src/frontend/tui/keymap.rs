@@ -38,6 +38,20 @@ pub enum Action {
     /// Ctrl+N in the config dialog: start the add-model-mapping flow.
     NewMapEntry,
 
+    // ── amie list (WI 0102) ─────────────────────────────────────────────
+    /// Enter — open the condition detail modal for the selected row.
+    AmieShowDetail,
+    /// a — attach to the selected condition's running container(s).
+    AmieAttach,
+    /// n — create a condition (drives the Layer-2 interview dialog chain).
+    AmieNew,
+    /// p — pause the selected condition.
+    AmiePause,
+    /// r — resume the selected condition.
+    AmieResume,
+    /// d — remove the selected condition (opens a confirmation first).
+    AmieDelete,
+
     // ── Text input ──────────────────────────────────────────────────────
     Char(char),
     Backspace,
@@ -65,6 +79,10 @@ pub enum FocusContext {
     ExecutionWindow,
     Dialog,
     ContainerMaximized,
+    /// The amie tab's condition list has focus (WI 0102). Only reachable when
+    /// the active tab is the amie tab, focus is on the body, and no attach
+    /// session owns the tab's container slots.
+    AmieList,
 }
 
 /// Map a key event + focus context to an [`Action`].
@@ -117,6 +135,29 @@ pub fn map_key(key: KeyEvent, ctx: FocusContext) -> Action {
                 Action::ForwardToPty(key)
             }
         }
+        FocusContext::AmieList => map_amie_list_key(key, ctrl),
+    }
+}
+
+/// Key bindings for the amie condition list (WI 0102). Reached only through
+/// `FocusContext::AmieList`; the global `ctrl` block in `map_key` runs first,
+/// so `Ctrl-T`/`Ctrl-A`/`Ctrl-D`/`Ctrl-M`/`Ctrl-W`/`Ctrl-G`/`Ctrl-C`/`Ctrl-,`
+/// keep their global meaning here.
+fn map_amie_list_key(key: KeyEvent, ctrl: bool) -> Action {
+    match key.code {
+        KeyCode::Esc => Action::FocusCommandBox,
+        KeyCode::Up => Action::ScrollUp,
+        KeyCode::Down => Action::ScrollDown,
+        KeyCode::PageUp => Action::ScrollPageUp,
+        KeyCode::PageDown => Action::ScrollPageDown,
+        KeyCode::Enter => Action::AmieShowDetail,
+        KeyCode::Char('a') if !ctrl => Action::AmieAttach,
+        KeyCode::Char('n') if !ctrl => Action::AmieNew,
+        KeyCode::Char('p') if !ctrl => Action::AmiePause,
+        KeyCode::Char('r') if !ctrl => Action::AmieResume,
+        KeyCode::Char('d') if !ctrl => Action::AmieDelete,
+        KeyCode::Char('y') if ctrl => Action::CopySelection,
+        _ => Action::None,
     }
 }
 

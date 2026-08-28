@@ -522,10 +522,16 @@ Tab names are truncated with `…` only when they don't fit their tab: at the mi
 | Grey | Idle or completed |
 | Blue | Running (no container) |
 | Green | Running with active container |
+| Cyan | The [amie tab](#the-amie-tab) |
 | Purple / Magenta | Permanently bound to a remote API session |
 | Red | Exited with error |
 | Yellow | Container silent for >30 seconds (stuck warning) |
 | Alternating Yellow / Purple | Background yolo countdown in progress: tab label alternates between `⚠️ yolo in Ns` and `🤘 yolo in Ns` every 2 seconds (see [Yolo Mode](06-yolo-mode.md#background-yolo-countdown)) |
+
+The amie tab's cyan and a remote-bound tab's purple/magenta are both fixed,
+kind-based colours: they take priority over the execution-phase colours
+above (grey/blue/green/red) but still yield to the yellow stuck warning and
+the yolo countdown, since those are live signals about a run in progress.
 
 ### Remote-bound tabs
 
@@ -534,6 +540,38 @@ When `remote.defaultAddr` is set in `~/.awman/config.json`, opening a new tab wi
 Remote-bound tabs are **purple** in the tab bar. The tab label shows `host:port` of the remote host instead of the local directory name. When a workflow runs on the remote session, the workflow state strip appears automatically and updates every 5 seconds.
 
 For full details on creating remote-bound tabs, the create-session sub-modal, and workflow strip behavior, see [Remote Mode: Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs).
+
+### The amie tab
+
+amie — awman's always-on condition-watching daemon — gets its own singleton
+tab inside this same multi-tab TUI rather than a separate program. Open it
+either of two ways:
+
+- Press **Ctrl+T** to open the New Tab dialog, then press **Ctrl-A** while
+  it's focused. The dialog's prompt shows a hint — "Press Ctrl-A to open
+  amie" — as a reminder. This doesn't add a second global `Ctrl-A` binding:
+  outside the New Tab dialog, `Ctrl-A` still switches to the previous tab as
+  usual.
+- Run `awman amie` with no subcommand from a terminal (with a TTY attached
+  and no `-n`/`--json`); awman opens the TUI pre-focused on the amie tab.
+
+There is at most one amie tab at a time — opening it again just focuses the
+existing one. It's **cyan** in the tab bar, distinct from every other tab
+colour, and its label is always the fixed word `amie` rather than a
+directory name, since it isn't bound to a project directory.
+
+Otherwise it's an ordinary tab: it takes part in **Ctrl-A**/**Ctrl-D** tab
+cycling, closes through the normal close-tab flow, and keeps its state
+while you're on a different tab. The command box below it still works
+exactly as it does on any other tab — you can type `amie <subcommand> ...`
+directly into it. The one difference is what fills the execution window
+above the command box: amie's condition list instead of plain command
+output, and, once you attach to a running condition, the same
+container/workflow-strip view a regular workflow tab shows. **Ctrl-G** (the
+git sidebar) is a no-op here, since the tab has no repository to show.
+
+See [amie](16-amie.md) for what conditions are, the amie tab's key
+bindings, and attaching to a running condition.
 
 ---
 

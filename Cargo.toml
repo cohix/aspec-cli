@@ -140,3 +140,19 @@ path = "tests/amie_mutual_exclusion.rs"
 [[test]]
 name = "amie_sandbox_refusal"
 path = "tests/amie_sandbox_refusal.rs"
+
+[[test]]
+name = "amie_cli_gateway"
+path = "tests/amie_cli_gateway.rs"
+
+[[test]]
+name = "amie_tui_tab"
+path = "tests/amie_tui_tab.rs"
+
+[[test]]
+name = "amie_attach_frontends"
+path = "tests/amie_attach_frontends.rs"
+
+[[test]]
+name = "amie_blockers"
+path = "tests/amie_blockers.rs"

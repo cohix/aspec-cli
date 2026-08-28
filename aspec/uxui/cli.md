@@ -27,6 +27,7 @@ This document is the authoritative specification of the `awman` CLI surface. It 
 | `awman config <subcommand>` | View and edit global/repo configuration. |
 | `awman status` | Show all running awman containers. |
 | `awman api <subcommand>` | Run awman as an API HTTP server. |
+| `awman amie <subcommand>` | Manage the amie condition daemon and scheduled conditions. |
 | `awman remote <subcommand>` | Connect to a remote API instance. |
 
 ### Top-level flags (apply before any subcommand)
@@ -119,6 +120,31 @@ Initialize the current Git repo for use with awman.
 | `kill` | — |
 | `logs` | — |
 | `status` | — |
+
+### `awman amie`
+
+Manage the amie condition daemon and scheduled conditions. The parent flags
+belong to `awman amie` itself; pass them before a subcommand when using one:
+
+| Flag | Kind | Default | Description |
+|---|---|---|---|
+| `-n, --non-interactive` | bool | false | Print the amie status summary instead of opening the TUI. |
+| `--json` | bool | false | Emit JSON output. **Implies `--non-interactive`.** |
+
+| Subcommand | Arguments | Flags |
+|---|---|---|
+| _(bare)_ `awman amie` | — | Inherits the parent flags above. With a TTY and neither `-n` nor `--json`, opens the singleton amie TUI tab; with `-n`/`--non-interactive` or `--json`, prints the daemon status summary instead. |
+| `add` | — | `--name <string>` (required; no default), `--description <string>` (required; no default), `--repo <path>` (default `—`), `--interval <string>` (default `5m`), `--agent <string>` (default `—`), `--model <string>` (default `—`), `--mount-scope <cwd\|gitroot>` (default `gitroot`), `--interview` (bool, default `false`), `-n, --non-interactive` (bool, default `false`). |
+| `list` | — | `--json` (bool, default `false`). |
+| `show <name>` | `<name>` (required string) | `--json` (bool, default `false`). |
+| `remove <name>` | `<name>` (required string) | `-y, --yes` (bool, default `false`). |
+| `pause <name>` | `<name>` (required string) | — |
+| `resume <name>` | `<name>` (required string) | — |
+| `start` | — | `--port <n>` (u16, default `0`; `0` selects an OS-assigned port), `--background` (bool, default `false`), `--refresh-key` (bool, default `false`), `--dangerously-skip-auth` (bool, default `false`). |
+| `stop` (alias `kill`) | — | — |
+| `status` | — | `--json` (bool, default `false`). |
+| `logs` | — | `-f, --follow` (bool, default `false`). |
+| `attach <name>` | `<name>` (required string) | `--container <string>` (default `—`; running container ID when multiple are active). |
 
 ### `awman remote`
 

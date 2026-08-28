@@ -89,4 +89,4 @@ Each parallel step gets its own control board when it completes or gets stuck; y
 
 ---
 
-[← Cleaning Up](14-cleaning-up.md) · [← Back to contents](contents.md)
+[← Cleaning Up](14-cleaning-up.md) · [Next: amie →](16-amie.md)

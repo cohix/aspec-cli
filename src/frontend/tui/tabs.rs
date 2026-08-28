@@ -17,12 +17,15 @@ use crate::frontend::tui::git_sidebar::{
 };
 use crate::frontend::tui::user_message::SharedStatusLog;
 
+pub mod amie_state;
 mod container_slots;
 mod git_poll;
 mod labels;
 mod overlay_lifecycle;
 #[cfg(test)]
 mod tests;
+
+use amie_state::AmieTabState;
 
 /// Per-tab execution lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,6 +401,13 @@ pub struct Tab {
     pub mouse_selection: Option<TextSelection>,
     pub workflow_agent_fallbacks: HashMap<String, String>,
     pub is_remote: bool,
+    /// Fixed tab kind, following the `is_remote` precedent. An amie tab is not
+    /// bound to a project directory and renders amie content in place of the
+    /// execution window. Never toggled after construction.
+    pub is_amie: bool,
+    /// Amie sub-view state (selection, polled conditions, daemon reachability).
+    /// `Some` exactly when `is_amie`.
+    pub amie: Option<AmieTabState>,
     pub output_lines: Vec<String>,
     pub stuck: bool,
     pub yolo_mode: bool,
@@ -495,7 +505,30 @@ impl Drop for Tab {
 impl Tab {
     pub fn new(session: Session) -> Self {
         let git_root = session.git_root().to_path_buf();
-        let mut tab = Self {
+        let mut tab = Self::new_inner(session);
+        // Start polling against the session git root. Once a worktree is
+        // created, `refresh_git_poll` (called each tick) restarts the task
+        // pointed at the worktree path.
+        tab.start_git_poll(git_root);
+        tab
+    }
+
+    /// Construct the singleton amie tab. Unlike [`Tab::new`] this starts **no**
+    /// git poll: the synthetic session is rooted at the amie storage root,
+    /// which has no meaningful diff. The caller must not auto-spawn a startup
+    /// command into this tab.
+    pub fn new_amie(session: Session) -> Self {
+        let mut tab = Self::new_inner(session);
+        tab.is_amie = true;
+        tab.amie = Some(AmieTabState::new());
+        tab
+    }
+
+    /// Shared field initialisation for [`Tab::new`] and [`Tab::new_amie`].
+    /// Starts **no** poll and spawns nothing; the caller decides whether a git
+    /// poll runs (normal tab) or not (amie tab).
+    fn new_inner(session: Session) -> Self {
+        Self {
             session,
             execution_phase: ExecutionPhase::Idle,
             container_window_state: ContainerWindowState::Hidden,
@@ -517,6 +550,8 @@ impl Tab {
             mouse_selection: None,
             workflow_agent_fallbacks: HashMap::new(),
             is_remote: false,
+            is_amie: false,
+            amie: None,
             output_lines: Vec::new(),
             stuck: false,
             yolo_mode: false,
@@ -545,12 +580,7 @@ impl Tab {
             git_poll_handle: None,
             git_poll_cancel: None,
             git_poll_root: None,
-        };
-        // Start polling against the session git root. Once a worktree is
-        // created, `refresh_git_poll` (called each tick) restarts the task
-        // pointed at the worktree path.
-        tab.start_git_poll(git_root);
-        tab
+        }
     }
 }
 
@@ -595,6 +625,11 @@ pub fn tab_color(tab: &Tab) -> ratatui::style::Color {
     }
     if tab.stuck {
         return Color::Yellow;
+    }
+    // Fixed tab kinds. Both win over execution-phase colouring and both yield
+    // to the stuck / yolo indicators above, which are transient run signals.
+    if tab.is_amie {
+        return Color::Cyan;
     }
     if tab.is_remote {
         return Color::Magenta;

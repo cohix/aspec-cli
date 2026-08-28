@@ -332,6 +332,13 @@ pub(super) fn handle_dialog_scroll(app: &mut App, direction: i32) {
                 *selected = (*selected + step).min(len - 1);
             }
         }
+        Some(Dialog::AmieConditionDetail(state)) => {
+            if direction < 0 {
+                state.scroll = state.scroll.saturating_sub(step);
+            } else {
+                state.scroll = state.scroll.saturating_add(step);
+            }
+        }
         Some(Dialog::ConfigShow(state)) => {
             // Row navigation is frozen mid-edit: the editor holds the value
             // of the row the edit started on.
@@ -379,6 +386,41 @@ pub(super) fn handle_dialog_char(app: &mut App, c: char) {
             }
             _ => {}
         },
+        // WI 0102: `y` confirms removal by dispatching `amie remove <name>`
+        // through the ordinary Layer-2 path; `n`/`Esc` dismisses. This dialog
+        // decides nothing itself — it only collects the confirmation.
+        Some(Dialog::AmieRemoveConfirm { name }) => {
+            let name = name.clone();
+            match c {
+                'y' | 'Y' => {
+                    app.active_dialog = None;
+                    let mut arguments = std::collections::BTreeMap::new();
+                    arguments.insert(
+                        "name".to_string(),
+                        crate::command::dispatch::parsed_input::ArgValue::Single(name.clone()),
+                    );
+                    // This dialog IS the confirmation: pass `--yes` so Layer 2
+                    // removes the persistent directory without a second prompt.
+                    let mut flags = std::collections::BTreeMap::new();
+                    flags.insert(
+                        "yes".to_string(),
+                        crate::command::dispatch::parsed_input::FlagValue::Bool(true),
+                    );
+                    app.spawn_command(
+                        &format!("amie remove {name} --yes"),
+                        crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
+                            path: vec!["amie".into(), "remove".into()],
+                            flags,
+                            arguments,
+                        },
+                    );
+                }
+                'n' | 'N' => {
+                    app.active_dialog = None;
+                }
+                _ => {}
+            }
+        }
 
         // ── Command-originated dialogs ───────────────────────────────
         Some(Dialog::YesNo { .. }) if is_command => match c {
@@ -486,7 +528,10 @@ pub(super) fn handle_dialog_char(app: &mut App, c: char) {
         }
 
         // ── Non-interactive / fallback dialogs ─────────────────────
-        Some(Dialog::Loading { .. })
+        // The amie detail modal ignores char keys — Esc dismisses and the
+        // arrow/page keys scroll via `handle_dialog_scroll`.
+        Some(Dialog::AmieConditionDetail(_))
+        | Some(Dialog::Loading { .. })
         | Some(Dialog::ListPicker { .. })
         | Some(Dialog::KindSelect { .. })
         | Some(Dialog::YesNo { .. })

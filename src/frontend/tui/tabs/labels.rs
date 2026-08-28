@@ -11,13 +11,18 @@ impl Tab {
     /// more of a long project name instead of clipping at a fixed length;
     /// pass `u16::MAX` to measure the untruncated name.
     pub fn project_name(&self, tab_width: u16) -> String {
-        let name = self
-            .session
-            .working_dir()
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_string();
+        let name = if self.is_amie {
+            // Fixed label: `AWMAN_AMIE_ROOT` may point at a directory whose
+            // basename has nothing to do with amie.
+            "amie".to_string()
+        } else {
+            self.session
+                .working_dir()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("?")
+                .to_string()
+        };
         let max = (tab_width as usize).saturating_sub(6).max(1);
         truncate_with_ellipsis(&name, max)
     }

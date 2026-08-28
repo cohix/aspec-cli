@@ -32,6 +32,56 @@ pub const SESSION_LABEL_KEY: &str = "awman.session";
 /// evaluation (and generated workflow) launches is attributable to it.
 pub const CONDITION_LABEL_KEY: &str = "awman.amie.condition";
 
+/// The container-name and label identity every container a condition launches
+/// must carry. One implementation, used by the evaluation leader
+/// ([`AmieAgentLauncher::run_leader`]) and by every step of the workflow that
+/// leader generates (`ExecWorkflowCommand`, via `with_amie_identity`), so a
+/// condition's whole container set shares one discoverable name prefix and the
+/// two attribution labels.
+#[derive(Debug, Clone)]
+pub struct AmieContainerIdentity {
+    pub condition_name: String,
+    pub session_id: String,
+}
+
+impl AmieContainerIdentity {
+    pub fn new(condition_name: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self {
+            condition_name: condition_name.into(),
+            session_id: session_id.into(),
+        }
+    }
+
+    /// Stamp a fresh `awman-amie-<slug>-<8 hex>` name and the `awman.session` /
+    /// `awman.amie.condition` labels onto resolved options. Rejects the sandbox
+    /// variant, exactly as `run_leader` did before this was extracted: amie is
+    /// container-only, so a mis-wired caller fails loudly rather than launching
+    /// an unlabelled, undiscoverable container.
+    pub fn stamp(
+        &self,
+        resolved: ResolvedAgentOptions,
+    ) -> Result<ResolvedAgentOptions, EngineError> {
+        match resolved {
+            ResolvedAgentOptions::Container(mut options) => {
+                let container_name = generate_amie_container_name(&self.condition_name);
+                options.name = Some(ContainerName::new(container_name));
+                options
+                    .labels
+                    .push((SESSION_LABEL_KEY.to_string(), self.session_id.clone()));
+                options
+                    .labels
+                    .push((CONDITION_LABEL_KEY.to_string(), self.condition_name.clone()));
+                Ok(ResolvedAgentOptions::Container(options))
+            }
+            ResolvedAgentOptions::Sandbox(_) => Err(EngineError::Config(
+                "amie requires a container runtime; the sandbox tier cannot host \
+                 condition evaluation"
+                    .to_string(),
+            )),
+        }
+    }
+}
+
 /// Everything the launcher needs to run one condition's leader agent.
 ///
 /// The caller (Layer 2) has already opened `session` rooted at the repo's
@@ -103,30 +153,12 @@ impl AmieAgentLauncher {
         )?;
 
         // Stamp amie's identity onto the resolved options: a deterministic,
-        // parseable container name and the two attribution labels. amie is
-        // container-only (the sandbox tier is refused up-stack, at condition
-        // creation and daemon startup); reject a sandbox variant here too so a
-        // mis-wired caller fails loudly rather than launching unlabelled.
-        let resolved = match resolved {
-            ResolvedAgentOptions::Container(mut options) => {
-                let container_name = generate_amie_container_name(&spec.condition_name);
-                options.name = Some(ContainerName::new(container_name));
-                options
-                    .labels
-                    .push((SESSION_LABEL_KEY.to_string(), spec.session.id().to_string()));
-                options
-                    .labels
-                    .push((CONDITION_LABEL_KEY.to_string(), spec.condition_name.clone()));
-                ResolvedAgentOptions::Container(options)
-            }
-            ResolvedAgentOptions::Sandbox(_) => {
-                return Err(EngineError::Config(
-                    "amie requires a container runtime; the sandbox tier cannot host \
-                     condition evaluation"
-                        .to_string(),
-                ));
-            }
-        };
+        // parseable container name and the two attribution labels. The same
+        // identity is applied to every generated-workflow step container, so it
+        // lives in exactly one place — [`AmieContainerIdentity::stamp`].
+        let identity =
+            AmieContainerIdentity::new(spec.condition_name.clone(), spec.session.id().to_string());
+        let resolved = identity.stamp(resolved)?;
 
         let instance: Box<dyn AgentInstance> = self.runtime.build(resolved)?;
         let mut execution = instance.run_with_frontend(frontend)?;
@@ -184,5 +216,70 @@ mod tests {
         // A second seed over an existing directory must not error.
         AmieAgentLauncher::seed_condition_dir(&dir).unwrap();
         assert!(dir.join("example-workflow.toml").exists());
+    }
+
+    // ── BLOCKER-1: one stamping implementation for every condition container ──
+
+    use crate::engine::container::naming::parse_amie_condition_slug;
+
+    #[test]
+    fn stamp_applies_a_parseable_amie_name_and_both_labels() {
+        let identity = AmieContainerIdentity::new("issue-triage", "sess-123");
+        let resolved = ResolvedAgentOptions::container(Vec::new()).unwrap();
+        let ResolvedAgentOptions::Container(options) = identity.stamp(resolved).unwrap() else {
+            panic!("stamp must keep the container variant");
+        };
+        let name = options.name.expect("stamp must set a container name");
+        let name = name.as_str();
+        assert!(
+            name.starts_with("awman-amie-issue-triage-"),
+            "unexpected container name: {name}"
+        );
+        assert_eq!(
+            parse_amie_condition_slug(name),
+            Some("issue-triage"),
+            "the amie name must round-trip back to the condition slug"
+        );
+        assert!(options
+            .labels
+            .iter()
+            .any(|(k, v)| k == SESSION_LABEL_KEY && v == "sess-123"));
+        assert!(options
+            .labels
+            .iter()
+            .any(|(k, v)| k == CONDITION_LABEL_KEY && v == "issue-triage"));
+    }
+
+    #[test]
+    fn stamp_generates_a_fresh_name_each_call() {
+        // Every generated-workflow step gets its own container, so two stamps
+        // of the same identity must not collide on the unique suffix.
+        let identity = AmieContainerIdentity::new("release-notes", "s");
+        let first = match identity
+            .stamp(ResolvedAgentOptions::container(Vec::new()).unwrap())
+            .unwrap()
+        {
+            ResolvedAgentOptions::Container(o) => o.name.unwrap().as_str().to_string(),
+            _ => unreachable!(),
+        };
+        let second = match identity
+            .stamp(ResolvedAgentOptions::container(Vec::new()).unwrap())
+            .unwrap()
+        {
+            ResolvedAgentOptions::Container(o) => o.name.unwrap().as_str().to_string(),
+            _ => unreachable!(),
+        };
+        assert_ne!(first, second, "each stamp must mint a fresh unique suffix");
+    }
+
+    #[test]
+    fn stamp_rejects_the_sandbox_variant() {
+        let identity = AmieContainerIdentity::new("issue-triage", "s");
+        let sandbox = ResolvedAgentOptions::sandbox(Vec::new());
+        let error = identity.stamp(sandbox).unwrap_err();
+        assert!(
+            error.to_string().contains("container runtime"),
+            "sandbox refusal must explain the container requirement: {error}"
+        );
     }
 }

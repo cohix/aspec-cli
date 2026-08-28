@@ -98,7 +98,7 @@ impl Command for AmieDaemonCommand {
             }
             AmieDaemonSubcommand::Stop(_) => run_stop(&process, &mut *frontend)?,
             AmieDaemonSubcommand::Status(_) => run_status(&process).await?,
-            AmieDaemonSubcommand::Logs(flags) => run_logs(&process, flags, &mut *frontend)?,
+            AmieDaemonSubcommand::Logs(flags) => run_logs(&process, flags, &mut *frontend).await?,
         };
         frontend.replay_queued();
         Ok(outcome)
@@ -328,32 +328,145 @@ fn run_stop(
     })
 }
 
-fn run_logs(
+async fn run_logs(
     process: &DaemonProcess,
-    _flags: AmieLogsFlags,
+    flags: AmieLogsFlags,
     frontend: &mut dyn AmieCommandFrontend,
 ) -> Result<AmieDaemonOutcome, CommandError> {
     let path = process.paths().log_file();
-    match std::fs::read_to_string(&path) {
-        Ok(content) => {
-            for line in content.lines() {
+    // Initial dump: emit every existing line and remember where the file ends
+    // so follow-mode only streams what is appended after this point.
+    let mut offset = match tail_new_lines(&path, 0)? {
+        Some((lines, end)) => {
+            for line in lines {
                 frontend.write_message(UserMessage {
                     level: MessageLevel::Info,
-                    text: line.into(),
+                    text: line,
                 });
             }
+            end
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        None => {
             frontend.write_message(UserMessage {
                 level: MessageLevel::Warning,
                 text: format!("Log file not found: {}", path.display()),
-            })
+            });
+            0
         }
-        Err(error) => return Err(crate::data::error::DataError::io(&path, error).into()),
+    };
+
+    // Follow mode: tail appended lines every 250 ms until the user interrupts
+    // (Ctrl-C). This is a local file read — the daemon still exposes no log
+    // route on the network.
+    if flags.follow {
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    if let Some((lines, end)) = tail_new_lines(&path, offset)? {
+                        for line in lines {
+                            frontend.write_message(UserMessage {
+                                level: MessageLevel::Info,
+                                text: line,
+                            });
+                        }
+                        offset = end;
+                    }
+                }
+            }
+        }
     }
+
     Ok(AmieDaemonOutcome::Logs {
         log_path: path.display().to_string(),
     })
+}
+
+/// Read complete lines appended to `path` after byte `from`. Returns the lines
+/// and the new byte offset (advanced only past the last complete line, so a
+/// partial trailing line is re-read on the next call), or `None` when the file
+/// does not exist yet.
+fn tail_new_lines(
+    path: &std::path::Path,
+    from: u64,
+) -> Result<Option<(Vec<String>, u64)>, CommandError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(crate::data::error::DataError::io(path, error).into()),
+    };
+    let len = file
+        .metadata()
+        .map_err(|error| crate::data::error::DataError::io(path, error))?
+        .len();
+    // A truncated/rotated file (shorter than our offset) restarts from 0.
+    let start = if from > len { 0 } else { from };
+    if start == len {
+        return Ok(Some((Vec::new(), len)));
+    }
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| crate::data::error::DataError::io(path, error))?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .map_err(|error| crate::data::error::DataError::io(path, error))?;
+    // Advance only past the last newline so a partial final line is not emitted.
+    let consumed = match buf.rfind('\n') {
+        Some(idx) => idx + 1,
+        None => 0,
+    };
+    let lines = buf[..consumed].lines().map(str::to_string).collect();
+    Ok(Some((lines, start + consumed as u64)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tail_new_lines;
+
+    #[test]
+    fn tail_reads_the_whole_file_on_the_first_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("awman.log");
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let (lines, end) = tail_new_lines(&path, 0).unwrap().unwrap();
+        assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(end, 8);
+    }
+
+    #[test]
+    fn tail_streams_only_lines_appended_after_the_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("awman.log");
+        std::fs::write(&path, "one\n").unwrap();
+        let (_, end) = tail_new_lines(&path, 0).unwrap().unwrap();
+        // Append more; a follow tick from `end` yields only the new line.
+        std::fs::write(&path, "one\ntwo\n").unwrap();
+        let (lines, end2) = tail_new_lines(&path, end).unwrap().unwrap();
+        assert_eq!(lines, vec!["two".to_string()]);
+        assert_eq!(end2, 8);
+    }
+
+    #[test]
+    fn tail_does_not_emit_a_partial_final_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("awman.log");
+        // No trailing newline: the partial line must be withheld and re-read.
+        std::fs::write(&path, "complete\npartial").unwrap();
+        let (lines, end) = tail_new_lines(&path, 0).unwrap().unwrap();
+        assert_eq!(lines, vec!["complete".to_string()]);
+        assert_eq!(end, 9, "offset advances only past the last newline");
+        // Once the line is completed, the next tick emits it in full.
+        std::fs::write(&path, "complete\npartial done\n").unwrap();
+        let (lines, _) = tail_new_lines(&path, end).unwrap().unwrap();
+        assert_eq!(lines, vec!["partial done".to_string()]);
+    }
+
+    #[test]
+    fn tail_reports_a_missing_file_as_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("does-not-exist.log");
+        assert!(tail_new_lines(&path, 0).unwrap().is_none());
+    }
 }
 
 async fn run_status(process: &DaemonProcess) -> Result<AmieDaemonOutcome, CommandError> {

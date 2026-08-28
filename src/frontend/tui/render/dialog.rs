@@ -639,6 +639,17 @@ pub(super) fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Fr
         dialogs::Dialog::ConfigShow(state) => {
             render_config_show(state, area, frame);
         }
+        dialogs::Dialog::AmieConditionDetail(state) => {
+            render_amie_detail(state, area, frame);
+        }
+        dialogs::Dialog::AmieRemoveConfirm { name } => {
+            let width = 60u16.min(area.width.saturating_sub(4).max(40));
+            let dialog_area = dialogs::centered_fixed(width, 8, area);
+            let inner =
+                dialogs::render_dialog_frame("Remove condition", Color::Yellow, dialog_area, frame);
+            let text = format!("  Remove condition \"{name}\"?\n\n  [y] remove   [n / Esc] cancel");
+            frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
+        }
         dialogs::Dialog::Loading { title } => {
             let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
             let width = title_w.max(40).min(area.width.saturating_sub(4));
@@ -738,6 +749,132 @@ pub(super) fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Fr
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         }
     }
+}
+
+/// Render the amie condition-detail modal (WI 0102): the field block plus the
+/// scrollable run-history table. Reads only the dialog state, which
+/// `tick_all_tabs` keeps in sync with the amie tab's snapshot.
+fn render_amie_detail(state: &dialogs::AmieDetailState, area: Rect, frame: &mut Frame) {
+    use crate::data::fs::condition_store::{ConditionStatus, MountScope};
+
+    let width = area.width.saturating_sub(6).clamp(50, 90);
+    let height = area.height.saturating_sub(4).clamp(12, 30);
+    let dialog_area = dialogs::centered_fixed(width, height, area);
+    let title = format!("condition: {}", state.name);
+    let inner = dialogs::render_dialog_frame(&title, Color::Cyan, dialog_area, frame);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let c = &state.condition;
+    let mount = match c.mount_scope {
+        MountScope::Cwd => "cwd",
+        MountScope::GitRoot => "gitroot",
+    };
+    let status = match c.status {
+        ConditionStatus::Active => "active",
+        ConditionStatus::Paused => "paused",
+    };
+    let fields: Vec<Line> = vec![
+        amie_field_line("Description", &c.description),
+        amie_field_line("Status", status),
+        amie_field_line("Mount scope", mount),
+        amie_field_line(
+            "Interval",
+            &crate::frontend::tui::tabs::format_duration(c.interval_secs),
+        ),
+        amie_field_line("Agent", c.agent.as_deref().unwrap_or("(default)")),
+        amie_field_line("Model", c.model.as_deref().unwrap_or("(default)")),
+        amie_field_line("Repo scope", &c.repo_scope.display().to_string()),
+        amie_field_line(
+            "Created",
+            &c.created_at.format("%Y-%m-%d %H:%M").to_string(),
+        ),
+        amie_field_line(
+            "Updated",
+            &c.updated_at.format("%Y-%m-%d %H:%M").to_string(),
+        ),
+    ];
+    let field_h = fields.len() as u16;
+
+    let chunks = Layout::vertical([
+        Constraint::Length(field_h),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .split(inner);
+    frame.render_widget(Paragraph::new(fields), chunks[0]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "Run history",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        chunks[1],
+    );
+    render_amie_run_history(&state.runs, state.scroll, chunks[2], frame);
+}
+
+/// A `label: value` line for the detail modal's field block.
+fn amie_field_line(label: &str, value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
+        Span::raw(value.to_string()),
+    ])
+}
+
+/// The run-history table (Started | Status | Finished | Error), scrolled by
+/// `scroll` rows.
+fn render_amie_run_history(
+    runs: &[crate::data::fs::condition_store::Run],
+    scroll: usize,
+    area: Rect,
+    frame: &mut Frame,
+) {
+    use crate::data::fs::condition_store::RunStatus;
+    let header_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let header = Row::new(vec![
+        Cell::from("Started").style(header_style),
+        Cell::from("Status").style(header_style),
+        Cell::from("Finished").style(header_style),
+        Cell::from("Error").style(header_style),
+    ]);
+    let rows: Vec<Row> = runs
+        .iter()
+        .skip(scroll)
+        .map(|r| {
+            let status = match r.status {
+                RunStatus::Running => "running",
+                RunStatus::NotTriggered => "not triggered",
+                RunStatus::WorkflowExecuted => "executed",
+                RunStatus::Failed => "failed",
+                RunStatus::Interrupted => "interrupted",
+            };
+            let started = r.started_at.format("%Y-%m-%d %H:%M").to_string();
+            let finished = r
+                .finished_at
+                .map(|f| f.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "\u{2014}".to_string());
+            let error = r.error.clone().unwrap_or_default();
+            Row::new(vec![
+                Cell::from(started),
+                Cell::from(status),
+                Cell::from(finished),
+                Cell::from(error),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(17),
+        Constraint::Length(14),
+        Constraint::Length(17),
+        Constraint::Min(6),
+    ];
+    let table = Table::new(rows, widths).header(header);
+    frame.render_widget(table, area);
 }
 
 /// Render `text` with a visible `|` cursor at byte offset `cursor`, windowed

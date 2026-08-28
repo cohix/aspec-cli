@@ -16,6 +16,7 @@ use crate::frontend::tui::tabs::{
 };
 use crate::frontend::tui::workflow_view;
 
+mod amie;
 mod command_box;
 mod dialog;
 mod execution_window;
@@ -101,7 +102,16 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
     .split(main_area);
 
     tab_bar::render_tab_bar(app, chunks[0], frame);
-    execution_window::render_execution_window(app, chunks[1], frame);
+    // WI 0102: the amie tab replaces the execution-window body with the
+    // condition list. While an attach session owns the tab's slots the normal
+    // execution/container rendering applies unchanged, which is what makes
+    // attach reproduce the `exec workflow --dynamic` UX with no renderer
+    // changes (see WI 0102 §0.3).
+    if app.active_tab().is_amie && app.active_tab().container_slots.is_empty() {
+        amie::render_amie_body(app, chunks[1], frame);
+    } else {
+        execution_window::render_execution_window(app, chunks[1], frame);
+    }
 
     if n_minimized_bars > 0 {
         container_view::render_container_bars(app.active_tab(), chunks[2], frame, show_overlay);

@@ -122,6 +122,14 @@ pub enum Dialog {
     CloseTabConfirm,
     WorkflowCancelConfirm,
     ConfigShow(ConfigShowState),
+    /// Condition detail + run history for the amie tab (WI 0102). Kept live by
+    /// `App::tick_all_tabs` from the active amie tab's snapshot.
+    AmieConditionDetail(AmieDetailState),
+    /// Confirmation before removing an amie condition (WI 0102). `y` dispatches
+    /// `amie remove <name>`; `n`/`Esc` dismisses.
+    AmieRemoveConfirm {
+        name: String,
+    },
     Loading {
         title: String,
     },
@@ -215,6 +223,17 @@ pub struct MountScopeState {
 pub struct AgentAuthState {
     pub agent_name: String,
     pub env_vars: Vec<String>,
+}
+
+/// State for the amie condition-detail modal (WI 0102). `name` is the identity
+/// used by `tick_all_tabs` to refresh `condition` and `runs` from the tab
+/// snapshot each tick; `scroll` offsets the run-history table.
+#[derive(Debug, Clone)]
+pub struct AmieDetailState {
+    pub name: String,
+    pub condition: crate::data::fs::condition_store::Condition,
+    pub runs: Vec<crate::data::fs::condition_store::Run>,
+    pub scroll: usize,
 }
 
 pub struct ConfigShowState {
