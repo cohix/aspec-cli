@@ -319,9 +319,27 @@ fn parse_against_spec(
         }
     }
 
-    // Map collected positionals onto the declared arguments in order. Extra
-    // positionals beyond a command's declared arguments are ignored (the
-    // pre-refactor behavior only ever read the mapped positionals).
+    // The clap projection enforces `FlagSpec::conflicts_with` automatically.
+    // Raw/API parsing has no clap layer, so enforce the same declarative rule
+    // before dispatch can observe a contradictory flag set.
+    for flag in spec.flags {
+        if !flags.contains_key(flag.long) {
+            continue;
+        }
+        if let Some(conflicting) = flag
+            .conflicts_with
+            .iter()
+            .find(|conflicting| flags.contains_key::<str>(*conflicting))
+        {
+            return Err(CommandError::InvalidFlagValue {
+                command: path.iter().map(|segment| (*segment).to_string()).collect(),
+                flag: flag.long.to_string(),
+                reason: format!("--{} conflicts with --{}", flag.long, conflicting),
+            });
+        }
+    }
+
+    // Map collected positionals onto the declared arguments in order.
     let mut arguments: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut path_arguments: BTreeSet<String> = BTreeSet::new();
     let mut pos_idx = 0;
@@ -348,6 +366,14 @@ fn parse_against_spec(
                 }
             }
         }
+    }
+
+    // Positionals the command never declared are a usage error, exactly as
+    // clap treats them on the CLI. Silently dropping them let a command like
+    // `new skill --pull <slug> <name>` — which declares no positional at all —
+    // look accepted through the API and TUI while the CLI rejected it.
+    if let Some(extra) = positionals.get(pos_idx) {
+        return Err(CommandError::unexpected_argument(path, extra.clone()));
     }
 
     Ok(ParsedArgs {
@@ -485,10 +511,46 @@ mod tests {
     #[test]
     fn exec_workflow_path_positional_reachable_via_flag_path_and_argument() {
         let p = cat()
-            .parse_raw_args(&["exec", "workflow"], &argv(&["build.toml", "ignored"]))
+            .parse_raw_args(&["exec", "workflow"], &argv(&["build.toml"]))
             .unwrap();
         assert_eq!(p.argument("workflow").as_deref(), Some("build.toml"));
         assert_eq!(p.flag_path("workflow"), Some(PathBuf::from("build.toml")));
+    }
+
+    /// Clap rejects positionals a command never declared; the raw-args
+    /// projection must agree (WI-0097 parity) rather than silently dropping
+    /// them. `exec workflow` declares exactly one positional.
+    #[test]
+    fn extra_positional_beyond_declared_arguments_is_rejected() {
+        let err = cat()
+            .parse_raw_args(&["exec", "workflow"], &argv(&["build.toml", "stray"]))
+            .expect_err("an undeclared extra positional must be a usage error");
+        match err {
+            CommandError::UnexpectedArgument { command, argument } => {
+                assert_eq!(command, vec!["exec", "workflow"]);
+                assert_eq!(argument, "stray", "the error must name the stray token");
+            }
+            other => panic!("expected UnexpectedArgument, got {other:?}"),
+        }
+    }
+
+    /// `new skill` declares no positional at all, so a stray skill name next to
+    /// `--pull` must be rejected before any git work can start (WI-0103).
+    #[test]
+    fn new_skill_rejects_a_positional_name_alongside_pull() {
+        let err = cat()
+            .parse_raw_args(
+                &["new", "skill"],
+                &argv(&["--pull", "owner/library", "accidental-name"]),
+            )
+            .expect_err("new skill takes no positional argument");
+        assert!(
+            matches!(
+                &err,
+                CommandError::UnexpectedArgument { argument, .. } if argument == "accidental-name"
+            ),
+            "expected UnexpectedArgument naming the stray name, got {err:?}"
+        );
     }
 
     #[test]

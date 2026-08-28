@@ -17,3 +17,4 @@ mod hardening_0098;
 mod headless_no_tty;
 mod overlay_0082;
 mod rename_0077;
+mod skill_libraries;

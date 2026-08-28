@@ -92,14 +92,14 @@ overlays = ["env(GITHUB_TOKEN)"]
 
 ### `skill(*)`
 
-Mounts all global awman skills into the agent container.
+Mounts all hand-authored global awman skills into the agent container. Pulled libraries are not implicitly included by this wildcard; choose them explicitly with `skill(LIBRARY)` or `skill(LIBRARY/SKILL)`.
 
 **Syntax:**
 ```
 skill(*)
 ```
 
-This makes every skill in `~/.awman/skills/` available as a slash command inside the container.
+This makes every hand-authored skill in `~/.awman/skills/` available as a slash command inside the container. Pulled libraries live below `.library/` and are opt-in.
 
 ### `skill(name)`
 
@@ -110,7 +110,7 @@ Mounts a single named skill into the agent container.
 skill(NAME)
 ```
 
-- `NAME` — the directory name of the skill in `~/.awman/skills/` (e.g., `lint`, `review`).
+- `NAME` — a hand-authored skill name, a pulled library name, or a pulled library and skill separated by `/`.
 - Multiple named skills are expressed as multiple `skill()` calls — not comma-separated inside one call.
 
 **Examples:**
@@ -118,6 +118,8 @@ skill(NAME)
 skill(lint)
 skill(review)
 skill(fetch)
+skill(superpowers)
+skill(superpowers/brainstorming)
 ```
 
 Multiple skills:
@@ -125,7 +127,9 @@ Multiple skills:
 skill(lint), skill(review)
 ```
 
-If a named skill does not exist in `~/.awman/skills/`, awman exits with an error before launching the container. This catches typos early rather than silently failing inside the container.
+`skill(superpowers)` mounts the whole pulled library. `skill(superpowers/brainstorming)` mounts only the `brainstorming` skill from that library. A hand-authored skill takes precedence when it has the same name as a pulled library, so `~/.awman/skills/superpowers/` wins over `~/.awman/skills/.library/superpowers/`.
+
+Pulled libraries and their skills are read from `~/.awman/skills/.library/<library>/`, using the subdirectory selected when the library was pulled. A named skill that cannot be found is reported before the container launches. Names can contain at most one `/`; `skill(a/b/c)` is rejected with `skill(name) supports at most one '/' (library/skill); got 'a/b/c'`. Each part of the name must be a plain directory name: empty, `.` and `..` parts (as in `skill(superpowers/..)`) are rejected with `skill(name) segments must not be empty, '.' or '..'`.
 
 ### `context(scope[:permission])`
 
@@ -199,9 +203,11 @@ When different sources specify **different host paths** mapping to the **same co
 ### Skills overlays
 
 Skills use **union/additive** semantics:
-- If *any* source specifies `skill(*)`, all skills are mounted.
+- If *any* source specifies `skill(*)`, all hand-authored global skills are mounted; pulled libraries still require an explicit library or library/skill reference.
 - Named skills from all sources are accumulated. If global config specifies `skill(foo)` and a per-step overlay specifies `skill(bar)`, both `foo` and `bar` are mounted.
 - When `skill(*)` is active from any source, the accumulated named skills list is ignored (all skills are already mounted).
+
+If a session needs a pulled library, use its explicit `skill(library)` or `skill(library/skill)` reference instead of relying on `skill(*)`.
 
 ### Environment variable overlays
 
@@ -719,11 +725,21 @@ The warning is logged, but the session proceeds without that overlay. This is in
 
 ### Missing named skills
 
-If you request a skill that doesn't exist in `~/.awman/skills/`:
+If a named skill is neither a hand-authored skill nor a pulled library:
 
 ```
-error: skill 'nonexistent' not found in ~/.awman/skills/
+error: named skill 'nonexistent' not found in ~/.awman/skills or ~/.awman/skills/.library
 ```
+
+For a library skill, the error identifies both the library and the missing skill, for example:
+
+```
+error: skill 'brainstorming' not found in library 'superpowers' (looked for a SKILL.md in ~/.awman/skills/.library/superpowers/skills/brainstorming)
+```
+
+A skill is a directory containing a `SKILL.md`. A directory inside a library
+that has no `SKILL.md` is reported the same way — it is not mountable as a
+skill.
 
 The command exits immediately. This catches typos before the container launches, preventing silent failures.
 
@@ -816,7 +832,8 @@ If you see this warning for a path that should exist, check:
 ### Skills not available in container
 
 - Is `skill(*)` or `skill(skillname)` configured?
-- Do the skills exist in `~/.awman/skills/`?
+- For a hand-authored skill, does it exist in `~/.awman/skills/<name>/`?
+- For a pulled library, does it exist in `~/.awman/skills/.library/<library>/` and is the requested library or library/skill name correct?
 - Check the full Docker command printed before the session — it should include `-v` mounts for each skill.
 
 ### Git operations failing with "Permission denied"

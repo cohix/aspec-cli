@@ -332,6 +332,12 @@ fn clone_parse_error(e: &CommandError) -> CommandError {
                 argument: argument.clone(),
             }
         }
+        CommandError::UnexpectedArgument { command, argument } => {
+            CommandError::UnexpectedArgument {
+                command: command.clone(),
+                argument: argument.clone(),
+            }
+        }
         // parse_raw_args only produces the variants above; anything else is
         // rendered to a stable string so the command still aborts cleanly.
         other => CommandError::Other(other.to_string()),

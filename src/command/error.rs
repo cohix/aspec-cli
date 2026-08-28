@@ -38,6 +38,12 @@ pub enum CommandError {
         argument: String,
     },
 
+    #[error("unexpected argument '{argument}' for command {command:?}")]
+    UnexpectedArgument {
+        command: Vec<String>,
+        argument: String,
+    },
+
     #[error("flags '{a}' and '{b}' are mutually exclusive on {command:?}")]
     MutuallyExclusive {
         command: Vec<String>,
@@ -195,6 +201,13 @@ impl CommandError {
         CommandError::UnknownFlag {
             command: command.iter().map(|s| s.to_string()).collect(),
             flag: flag.into(),
+        }
+    }
+
+    pub fn unexpected_argument(command: &[&str], argument: impl Into<String>) -> Self {
+        CommandError::UnexpectedArgument {
+            command: command.iter().map(|s| s.to_string()).collect(),
+            argument: argument.into(),
         }
     }
 

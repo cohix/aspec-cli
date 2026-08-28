@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::data::fs::auth_paths::AuthPathResolver;
 use crate::data::fs::overlay_paths::OverlayPathResolver;
+use crate::data::fs::skill_library::read_library_meta;
 use crate::data::session::{AgentName, Session};
 use crate::engine::container::options::{OverlayPermission, OverlaySpec};
 use crate::engine::error::EngineError;
@@ -536,19 +537,83 @@ impl OverlayEngine {
         } else {
             let mut specs = Vec::new();
             for name in names {
-                let skill_dir = host_skills_dir.join(name);
-                if !skill_dir.exists() {
-                    return Err(EngineError::Other(format!(
-                        "named skill '{}' not found in {}",
-                        name,
-                        host_skills_dir.display()
-                    )));
+                match name.split_once('/') {
+                    // ── Single skill inside a pulled library: `library/skill` ──
+                    //
+                    // Mount only `<library>/<subdir>/<skill>` at
+                    // `{container_path}/<library>/<skill>`, preserving the
+                    // library namespace so `skill(lib)` and `skill(lib/skill)`
+                    // never collide on container path when both are requested.
+                    Some((library, skill)) => {
+                        validate_skill_reference_segment(library, name)?;
+                        validate_skill_reference_segment(skill, name)?;
+                        let library_dir = skill_dirs.library_dir(library);
+                        if !library_dir.exists() {
+                            return Err(EngineError::Other(format!(
+                                "skill library '{library}' not found in {} (for named skill '{name}')",
+                                skill_dirs.library_root().display()
+                            )));
+                        }
+                        let meta = read_library_meta(&library_dir).map_err(EngineError::Data)?;
+                        let subdir = validate_library_subdir(&meta.subdir)?;
+                        let skill_path = library_dir.join(&subdir).join(skill);
+                        // A skill is a directory holding a `SKILL.md`. Merely
+                        // existing is not enough: mounting an arbitrary
+                        // directory inside a clone would expose non-skill
+                        // content (including `.git/`) to the agent.
+                        if !skill_path.is_dir() || !skill_path.join("SKILL.md").is_file() {
+                            return Err(EngineError::Other(format!(
+                                "skill '{skill}' not found in library '{library}' (looked for a SKILL.md in {})",
+                                skill_path.display()
+                            )));
+                        }
+                        specs.push(OverlaySpec {
+                            host_path: OverlayPathResolver::canonicalize_lossy(&skill_path),
+                            container_path: PathBuf::from(format!(
+                                "{container_path}/{library}/{skill}"
+                            )),
+                            permission: OverlayPermission::ReadOnly,
+                        });
+                    }
+                    // ── No slash: a plain skill, or a whole pulled library ──
+                    None => {
+                        validate_skill_reference_segment(name, name)?;
+                        // 1. Plain skill wins — a user's own local skill is
+                        //    never shadowed by a same-named pulled library.
+                        let plain_dir = host_skills_dir.join(name);
+                        if plain_dir.exists() {
+                            specs.push(OverlaySpec {
+                                host_path: OverlayPathResolver::canonicalize_lossy(&plain_dir),
+                                container_path: PathBuf::from(format!("{container_path}/{name}")),
+                                permission: OverlayPermission::ReadOnly,
+                            });
+                            continue;
+                        }
+                        // 2. Whole library — mount `<library>/<subdir>` at
+                        //    `{container_path}/<name>`, giving the same mount
+                        //    shape as any other named skill (a directory of
+                        //    `<skill>/SKILL.md` entries).
+                        let library_dir = skill_dirs.library_dir(name);
+                        if library_dir.exists() {
+                            let meta =
+                                read_library_meta(&library_dir).map_err(EngineError::Data)?;
+                            let subdir = validate_library_subdir(&meta.subdir)?;
+                            let mount = library_dir.join(&subdir);
+                            specs.push(OverlaySpec {
+                                host_path: OverlayPathResolver::canonicalize_lossy(&mount),
+                                container_path: PathBuf::from(format!("{container_path}/{name}")),
+                                permission: OverlayPermission::ReadOnly,
+                            });
+                            continue;
+                        }
+                        // 3. Nothing resolved — name both search locations.
+                        return Err(EngineError::Other(format!(
+                            "named skill '{name}' not found in {} or {}",
+                            host_skills_dir.display(),
+                            skill_dirs.library_root().display()
+                        )));
+                    }
                 }
-                specs.push(OverlaySpec {
-                    host_path: OverlayPathResolver::canonicalize_lossy(&skill_dir),
-                    container_path: PathBuf::from(format!("{}/{}", container_path, name)),
-                    permission: OverlayPermission::ReadOnly,
-                });
             }
             Ok(specs)
         }
@@ -845,6 +910,60 @@ pub(crate) fn detect_container_home(home: &Path, agent: &str, git_root: &Path) -
         }
     }
     None
+}
+
+/// Validate one segment of a `skill(...)` reference (a plain skill name, a
+/// library name, or a skill name inside a library) as a single, contained
+/// path component.
+///
+/// The overlay parser applies the same rule, but named skills also reach this
+/// function from config files and the API, so containment is re-checked here:
+/// an empty, `.`, or `..` segment would otherwise be joined onto a host path
+/// and resolve to a directory the reference was never meant to name (e.g.
+/// `skill(lib/..)` mounting the whole managed clone, `.git/` included).
+fn validate_skill_reference_segment(segment: &str, name: &str) -> Result<(), EngineError> {
+    let mut components = Path::new(segment).components();
+    let first = components.next();
+    let contained =
+        matches!(first, Some(std::path::Component::Normal(_))) && components.next().is_none();
+    if !contained {
+        return Err(EngineError::Other(format!(
+            "named skill '{name}' has an invalid path segment '{segment}'; segments must not be \
+             empty, '.', '..', or contain a path separator"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a persisted library `subdir` as a relative path *inside* the
+/// managed clone and return its normalized form. Rejects empty values and any
+/// absolute/root/prefix, `.`, or `..` component so a crafted `.awman.json`
+/// (or `--subdir` value that produced it) can never turn a library mount into
+/// a host path outside `skill_dirs.library_dir(<slug>)`. Mirrors the
+/// containment rule applied by the command-layer pull orchestration.
+fn validate_library_subdir(subdir: &str) -> Result<PathBuf, EngineError> {
+    let mut normalized = PathBuf::new();
+    let mut components = 0;
+    for component in Path::new(subdir).components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                normalized.push(part);
+                components += 1;
+            }
+            _ => {
+                return Err(EngineError::Other(format!(
+                    "skill library subdir '{subdir}' must be a relative path inside the \
+                     library (no absolute, '.', or '..' components)"
+                )));
+            }
+        }
+    }
+    if components == 0 {
+        return Err(EngineError::Other(
+            "skill library subdir must not be empty".to_string(),
+        ));
+    }
+    Ok(normalized)
 }
 
 fn insert_or_merge(map: &mut HashMap<String, OverlaySpec>, key: String, spec: OverlaySpec) {
@@ -1883,6 +2002,302 @@ mod tests {
         assert!(
             msg.contains("nonexistent"),
             "error must name the missing skill; got: {msg}"
+        );
+    }
+
+    // ─── skill_overlays: pulled libraries (WI-0103) ──────────────────────────
+
+    /// Seed a pulled library at `<home>/skills/.library/<slug>/` with the given
+    /// `subdir` and skill names (each a `<skill>/SKILL.md`), plus `.awman.json`.
+    fn seed_library(home: &Path, slug: &str, subdir: &str, skills: &[&str]) {
+        let lib_dir = home.join("skills").join(".library").join(slug);
+        for skill in skills {
+            let skill_dir = lib_dir.join(subdir).join(skill);
+            std::fs::create_dir_all(&skill_dir).unwrap();
+            std::fs::write(skill_dir.join("SKILL.md"), format!("# {skill}")).unwrap();
+        }
+        crate::data::fs::skill_library::write_library_meta(
+            &lib_dir,
+            &crate::data::fs::skill_library::SkillLibraryMeta {
+                source: format!("https://github.com/someone/{slug}.git"),
+                owner: "someone".to_string(),
+                repo: slug.to_string(),
+                subdir: subdir.to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn skill_named_plain_skill_wins_over_same_named_library() {
+        let (tmp, _) = make_home_with_skills();
+        // A hand-authored plain skill named 'superpowers'.
+        let plain = tmp.path().join("skills").join("superpowers");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("SKILL.md"), "# plain").unwrap();
+        // A pulled library ALSO named 'superpowers'.
+        seed_library(tmp.path(), "superpowers", "skills", &["brainstorming"]);
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let specs = with_awman_config_home(tmp.path(), || {
+            engine
+                .skill_overlays(
+                    &agent,
+                    false,
+                    &["superpowers".to_string()],
+                    &None,
+                    Path::new("/"),
+                )
+                .unwrap()
+        });
+
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            specs[0].host_path,
+            std::fs::canonicalize(&plain).unwrap(),
+            "the plain skill must win over a same-named pulled library"
+        );
+    }
+
+    #[test]
+    fn skill_named_whole_library_mounts_subdir_at_library_container_path() {
+        let (tmp, _) = make_home_with_skills();
+        seed_library(
+            tmp.path(),
+            "superpowers",
+            "skills",
+            &["brainstorming", "debugging"],
+        );
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let specs = with_awman_config_home(tmp.path(), || {
+            engine
+                .skill_overlays(
+                    &agent,
+                    false,
+                    &["superpowers".to_string()],
+                    &None,
+                    Path::new("/"),
+                )
+                .unwrap()
+        });
+
+        assert_eq!(specs.len(), 1);
+        let expected_host = std::fs::canonicalize(
+            tmp.path()
+                .join("skills")
+                .join(".library")
+                .join("superpowers")
+                .join("skills"),
+        )
+        .unwrap();
+        assert_eq!(
+            specs[0].host_path, expected_host,
+            "whole-library mount must point at .library/<slug>/<subdir>"
+        );
+        assert!(
+            specs[0]
+                .container_path
+                .to_string_lossy()
+                .ends_with("/superpowers"),
+            "container path must namespace the whole library under its name; got {:?}",
+            specs[0].container_path
+        );
+    }
+
+    #[test]
+    fn skill_named_single_library_skill_mounts_that_skill_dir() {
+        let (tmp, _) = make_home_with_skills();
+        seed_library(tmp.path(), "superpowers", "skills", &["brainstorming"]);
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let specs = with_awman_config_home(tmp.path(), || {
+            engine
+                .skill_overlays(
+                    &agent,
+                    false,
+                    &["superpowers/brainstorming".to_string()],
+                    &None,
+                    Path::new("/"),
+                )
+                .unwrap()
+        });
+
+        assert_eq!(specs.len(), 1);
+        let expected_host = std::fs::canonicalize(
+            tmp.path()
+                .join("skills")
+                .join(".library")
+                .join("superpowers")
+                .join("skills")
+                .join("brainstorming"),
+        )
+        .unwrap();
+        assert_eq!(
+            specs[0].host_path, expected_host,
+            "single-skill mount must point at the individual skill directory"
+        );
+        assert!(
+            specs[0]
+                .container_path
+                .to_string_lossy()
+                .ends_with("/superpowers/brainstorming"),
+            "container path must preserve the library namespace; got {:?}",
+            specs[0].container_path
+        );
+    }
+
+    #[test]
+    fn skill_named_library_present_but_skill_missing_gives_distinct_error() {
+        let (tmp, _) = make_home_with_skills();
+        seed_library(tmp.path(), "superpowers", "skills", &["brainstorming"]);
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let result = with_awman_config_home(tmp.path(), || {
+            engine.skill_overlays(
+                &agent,
+                false,
+                &["superpowers/ghost".to_string()],
+                &None,
+                Path::new("/"),
+            )
+        });
+
+        let msg = result
+            .expect_err("a missing skill in a present library must error")
+            .to_string();
+        assert!(
+            msg.contains("not found in library")
+                && msg.contains("superpowers")
+                && msg.contains("ghost"),
+            "error must name both the library and the missing skill; got: {msg}"
+        );
+    }
+
+    /// A skill is a directory holding a `SKILL.md`. An arbitrary directory
+    /// inside a library's subdir must not be mountable just because it exists
+    /// (WI-0103 remediation).
+    #[test]
+    fn skill_named_library_dir_without_skill_md_is_rejected() {
+        let (tmp, _) = make_home_with_skills();
+        seed_library(tmp.path(), "superpowers", "skills", &["brainstorming"]);
+        // A directory inside the library's subdir with no SKILL.md.
+        let not_a_skill = tmp
+            .path()
+            .join("skills")
+            .join(".library")
+            .join("superpowers")
+            .join("skills")
+            .join("not-a-skill");
+        std::fs::create_dir_all(&not_a_skill).unwrap();
+        std::fs::write(not_a_skill.join("README.md"), "no skill here").unwrap();
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let result = with_awman_config_home(tmp.path(), || {
+            engine.skill_overlays(
+                &agent,
+                false,
+                &["superpowers/not-a-skill".to_string()],
+                &None,
+                Path::new("/"),
+            )
+        });
+
+        let msg = result
+            .expect_err("a directory without SKILL.md is not a skill")
+            .to_string();
+        assert!(
+            msg.contains("not-a-skill") && msg.contains("superpowers") && msg.contains("SKILL.md"),
+            "error must name the library, the missing skill, and SKILL.md; got: {msg}"
+        );
+    }
+
+    /// The parser rejects traversal segments, but named skills also arrive from
+    /// config files and the API, so `skill_overlays` re-checks containment
+    /// rather than joining `..` onto a host path (WI-0103 remediation).
+    #[test]
+    fn skill_named_traversal_segments_are_rejected_by_the_engine() {
+        let (tmp, _) = make_home_with_skills();
+        seed_library(tmp.path(), "superpowers", "skills", &["brainstorming"]);
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        for bad in ["superpowers/..", "superpowers/", "..", "../superpowers"] {
+            let result = with_awman_config_home(tmp.path(), || {
+                engine.skill_overlays(&agent, false, &[bad.to_string()], &None, Path::new("/"))
+            });
+            let msg = match result {
+                Ok(specs) => panic!("'{bad}' must be rejected, but produced specs: {specs:?}"),
+                Err(e) => e.to_string(),
+            };
+            assert!(
+                msg.contains("invalid path segment"),
+                "'{bad}' must be rejected as an invalid segment; got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_named_neither_plain_nor_library_names_both_locations() {
+        let (tmp, _) = make_home_with_skills();
+        // Neither a plain skill nor a library called 'ghost' exists.
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let result = with_awman_config_home(tmp.path(), || {
+            engine.skill_overlays(&agent, false, &["ghost".to_string()], &None, Path::new("/"))
+        });
+
+        let msg = result
+            .expect_err("an unresolvable name must error")
+            .to_string();
+        assert!(
+            msg.contains("ghost"),
+            "error must name the skill; got: {msg}"
+        );
+        assert!(
+            msg.contains(&tmp.path().join("skills").display().to_string()),
+            "error must name the global skills dir; got: {msg}"
+        );
+        assert!(
+            msg.contains(".library"),
+            "error must name the .library location; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn skill_star_is_identical_with_and_without_populated_library() {
+        let (tmp, skills_canon) = make_home_with_skills();
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+
+        let before = with_awman_config_home(tmp.path(), || {
+            engine
+                .skill_overlays(&agent, true, &[], &None, Path::new("/"))
+                .unwrap()
+        });
+
+        // Populate `.library/` — skill(*) must be entirely unaffected by it.
+        seed_library(tmp.path(), "superpowers", "skills", &["brainstorming"]);
+
+        let after = with_awman_config_home(tmp.path(), || {
+            engine
+                .skill_overlays(&agent, true, &[], &None, Path::new("/"))
+                .unwrap()
+        });
+
+        assert_eq!(
+            before, after,
+            "skill(*) must emit an identical OverlaySpec list regardless of .library/"
+        );
+        assert_eq!(before.len(), 1, "skill(*) is a single mount");
+        assert_eq!(
+            before[0].host_path, skills_canon,
+            "skill(*) still mounts the global skills dir as-is"
         );
     }
 
