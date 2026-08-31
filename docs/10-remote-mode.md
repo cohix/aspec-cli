@@ -438,7 +438,7 @@ When a workflow command is dispatched from a remote-bound tab (`exec workflow`),
 
 Starting 5 seconds after the command is dispatched, awman polls `GET /v1/workflows/:command_id` on the remote API server every 5 seconds. As soon as a workflow state is found, the strip renders and continues updating until the workflow reaches a terminal state (`complete` or `error`).
 
-The remote workflow strip is visually identical to the local strip: parallel steps, paused states, running steps, and completion markers all render the same way. No extra configuration is required.
+The remote workflow strip is visually identical to the local strip: parallel steps, paused states, running steps, and completion markers all render the same way, and **Ctrl-O** toggles it between the collapsed stage summary and the full per-step overview just as it does locally. No extra configuration is required.
 
 **Polling behavior:**
 

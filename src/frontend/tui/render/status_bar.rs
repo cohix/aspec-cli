@@ -120,6 +120,17 @@ pub(super) fn render_status_bar(app: &App, area: Rect, frame: &mut Frame, sideba
         )],
     };
 
+    // A live workflow always has a strip on screen, so advertise the toggle
+    // between its one-box-per-stage summary and the full per-step overview.
+    if workflow_active {
+        let label = if tab.workflow_strip_state.is_expanded() {
+            " \u{00b7} ctrl-o collapse steps "
+        } else {
+            " \u{00b7} ctrl-o step overview "
+        };
+        spans.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
+    }
+
     // When the sidebar is not visible (closed or collapsed for a narrow
     // terminal), show the compact `+A -D` diff summary at the far right of the
     // 1-row status bar (green `+`, red `-`).

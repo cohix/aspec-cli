@@ -1109,9 +1109,18 @@ You can always open the control board manually via **Ctrl+W** regardless of stuc
 
 ### Parallel step groups
 
-Steps that share the same dependencies form a **parallel group** and run concurrently, each in its own container, up to the [`maxConcurrentAgents`](07-configuration.md#reference) cap (unlimited by default). In the workflow strip, they are stacked vertically at the same indent — no per-row stagger, since they aren't running one after another. If a group has more members than fit on screen, completed steps collapse into a single `<name> (+N completed)` row; use the **mouse wheel** to scroll within the strip and view hidden parallel steps.
+Steps that share the same dependencies form a **parallel group** and run concurrently, each in its own container, up to the [`maxConcurrentAgents`](07-configuration.md#reference) cap (unlimited by default).
 
-In the TUI, running steps beyond the concurrency cap wait their turn with a `·` prefix on their name until a slot frees up. See [Parallel Workflows](15-parallel-workflows.md) for the full scheduling model, and [Using the TUI](02-using-the-tui.md#parallel-containers) for how multiple running containers are displayed and switched between.
+The strip shows a parallel group in one of two ways, toggled with **Ctrl-O**:
+
+- **Collapsed** (the default) — the whole group is one box reading `3 steps…`, coloured by the group's overall state (a failed step colours the box red, otherwise a running step colours it blue, and so on). The strip stays 3 rows tall no matter how wide the workflow fans out.
+- **Expanded** — every step in the group gets its own box, stacked vertically at the same indent, keeping its full name, its `agent/model` label, and its own status colour for the whole run. Completed steps are never rolled up or hidden behind finished siblings.
+
+The expanded strip grows to fill whatever vertical space sits between the tab bar and the command box, so most groups fit whole. If a group is larger than even that, the last box becomes a `+ N more…` marker — use the **mouse wheel** over the strip to scroll through the rest.
+
+In the TUI, running steps beyond the concurrency cap wait their turn with a `·` prefix on their name until a slot frees up.
+
+See [Parallel Workflows](15-parallel-workflows.md) for the full scheduling model, and [Using the TUI](02-using-the-tui.md#parallel-containers) for how multiple running containers are displayed and switched between.
 
 ### Viewing the full control board
 
@@ -1204,7 +1213,7 @@ Start it over (s) or skip to next step (n)? [s/n]:
 
 ## Parallel groups
 
-Steps that share the same `Depends-on` set form a **parallel group** and run concurrently, each in its own container, up to the configured [`maxConcurrentAgents`](07-configuration.md#reference) cap. In the TUI they are rendered stacked vertically at the same indent; a group with more steps than fit collapses completed ones into a single `+ N completed` row. See [Parallel Workflows](15-parallel-workflows.md) for details.
+Steps that share the same `Depends-on` set form a **parallel group** and run concurrently, each in its own container, up to the configured [`maxConcurrentAgents`](07-configuration.md#reference) cap. In the TUI the group reads as a single `N steps…` box until you press **Ctrl-O**, which expands it into one box per step stacked vertically at the same indent. See [Parallel Workflows](15-parallel-workflows.md) for details.
 
 ---
 

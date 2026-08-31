@@ -27,26 +27,50 @@ mod tab_bar;
 #[cfg(test)]
 mod tests;
 
+/// Rows the tab bar occupies at the top of the frame.
+const TAB_BAR_HEIGHT: u16 = 3;
+/// Rows the bottom chrome occupies: status bar + command box + suggestion row.
+const BOTTOM_CHROME_HEIGHT: u16 = 5;
+/// Rows the execution window keeps for itself once the workflow strip has
+/// taken its share; the container status bars are truncated before this is.
+const MIN_EXEC_HEIGHT: u16 = 5;
+
 /// Render the full TUI frame.
 pub fn render_frame(app: &mut App, frame: &mut Frame) {
     let area = frame.area();
 
     // Read shape decisions from the active tab (immutable borrow).
-    let (workflow_height, container_state, has_summary, git_sidebar_state, slot_count) = {
+    let (wf_state, strip_state, container_state, has_summary, git_sidebar_state, slot_count) = {
         let tab = app.active_tab();
-        let workflow_height = tab
-            .workflow_state
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(workflow_view::workflow_strip_height))
-            .unwrap_or(0);
         (
-            workflow_height,
+            tab.workflow_state.lock().ok().and_then(|g| g.clone()),
+            tab.workflow_strip_state,
             tab.container_window_state,
             tab.last_container_summary.is_some(),
             tab.git_sidebar_state,
             tab.container_slots.len(),
         )
+    };
+
+    // Vertical budget: everything between the tab bar and the command box is
+    // shared by the execution window, the container status bars, and the
+    // workflow strip.
+    let body_height = area
+        .height
+        .saturating_sub(TAB_BAR_HEIGHT + BOTTOM_CHROME_HEIGHT);
+    let workflow_height = wf_state
+        .as_ref()
+        .map(|s| workflow_view::workflow_strip_height(s, strip_state, body_height))
+        .unwrap_or(0);
+
+    // An expanded strip takes over the vertical space: the focused container's
+    // PTY overlay is put away and every slot falls back to its status bar.
+    // A container the user has explicitly hidden stays hidden.
+    let strip_expanded = strip_state.is_expanded() && workflow_height > 0;
+    let container_state = if strip_expanded && container_state == ContainerWindowState::Maximized {
+        ContainerWindowState::Minimized
+    } else {
+        container_state
     };
 
     // When the git sidebar is open (and wide enough), reserve the right ≤25%
@@ -83,7 +107,7 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
     // run finished and we haven't started another).
     let has_summary_bar = container_state == ContainerWindowState::Hidden && has_summary;
 
-    let extra_bar_height = if n_minimized_bars > 0 {
+    let wanted_bar_height = if n_minimized_bars > 0 {
         minimized_bars_height
     } else if has_summary_bar {
         3
@@ -91,9 +115,19 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
         0
     };
 
+    // Split what is left of the body. The workflow strip is served first — it
+    // has already been clamped to `body_height`, so when it wants everything
+    // it gets everything. The execution window keeps its 5-row minimum out of
+    // the remainder, and the container status bars are truncated into what
+    // survives (`render_container_bars` stops at the last bar that fits).
+    let rest = body_height.saturating_sub(workflow_height);
+    let exec_min = MIN_EXEC_HEIGHT.min(rest);
+    let extra_bar_height = wanted_bar_height.min(rest - exec_min);
+    let exec_height = rest - extra_bar_height;
+
     let chunks = Layout::vertical([
-        Constraint::Length(3),                // tab bar
-        Constraint::Min(5),                   // execution window
+        Constraint::Length(TAB_BAR_HEIGHT),   // tab bar
+        Constraint::Length(exec_height),      // execution window
         Constraint::Length(extra_bar_height), // minimized OR summary
         Constraint::Length(workflow_height),  // workflow strip
         Constraint::Length(1),                // status bar
@@ -126,15 +160,15 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
         }
     }
 
-    if let Some(wf_state) = app
-        .active_tab()
-        .workflow_state
-        .lock()
-        .ok()
-        .and_then(|g| g.clone())
-    {
+    if let Some(wf_state) = wf_state.as_ref() {
         let scroll_offset = app.active_tab().workflow_strip_scroll_offset;
-        workflow_view::render_workflow_strip(&wf_state, chunks[3], frame, scroll_offset);
+        workflow_view::render_workflow_strip(
+            wf_state,
+            chunks[3],
+            frame,
+            scroll_offset,
+            strip_state,
+        );
         app.active_tab_mut().last_strip_rect = Some(chunks[3]);
     } else {
         app.active_tab_mut().last_strip_rect = None;
@@ -160,17 +194,23 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
             acp_view::render_acp_maximized(
                 tab,
                 main_area,
-                workflow_height + minimized_bars_height,
+                workflow_height + extra_bar_height,
                 frame,
             );
         } else {
             container_view::render_container_maximized(
                 tab,
                 main_area,
-                workflow_height + minimized_bars_height,
+                workflow_height + extra_bar_height,
                 frame,
             );
         }
+    } else if strip_expanded && slot_count > 0 {
+        // The expanded strip is what put the overlay away, so this container's
+        // output is withheld by the user's own choice rather than lost to a
+        // missing frame. Mark it seen: `surface_unseen_container_output` must
+        // not dump the whole screen into the status log when it exits.
+        app.active_tab_mut().container_rendered = true;
     }
 
     // Git sidebar (right chunk), when open and wide enough.

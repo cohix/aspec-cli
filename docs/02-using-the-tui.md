@@ -423,6 +423,52 @@ A single container is just the one-container case of the same display: Maximized
 
 ---
 
+## The workflow state strip — Ctrl-O
+
+While a workflow runs, the **workflow state strip** sits between the container area and the status bar, showing one rounded box per stage of the workflow with arrows joining the stages. Each box carries the step's status glyph and colour, its name, and — when the step overrides them — its `agent/model` label on the top border. See [Workflow strip and step status](05-workflows.md#workflow-strip-and-step-status) for what each glyph and colour means.
+
+The strip has two sizes. Press **Ctrl-O** (*o* for "overview") to switch between them.
+
+### Collapsed — the default
+
+Every stage is a single box, so the strip is always 3 rows tall and leaves the rest of the screen to your agents. A stage with one step shows that step's normal box. A stage that fans out into parallel steps shows a step count instead:
+
+```
+╭─────────────────╮   ╭─────────────────╮   ╭─────────────────╮
+│ ✓ plan          │ → │ ● 3 steps…      │ → │ ○ review        │
+╰─────────────────╯   ╰─────────────────╯   ╰─────────────────╯
+```
+
+The summary box takes the colour of the group as a whole: red if any step failed, magenta while a step is being remediated, blue while any step is running, green once every step succeeded.
+
+Containers behave exactly as described above while the strip is collapsed — the focused container keeps its maximized window and the others keep their status bars.
+
+### Expanded — the full overview
+
+Every step of every stage gets its own box, so you can see the whole fan-out at once:
+
+```
+╭─────────────────╮   ╭─claude/opus-4-8─╮   ╭─────────────────╮
+│ ✓ plan          │ → │ ✓ impl-api      │ → │ ○ review        │
+╰─────────────────╯   ╰─────────────────╯   ╰─────────────────╯
+                      ╭─────────────────╮
+                      │ ✓ impl-cli      │
+                      ╰─────────────────╯
+                      ╭─────────────────╮
+                      │ ● impl-docs     │
+                      ╰─────────────────╯
+```
+
+Finished steps are never rolled up into a summary — each keeps its own box, name, agent label, and colour for the whole run.
+
+Expanding the strip takes over the screen:
+
+- **No container window is shown.** Every running container drops to its status bar, including the focused one, so nothing covers the strip. Your **Ctrl-M** choice is remembered: collapse the strip again and the container window comes straight back.
+- **The strip gets the space it needs.** It grows to fill whatever sits between the tab bar and the command box. If there isn't room for both the strip and every container status bar, the strip wins and the bars are truncated to as many as fit.
+- **Very large fan-outs scroll.** When a stage has more steps than the frame can show even at full height, the last box reads `+ N more…`; scroll the **mouse wheel** over the strip to reach the rest.
+
+---
+
 ## Config dialog
 
 Press **Ctrl+,** from anywhere in the TUI to open the config dialog instantly — even while an agent is running or the container window is maximized. You can also type `config show` in the command box and press **Enter**. Either way opens the same modal overlay for viewing and editing all configuration fields without leaving the TUI. The dialog takes up 90% of the terminal in both dimensions, so as much of the table as possible is visible at once.
@@ -600,6 +646,7 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 | **Ctrl+D** | Switch to the next tab |
 | **Ctrl+G** | Toggle Git Sidebar (live view of repository changes) |
 | **Ctrl+M** | Toggle container window between maximized, minimized, and hidden |
+| **Ctrl+O** | Toggle the workflow state strip between its collapsed stage summary and the full per-step overview |
 | **Ctrl+S** | Switch focus to the next running container (only when [multiple parallel containers](#parallel-containers) are running; otherwise passed to the container's PTY) |
 | **Ctrl+W** | Open workflow control board (between steps or mid-step while running) |
 | **Ctrl+,** | Open / close the configuration dialog |
@@ -640,6 +687,7 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 | **Tab / Shift+Tab** | Forward to the agent |
 | Type | Forward input directly to the agent |
 | **Ctrl+M** | Minimize the container window |
+| **Ctrl+O** | Toggle the workflow state strip (intercepted before the agent, like Ctrl+M) |
 | Mouse scroll | Scroll terminal scrollback history (5 lines per tick) |
 | Mouse drag | Select text in the terminal (highlighted with inverted colors) |
 | **Ctrl+Y** | Copy selected text to clipboard (ANSI codes stripped) |
@@ -661,8 +709,9 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 
 | Key | Action |
 |-----|--------|
-| Mouse wheel (scroll up) | Scroll parallel step group upward (reveal hidden steps) |
-| Mouse wheel (scroll down) | Scroll parallel step group downward |
+| **Ctrl+O** | Toggle between the collapsed stage summary and the full per-step overview |
+| Mouse wheel (scroll up) | Scroll an oversized parallel stage upward (reveal hidden steps) |
+| Mouse wheel (scroll down) | Scroll an oversized parallel stage downward |
 
 ### Configuration dialog
 

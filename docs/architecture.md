@@ -2282,6 +2282,8 @@ pub struct Tab {
 
 **`ContainerWindowState`** cycles Hidden → Minimized → Maximized → Hidden via `Ctrl+M`.
 
+**`WorkflowStripState`** toggles Collapsed ↔ Expanded via `Ctrl+O`. Collapsed (the default) draws one box per topological stage — a lone step's own box, or a `N steps…` summary in the stage's aggregate status colour. Expanded draws every step of every stage, rolling nothing up. An Expanded strip also demotes a Maximized container to Minimized for the frame, so no PTY overlay covers it.
+
 **Pure functions** in `tabs.rs` — safe to unit-test without a terminal:
 
 | Function | Purpose |
@@ -2313,9 +2315,10 @@ Global shortcuts (available in all contexts except `ContainerMaximized`):
 | `Ctrl+D` | `NextTab` |
 | `Ctrl+C` | `CloseTabOrQuit` |
 | `Ctrl+M` | `CycleContainerWindow` |
+| `Ctrl+O` | `ToggleWorkflowStrip` |
 | `Ctrl+,` | `OpenConfigShow` |
 
-`ContainerMaximized` context: all keys except `Ctrl+Y` (copy) and `Ctrl+M` (toggle) are forwarded to the PTY as `Action::ForwardToPty(key)`. Global shortcuts are suppressed.
+`ContainerMaximized` context: all keys except `Ctrl+Y` (copy), `Ctrl+M` (toggle), and `Ctrl+O` (workflow strip) are forwarded to the PTY as `Action::ForwardToPty(key)`. Global shortcuts are suppressed.
 
 #### Command box (`command_box.rs`)
 
@@ -2391,14 +2394,16 @@ Commands with no interactive methods use marker impls that delegate to `UserMess
 | Slot | Height | Content |
 |------|--------|---------|
 | Tab bar | 3 rows | Colored tabs with project name and command label |
-| Execution window | fills remaining (min 5) | Status log or PTY output; border color by phase |
-| Minimized container bar | 3 rows (conditional) | One-line PTY summary |
-| Workflow strip | 3 rows (conditional) | Step status boxes |
+| Execution window | what the body has left (min 5 ahead of the bars) | Status log or PTY output; border color by phase |
+| Minimized container bar | 3 rows per slot (conditional, truncated last) | One-line PTY summary |
+| Workflow strip | 3 rows collapsed; N × 3 expanded (conditional) | Step status boxes |
 | Status bar | 1 row | Git root path; optional status text |
 | Command box | 3 rows | Text input with inline hint |
 | Suggestion row | 1 row | `> sugg1 · sugg2 · …` |
 
-Container overlay (Maximized) and active dialogs are rendered as floating layers on top of the base layout.
+The **body** is everything between the tab bar and the bottom chrome (status bar + command box + suggestion row). It is divided by explicit lengths, not by the constraint solver, because the three claimants rank against each other: the workflow strip is served first, clamped by `workflow_strip_height` to a whole number of box rows that fits the body; the execution window then keeps a 5-row floor out of what remains; the container status bars take the rest and `render_container_bars` stops at the last bar that fits.
+
+Container overlay (Maximized) and active dialogs are rendered as floating layers on top of the base layout. An expanded workflow strip suppresses the overlay for the frame (see `WorkflowStripState`).
 
 **Welcome message** (Idle phase, no output): two dark-gray lines:
 ```

@@ -28,7 +28,8 @@ use awman::engine::overlay::OverlayEngine;
 use awman::frontend::tui::amie_attach::{AmieSlotDriver, SlotAction};
 use awman::frontend::tui::app::App;
 use awman::frontend::tui::tabs::{
-    ContainerSlotEvent, SharedContainerSlotEvents, SharedWorkflowViewState, Tab, WorkflowViewState,
+    ContainerSlotEvent, SharedContainerSlotEvents, SharedWorkflowViewState, Tab,
+    WorkflowStripState, WorkflowViewState,
 };
 use awman::frontend::tui::user_message::SharedStatusLog;
 use awman::frontend::tui::workflow_view::{render_workflow_strip, workflow_state_to_view_state};
@@ -398,7 +399,7 @@ fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
 }
 
 #[tokio::test]
-async fn poller_driven_strip_uses_existing_grouping_and_completed_collapse() {
+async fn poller_driven_strip_uses_existing_grouping_and_shows_every_sibling() {
     let state = workflow_state(&[
         ("first", &[], StepState::Succeeded, None, None),
         ("second", &[], StepState::Succeeded, None, None),
@@ -422,15 +423,29 @@ async fn poller_driven_strip_uses_existing_grouping_and_completed_collapse() {
     .start(cancel.clone());
     let published = wait_for_view(&view).await;
 
-    let backend = TestBackend::new(70, 8);
+    let backend = TestBackend::new(70, 9);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render_workflow_strip(&published, Rect::new(0, 0, 70, 8), frame, 0))
+        .draw(|frame| {
+            render_workflow_strip(
+                &published,
+                Rect::new(0, 0, 70, 9),
+                frame,
+                0,
+                WorkflowStripState::Expanded,
+            )
+        })
         .unwrap();
     let text = buffer_text(terminal.backend().buffer());
+    for name in ["first", "second", "third"] {
+        assert!(
+            text.contains(name),
+            "every completed sibling keeps its own box: {text}"
+        );
+    }
     assert!(
-        text.contains("(+2 completed)"),
-        "completed siblings collapse: {text}"
+        !text.contains("completed)"),
+        "completed siblings are never rolled up: {text}"
     );
     assert!(
         text.contains("after-all") && text.contains('→'),

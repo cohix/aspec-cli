@@ -160,8 +160,8 @@ to a repository.
 | **r** | Resume the selected condition |
 | **d** | Remove the selected condition (opens a `[y]es / [n]o` confirmation first) |
 
-Global shortcuts (**Ctrl-T**, **Ctrl-A**, **Ctrl-D**, **Ctrl-M**, **Ctrl-W**,
-**Ctrl-,**, **Ctrl-C**) keep their usual meaning while the condition list has
+Global shortcuts (**Ctrl-T**, **Ctrl-A**, **Ctrl-D**, **Ctrl-M**, **Ctrl-O**,
+**Ctrl-W**, **Ctrl-,**, **Ctrl-C**) keep their usual meaning while the condition list has
 focus — none of them are repurposed for amie. You can also type
 `amie <subcommand> ...` directly into the command box at any time; the keys
 above are shortcuts over the same path, not a separate one.

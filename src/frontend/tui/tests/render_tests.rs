@@ -452,3 +452,152 @@ fn acp_permission_request_modal_renders_through_the_dialog_framework() {
         "the second hotkey option must render: {text}"
     );
 }
+
+// ─── Workflow state strip: collapsed / expanded ───────────────────────────
+
+/// Publish a parallel workflow of `n` sibling steps into the active tab.
+fn set_parallel_workflow(app: &App, n: usize) {
+    use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowViewState};
+    *app.active_tab().workflow_state.lock().unwrap() = Some(WorkflowViewState {
+        steps: (0..n)
+            .map(|i| WorkflowStepView {
+                name: format!("step-{i}"),
+                status: "running".into(),
+                agent: None,
+                model: None,
+                depends_on: vec![],
+            })
+            .collect(),
+        current_step: None,
+        max_concurrent: None,
+    });
+}
+
+#[test]
+fn frame_strip_defaults_to_collapsed_and_ctrl_o_expands_it() {
+    let mut app = make_app();
+    set_parallel_workflow(&app, 4);
+
+    let collapsed = buffer_text(&render_app(&mut app, 80, 40));
+    assert!(
+        collapsed.contains("4 steps\u{2026}"),
+        "the default strip summarizes a parallel stage: {collapsed}"
+    );
+    assert!(
+        !collapsed.contains("step-0"),
+        "the collapsed strip names no individual step: {collapsed}"
+    );
+
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let expanded = buffer_text(&render_app(&mut app, 80, 40));
+    for i in 0..4 {
+        assert!(
+            expanded.contains(&format!("step-{i}")),
+            "the expanded strip names every parallel step: {expanded}"
+        );
+    }
+}
+
+/// Append one stdio container slot named `container_name`, the way a parallel
+/// workflow group fills the tab (`start_container` replaces the whole group,
+/// so it cannot build a multi-slot tab).
+fn push_stdio_slot(app: &mut App, container_name: &str) {
+    use crate::frontend::tui::tabs::ContainerSlot;
+    let mut slot = ContainerSlot::new(String::new(), "claude".into(), 0);
+    if let Some(info) = slot.container_info.as_mut() {
+        info.container_name = container_name.to_string();
+    }
+    app.active_tab_mut().container_slots.push(slot);
+}
+
+#[test]
+fn expanded_strip_puts_the_container_overlay_away_and_leaves_status_bars() {
+    use crate::frontend::tui::tabs::ContainerWindowState;
+    let mut app = make_app();
+    set_parallel_workflow(&app, 3);
+    push_stdio_slot(&mut app, "awman-only");
+    app.active_tab_mut().container_window_state = ContainerWindowState::Maximized;
+
+    // Maximized: the single slot owns the PTY overlay. `container_inner_area`
+    // is published by the renderer exactly when it draws that overlay.
+    render_app(&mut app, 80, 40);
+    assert!(
+        app.active_tab().container_inner_area.is_some(),
+        "a maximized slot draws its PTY overlay while the strip is collapsed"
+    );
+
+    app.active_tab_mut().container_inner_area = None;
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let expanded = buffer_text(&render_app(&mut app, 80, 40));
+    assert!(
+        app.active_tab().container_inner_area.is_none(),
+        "an expanded strip shows no container PTY: {expanded}"
+    );
+    assert!(
+        app.active_tab().container_rendered,
+        "output withheld by the user's own Ctrl-O is not 'unseen' output — it \
+         must not be replayed into the status log when the container exits"
+    );
+    assert!(
+        expanded.contains("awman-only"),
+        "every active container falls back to its status bar: {expanded}"
+    );
+    assert_eq!(
+        app.active_tab().container_window_state,
+        ContainerWindowState::Maximized,
+        "the user's own Ctrl-M choice is untouched — the strip only overrides the display"
+    );
+}
+
+#[test]
+fn expanded_strip_wins_space_and_truncates_the_container_status_bars() {
+    use crate::frontend::tui::tabs::{ContainerWindowState, WorkflowStripState};
+    let mut app = make_app();
+    set_parallel_workflow(&app, 6);
+    for i in 0..6 {
+        push_stdio_slot(&mut app, &format!("awman-c{i}"));
+    }
+    app.active_tab_mut().container_window_state = ContainerWindowState::Minimized;
+    app.active_tab_mut().workflow_strip_state = WorkflowStripState::Expanded;
+
+    // 30 rows: 3 tab bar + 5 bottom chrome leaves 22 for the body. The strip
+    // asks for 18 (6 boxes) and is served first; the execution window keeps
+    // its 5-row floor out of the 4 left, so no container bar fits at all.
+    let text = buffer_text(&render_app(&mut app, 80, 30));
+    assert!(
+        text.contains("step-5"),
+        "the strip is served its full height first: {text}"
+    );
+    assert!(
+        !text.contains("awman-c0"),
+        "container status bars are truncated into whatever the strip leaves: {text}"
+    );
+
+    // Given room for both, the bars come back.
+    let roomy = buffer_text(&render_app(&mut app, 80, 60));
+    assert!(roomy.contains("step-5"), "{roomy}");
+    assert!(roomy.contains("awman-c0"), "{roomy}");
+}
+
+#[test]
+fn expanded_strip_never_grows_past_the_space_between_tab_bar_and_command_box() {
+    use crate::frontend::tui::tabs::WorkflowStripState;
+    let mut app = make_app();
+    set_parallel_workflow(&app, 40);
+    app.active_tab_mut().workflow_strip_state = WorkflowStripState::Expanded;
+
+    // 40 steps want 120 rows; the frame has 24 - 3 - 5 = 16 to give, which is
+    // 5 whole boxes. The command box must still render at the bottom.
+    let text = buffer_text(&render_app(&mut app, 80, 24));
+    assert!(
+        text.contains("+ 36 more\u{2026}"),
+        "the clipped stage advertises how many steps it is hiding: {text}"
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[lines.len() - 3..]
+            .iter()
+            .any(|l| l.contains("\u{256d}") || l.contains("\u{2570}")),
+        "the command box keeps its rows at the bottom of the frame: {text}"
+    );
+}

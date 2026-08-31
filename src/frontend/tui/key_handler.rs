@@ -240,6 +240,20 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 resize_slots_to_terminal(tab);
             }
         }
+        Action::ToggleWorkflowStrip => {
+            let tab = app.active_tab_mut();
+            tab.workflow_strip_state = tab.workflow_strip_state.toggle();
+            // The strip always opens at the top of the stage; a stale offset
+            // from a previous expansion would hide the first steps.
+            tab.workflow_strip_scroll_offset = 0;
+            // Expanding puts the container overlay away and collapsing brings
+            // it back at a different height, so any selection anchored in it
+            // no longer means anything.
+            tab.mouse_selection = None;
+            if tab.container_window_state != ContainerWindowState::Hidden {
+                resize_slots_to_terminal(tab);
+            }
+        }
         Action::ToggleGitSidebar => {
             // WI 0102: the git sidebar is meaningless for the amie tab's
             // synthetic session, so Ctrl-G is a no-op while it is active.

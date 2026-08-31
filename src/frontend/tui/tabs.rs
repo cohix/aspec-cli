@@ -55,6 +55,39 @@ impl ContainerWindowState {
     }
 }
 
+/// Workflow state strip display mode.
+///
+/// The strip defaults to `Collapsed`: exactly one 3-row box per topological
+/// stage, so it never costs the execution window more than 3 rows. A stage
+/// with a single step draws that step's normal box; a parallel stage draws a
+/// `N steps…` summary box in the stage's aggregate status colour.
+///
+/// `Expanded` draws every step of every stage as its own box — full name,
+/// agent/model label, status colour, nothing rolled up. It grows to whatever
+/// the frame can spare between the tab bar and the command box, and it wins
+/// that space ahead of the execution window and the container status bars.
+///
+/// Toggled with `Ctrl-O` ("overview").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkflowStripState {
+    #[default]
+    Collapsed,
+    Expanded,
+}
+
+impl WorkflowStripState {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Collapsed => Self::Expanded,
+            Self::Expanded => Self::Collapsed,
+        }
+    }
+
+    pub fn is_expanded(self) -> bool {
+        matches!(self, Self::Expanded)
+    }
+}
+
 /// Current workflow view state (visible when a workflow is running).
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowViewState {
@@ -498,6 +531,9 @@ pub struct Tab {
     pub status_dashboard: SharedStatusDashboard,
     pub scroll_offset: usize,
     pub workflow_strip_scroll_offset: usize,
+    /// Whether the workflow strip shows one box per stage (the default) or
+    /// every parallel step of every stage. Toggled with `Ctrl-O`.
+    pub workflow_strip_state: WorkflowStripState,
     pub last_strip_rect: Option<Rect>,
     pub mouse_selection: Option<TextSelection>,
     pub workflow_agent_fallbacks: HashMap<String, String>,
@@ -647,6 +683,7 @@ impl Tab {
             status_dashboard: Arc::new(Mutex::new(None)),
             scroll_offset: 0,
             workflow_strip_scroll_offset: 0,
+            workflow_strip_state: WorkflowStripState::Collapsed,
             last_strip_rect: None,
             mouse_selection: None,
             workflow_agent_fallbacks: HashMap::new(),

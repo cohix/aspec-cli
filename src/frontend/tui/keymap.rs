@@ -12,6 +12,9 @@ pub enum Action {
     NextTab,
     CloseTabOrQuit,
     CycleContainerWindow,
+    /// Ctrl-O ("overview"): toggle the workflow state strip between its
+    /// collapsed one-box-per-stage view and the expanded every-step view.
+    ToggleWorkflowStrip,
     OpenConfigShow,
     WorkflowControl,
     ToggleGitSidebar,
@@ -102,6 +105,12 @@ pub fn map_key(key: KeyEvent, ctx: FocusContext) -> Action {
             KeyCode::Char('m') if ctx != FocusContext::Dialog => {
                 return Action::CycleContainerWindow
             }
+            // Ctrl-O (SI, 0x0f) is intercepted in every context — including
+            // ContainerMaximized, before the ForwardToPty path below — so the
+            // workflow overview is always one keystroke away.
+            KeyCode::Char('o') if ctx != FocusContext::Dialog => {
+                return Action::ToggleWorkflowStrip
+            }
             KeyCode::Char('w') => return Action::WorkflowControl,
             // Ctrl-G (BEL, 0x07) is rarely used by terminal programs, so we
             // intercept it here — before the ContainerMaximized ForwardToPty
@@ -141,8 +150,8 @@ pub fn map_key(key: KeyEvent, ctx: FocusContext) -> Action {
 
 /// Key bindings for the amie condition list (WI 0102). Reached only through
 /// `FocusContext::AmieList`; the global `ctrl` block in `map_key` runs first,
-/// so `Ctrl-T`/`Ctrl-A`/`Ctrl-D`/`Ctrl-M`/`Ctrl-W`/`Ctrl-G`/`Ctrl-C`/`Ctrl-,`
-/// keep their global meaning here.
+/// so `Ctrl-T`/`Ctrl-A`/`Ctrl-D`/`Ctrl-M`/`Ctrl-O`/`Ctrl-W`/`Ctrl-G`/`Ctrl-C`/
+/// `Ctrl-,` keep their global meaning here.
 fn map_amie_list_key(key: KeyEvent, ctrl: bool) -> Action {
     match key.code {
         KeyCode::Esc => Action::FocusCommandBox,
@@ -417,6 +426,55 @@ mod tests {
             Action::PreviousTab,
             "Ctrl-A must not switch tabs while a dialog is open"
         );
+    }
+
+    // ── Ctrl-O / workflow strip overview ───────────────────────────────────
+
+    #[test]
+    fn ctrl_o_toggles_workflow_strip_in_all_non_dialog_contexts() {
+        for ctx in [
+            FocusContext::CommandBox,
+            FocusContext::ExecutionWindow,
+            FocusContext::ContainerMaximized,
+            FocusContext::AmieList,
+        ] {
+            let action = map_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL), ctx);
+            assert_eq!(
+                action,
+                Action::ToggleWorkflowStrip,
+                "Ctrl-O must toggle the workflow strip in {ctx:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_o_in_maximized_container_is_not_forwarded_to_pty() {
+        let k = key(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let action = map_key(k, FocusContext::ContainerMaximized);
+        assert_eq!(action, Action::ToggleWorkflowStrip);
+        assert_ne!(action, Action::ForwardToPty(k));
+    }
+
+    #[test]
+    fn ctrl_o_suppressed_in_dialog() {
+        let action = map_key(
+            key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            FocusContext::Dialog,
+        );
+        assert_ne!(
+            action,
+            Action::ToggleWorkflowStrip,
+            "Ctrl-O must not toggle the workflow strip while a dialog is open"
+        );
+    }
+
+    #[test]
+    fn bare_o_in_command_box_still_types_a_character() {
+        let action = map_key(
+            key(KeyCode::Char('o'), KeyModifiers::NONE),
+            FocusContext::CommandBox,
+        );
+        assert_eq!(action, Action::Char('o'));
     }
 
     #[test]

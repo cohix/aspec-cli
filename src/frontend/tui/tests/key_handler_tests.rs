@@ -94,6 +94,42 @@ fn l_in_execution_window_toggles_status_log() {
     assert_ne!(app.tabs[app.active_tab].status_log_collapsed, initial);
 }
 
+// ─── Ctrl-O / workflow strip overview ─────────────────────────────────────
+
+#[test]
+fn workflow_strip_starts_collapsed_and_ctrl_o_toggles_it() {
+    use crate::frontend::tui::tabs::WorkflowStripState;
+
+    let mut app = make_app();
+    assert_eq!(
+        app.active_tab().workflow_strip_state,
+        WorkflowStripState::Collapsed,
+        "the strip must default to the collapsed one-box-per-stage view"
+    );
+
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.active_tab().workflow_strip_state,
+        WorkflowStripState::Expanded
+    );
+
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(
+        app.active_tab().workflow_strip_state,
+        WorkflowStripState::Collapsed
+    );
+}
+
+#[test]
+fn ctrl_o_resets_the_strip_scroll_offset() {
+    // A stale offset from a previous expansion would otherwise hide the first
+    // steps of the stage the next time the strip opens.
+    let mut app = make_app();
+    app.active_tab_mut().workflow_strip_scroll_offset = 4;
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(app.active_tab().workflow_strip_scroll_offset, 0);
+}
+
 // ─── WorkflowControlBoard arrow keys ─────────────────────────────────────
 
 fn setup_wcb_dialog(app: &mut App) -> std::sync::mpsc::Receiver<DialogResponse> {
