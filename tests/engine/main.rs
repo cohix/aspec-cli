@@ -7,6 +7,7 @@
 #[path = "../helpers/mod.rs"]
 mod helpers;
 
+mod acp_support;
 mod container_docker;
 mod container_io;
 mod context_overlay_0087;

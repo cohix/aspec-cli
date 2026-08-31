@@ -348,11 +348,7 @@ fn levenshtein_suggestions<'a>(input: &str, candidates: &[&'a str]) -> Vec<&'a s
         .iter()
         .filter_map(|c| {
             let dist = levenshtein(input, c);
-            if dist <= 3 {
-                Some((dist, *c))
-            } else {
-                None
-            }
+            if dist <= 3 { Some((dist, *c)) } else { None }
         })
         .collect();
     scored.sort_by_key(|(d, _)| *d);

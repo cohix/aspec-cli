@@ -6,6 +6,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Table, Wrap,
 };
 
+use crate::frontend::tui::acp_view;
 use crate::frontend::tui::app::{App, Focus};
 use crate::frontend::tui::container_view;
 use crate::frontend::tui::dialogs;
@@ -114,7 +115,11 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
     }
 
     if n_minimized_bars > 0 {
+        // Two passes over the same area: the container pass draws stdio bars,
+        // the ACP pass draws ACP bars. Both advance one bar height per
+        // non-focused slot in slot order, so a mixed group tiles cleanly.
         container_view::render_container_bars(app.active_tab(), chunks[2], frame, show_overlay);
+        acp_view::render_acp_bars(app.active_tab(), chunks[2], frame, show_overlay);
     } else if has_summary_bar {
         if let Some(summary) = app.active_tab().last_container_summary.as_ref() {
             container_view::render_container_summary(summary, chunks[2], frame);
@@ -148,12 +153,24 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
         // The overlay made it to the screen; close_container_overlay no
         // longer needs to replay its contents into the status log.
         tab.container_rendered = true;
-        container_view::render_container_maximized(
-            tab,
-            main_area,
-            workflow_height + minimized_bars_height,
-            frame,
-        );
+        // Dispatch on the focused slot's kind: an ACP window renders the
+        // structured update list, a stdio window renders the vt100 grid.
+        let is_acp = tab.focused_slot().is_some_and(|s| s.is_acp());
+        if is_acp {
+            acp_view::render_acp_maximized(
+                tab,
+                main_area,
+                workflow_height + minimized_bars_height,
+                frame,
+            );
+        } else {
+            container_view::render_container_maximized(
+                tab,
+                main_area,
+                workflow_height + minimized_bars_height,
+                frame,
+            );
+        }
     }
 
     // Git sidebar (right chunk), when open and wide enough.

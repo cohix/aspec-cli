@@ -10,6 +10,16 @@ use crate::data::config::env::{Env, EnvSnapshot};
 use crate::data::config::repo::{AmieConfig, ApiConfig, RemoteConfig};
 use crate::data::error::DataError;
 
+/// Behavior when a configured ACP launch is requested for an agent that does
+/// not support ACP.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchModeFallback {
+    Stdio,
+    #[default]
+    Error,
+}
+
 /// Filename of the global config inside the resolved global directory.
 pub const GLOBAL_CONFIG_FILENAME: &str = "config.json";
 
@@ -51,6 +61,8 @@ pub struct GlobalConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_concurrent_agents: Option<usize>,
+    #[serde(rename = "launchModeFallback", skip_serializing_if = "Option::is_none")]
+    pub launch_mode_fallback: Option<LaunchModeFallback>,
 }
 
 impl GlobalConfig {
@@ -200,6 +212,7 @@ mod tests {
             workers: None,
             base_image: None,
             max_concurrent_agents: Some(4),
+            launch_mode_fallback: None,
         };
 
         original.save_with(&env).unwrap();

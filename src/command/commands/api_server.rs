@@ -12,7 +12,7 @@ use crate::command::error::CommandError;
 use crate::data::config::env::Env;
 use crate::data::fs::daemon_guard::{AcquireError, DaemonGuard, DaemonKind};
 use crate::data::fs::daemon_process::{
-    self, DaemonProcess, ServerMeta, Termination, API_PLIST_LABEL, API_UNIT_NAME,
+    self, API_PLIST_LABEL, API_UNIT_NAME, DaemonProcess, ServerMeta, Termination,
 };
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::engine::auth::TlsMaterial;

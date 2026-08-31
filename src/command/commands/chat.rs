@@ -3,10 +3,10 @@
 use async_trait::async_trait;
 use serde::Serialize;
 
+use crate::command::commands::Command;
 use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::{MountScope, MountScopeFrontend};
-use crate::command::commands::Command;
 use crate::command::commands::{
     collect_all_overlay_specs, parse_overlay_list, report_session_end, resolve_agent,
     resolve_context_overlays, warn_legacy_config,
@@ -27,6 +27,7 @@ pub struct ChatCommandFlags {
     pub auto: bool,
     pub agent: Option<String>,
     pub model: Option<String>,
+    pub launch_mode: Option<crate::data::config::repo::LaunchMode>,
     pub overlay: Vec<String>,
 }
 
@@ -42,6 +43,7 @@ pub trait ChatCommandFrontend:
     + AgentSetupFrontend
     + AgentAuthFrontend
     + crate::command::commands::agent_setup::HasAgentFrontend
+    + crate::engine::acp::AcpFrontend
     + Send
     + Sync
 {
@@ -101,6 +103,29 @@ impl Command for ChatCommand {
                 return Err(e);
             }
         };
+
+        // Launch mode is independent of agent resolution.  Resolve it before
+        // mount/overlay/setup work so an unsupported ACP request cannot touch
+        // the container path.
+        let config = command_effective_config(&session, &self.flags);
+        let explicit_acp = self.flags.launch_mode
+            == Some(crate::data::config::repo::LaunchMode::Acp)
+            || (self.flags.agent.is_none()
+                && session.repo_config().agent.is_some()
+                && session.repo_config().launch_mode
+                    == Some(crate::data::config::repo::LaunchMode::Acp));
+        let launch_decision =
+            match crate::command::commands::resolve_launch_mode(&config, &agent, explicit_acp) {
+                Ok(decision) => decision,
+                Err(e) => return Err(CommandError::from(e)),
+            };
+        if launch_decision == crate::command::commands::LaunchModeDecision::StdioWithFallbackWarning
+        {
+            frontend.write_message(UserMessage {
+                level: MessageLevel::Warning,
+                text: crate::command::commands::acp_fallback_warning(&agent),
+            });
+        }
 
         if agent.as_str() == "gemini" {
             frontend.write_message(UserMessage {
@@ -244,6 +269,12 @@ impl Command for ChatCommand {
             named_skills: collected.named_skills,
             system_prompt,
             context_overlays,
+            launch_mode: match launch_decision {
+                crate::command::commands::LaunchModeDecision::Acp => {
+                    crate::data::config::repo::LaunchMode::Acp
+                }
+                _ => crate::data::config::repo::LaunchMode::Stdio,
+            },
             ..Default::default()
         };
 
@@ -284,27 +315,53 @@ impl Command for ChatCommand {
             level: MessageLevel::Info,
             text: format!("Launching agent ({})…", self.engines.runtime.display_name()),
         });
-        frontend.set_pty_active(true);
-        let container_frontend = frontend.container_frontend_for_pty();
-        let mut execution = match instance.run_with_frontend(container_frontend) {
-            Ok(e) => e,
-            Err(e) => {
-                frontend.set_pty_active(false);
-                frontend.replay_queued();
-                frontend.write_message(UserMessage {
-                    level: MessageLevel::Error,
-                    text: format!("chat: failed to launch agent: {e}"),
-                });
+        let exit = if launch_decision == crate::command::commands::LaunchModeDecision::Acp {
+            let (runtime_frontend, transport) = crate::engine::acp::AcpTransport::channel();
+            let execution = match instance.run_with_frontend(Box::new(runtime_frontend)) {
+                Ok(execution) => execution,
+                Err(e) => {
+                    frontend.write_message(UserMessage {
+                        level: MessageLevel::Error,
+                        text: format!("chat: failed to launch ACP agent: {e}"),
+                    });
+                    return Err(CommandError::from(e));
+                }
+            };
+            let mut acp = crate::engine::acp::AcpSession::from_transport(
+                execution,
+                transport,
+                Box::new(crate::data::message::StderrMessageSink::new()),
+                run_opts.yolo.unwrap_or(YoloMode::Disabled),
+                run_opts.auto.unwrap_or(AutoMode::Disabled),
+            );
+            if let Err(e) = acp.initialize("/workspace").await {
+                // Reap the launched container before returning so it is not left
+                // running after a failed handshake.
+                let _ = acp.shutdown().await;
                 return Err(CommandError::from(e));
             }
+            acp.drive(frontend.as_mut()).await
+        } else {
+            frontend.set_pty_active(true);
+            let container_frontend = frontend.container_frontend_for_pty();
+            let mut execution = match instance.run_with_frontend(container_frontend) {
+                Ok(e) => e,
+                Err(e) => {
+                    frontend.set_pty_active(false);
+                    frontend.replay_queued();
+                    frontend.write_message(UserMessage {
+                        level: MessageLevel::Error,
+                        text: format!("chat: failed to launch agent: {e}"),
+                    });
+                    return Err(CommandError::from(e));
+                }
+            };
+            frontend.set_stuck_sender(execution.stuck_sender());
+            let exit = execution.wait().await;
+            frontend.set_pty_active(false);
+            frontend.replay_queued();
+            exit
         };
-        // Publish the stuck sender so the TUI can color the tab when the
-        // agent stops producing output (mirrors the workflow engine's
-        // set_stuck_sender call after each step launch).
-        frontend.set_stuck_sender(execution.stuck_sender());
-        let exit = execution.wait().await;
-        frontend.set_pty_active(false);
-        frontend.replay_queued();
 
         report_session_end(frontend.as_mut(), "chat", &exit);
 
@@ -314,6 +371,23 @@ impl Command for ChatCommand {
             exit_code,
         })
     }
+}
+
+fn command_effective_config(
+    session: &Session,
+    command_flags: &ChatCommandFlags,
+) -> crate::data::config::effective::EffectiveConfig {
+    let current = session.effective_config();
+    let mut flags = current.flags().clone();
+    flags.agent = command_flags.agent.clone();
+    flags.model = command_flags.model.clone();
+    flags.launch_mode = command_flags.launch_mode;
+    crate::data::config::effective::EffectiveConfig::new(
+        flags,
+        current.env().clone(),
+        current.repo().clone(),
+        current.global().clone(),
+    )
 }
 
 pub(crate) async fn ensure_agent_setup(

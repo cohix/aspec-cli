@@ -241,8 +241,15 @@ pub fn render_container_bars(tab: &Tab, area: Rect, frame: &mut Frame, skip_focu
         if row + PARALLEL_BAR_HEIGHT > area.height {
             break;
         }
-        let bar_area = Rect::new(area.x, area.y + row, area.width, PARALLEL_BAR_HEIGHT);
-        render_one_minimized_bar(slot, bar_area, frame);
+        // Draw only stdio slots here; ACP slots are drawn by
+        // `acp_view::render_acp_bars`. Both walk the slots in the same order
+        // and advance one bar height per non-focused slot, so the two passes
+        // tile a mixed group's bars without overlap. For an all-stdio tab this
+        // is unchanged — every slot is drawn.
+        if !slot.is_acp() {
+            let bar_area = Rect::new(area.x, area.y + row, area.width, PARALLEL_BAR_HEIGHT);
+            render_one_minimized_bar(slot, bar_area, frame);
+        }
         row += PARALLEL_BAR_HEIGHT;
     }
 }

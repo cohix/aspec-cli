@@ -69,6 +69,11 @@ pub(super) fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEv
             let dialog_open = app.active_dialog.is_some();
             let tab = app.active_tab_mut();
             if tab.container_overlay_active() {
+                // ACP windows have no vt100 grid to select text from; the
+                // stdio selection path below is skipped for them.
+                if tab.focused_slot().is_some_and(|s| s.is_acp()) {
+                    return;
+                }
                 let inner = match tab.container_inner_area {
                     Some(r) => r,
                     None => return,

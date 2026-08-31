@@ -504,6 +504,15 @@ impl AgentInstance for DockerContainerInstance {
             );
         }
 
+        // ACP path: persistent piped stdio (no PTY). Unlike the one-shot piped
+        // path below, the stdin channel is kept open for the whole session so
+        // the ACP driver can carry a full bidirectional JSON-RPC exchange.
+        if self.options.acp {
+            return spawn_piped_interactive_docker(
+                self, io, argv, seeded, started_at, handle, bridge_cfg,
+            );
+        }
+
         // Piped path: non-interactive or no PTY.
         spawn_piped_docker(self, io, argv, seeded, started_at, handle, bridge_cfg)
     }
@@ -655,6 +664,99 @@ fn spawn_piped_docker(
         pty_child: None,
         pty_master: None,
         stdin_injector: None,
+        container_name: instance.name.0.clone(),
+        started_at,
+    };
+    Ok(AgentExecution::new(
+        handle,
+        Box::new(backend),
+        bridge.stuck_tx,
+        Some(bridge.output_tail),
+    ))
+}
+
+/// Spawn `docker run -i` (no PTY) with piped stdio for an ACP session and
+/// bridge through `AgentIo`.
+///
+/// This is the persistent-piped sibling of [`spawn_piped_docker`]. The one
+/// difference — and the whole point — is that it does **not**
+/// `drop(bridge.stdin_injector)`: the stdin channel is retained on the
+/// `DockerExecution` for the session's entire lifetime, exactly as
+/// [`spawn_pty_bridged_docker`] keeps its PTY master alive. That keeps the
+/// container's stdin pipe open so the ACP driver can write JSON-RPC request
+/// lines (via `try_inject_stdin`) across a full bidirectional exchange,
+/// instead of the one-write-then-EOF an ordinary non-interactive run performs.
+///
+/// No seeded prompt is written to stdin here: an ACP session delivers its
+/// prompt over the JSON-RPC channel (`session/prompt`), so writing raw text to
+/// stdin would corrupt the newline-delimited JSON-RPC framing. `_seeded` is
+/// accepted only to keep the signature parallel with `spawn_piped_docker`.
+///
+/// Security: identical wiring to `spawn_piped_docker` — the bytes ride the
+/// stdio pipes `-i` already wires up. No ports, no `--network`, no new mounts
+/// (see `aspec/architecture/security.md`).
+fn spawn_piped_interactive_docker(
+    instance: Box<DockerContainerInstance>,
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    _seeded: Option<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+) -> Result<AgentExecution, EngineError> {
+    spawn_piped_interactive_docker_with_bin(
+        instance,
+        io,
+        argv,
+        started_at,
+        handle,
+        bridge_cfg,
+        std::path::Path::new("docker"),
+    )
+}
+
+fn spawn_piped_interactive_docker_with_bin(
+    instance: Box<DockerContainerInstance>,
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+    cli_bin: &std::path::Path,
+) -> Result<AgentExecution, EngineError> {
+    let mut cmd = Command::new(cli_bin);
+    cmd.args(&argv);
+    // Agent credentials are passed as name-only `-e KEY` in argv; set their
+    // values on the docker child's environment so the CLI resolves them
+    // without the secret ever touching the argument vector.
+    for (k, v) in &instance.options.agent_credentials {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            EngineError::ContainerRuntimeUnavailable {
+                binary: "docker".into(),
+            }
+        } else {
+            EngineError::Container(format!("spawn docker: {e}"))
+        }
+    })?;
+
+    let bridge = crate::engine::container::io_bridge::bridge_piped(io, &mut child, bridge_cfg);
+
+    // Persistent-piped (ACP) path: KEEP the stdin_injector alive (do NOT drop
+    // it, unlike `spawn_piped_docker`). Retaining the sender both enables
+    // `try_inject_stdin` and prevents the writer task from ever seeing EOF, so
+    // the container's stdin pipe stays open for the whole JSON-RPC session.
+    let backend = DockerExecution {
+        child: Some(child),
+        pty_child: None,
+        pty_master: None,
+        stdin_injector: Some(bridge.stdin_injector),
         container_name: instance.name.0.clone(),
         started_at,
     };
@@ -1078,7 +1180,15 @@ pub(super) fn build_run_argv(
     if options.remove_on_exit {
         args.push("--rm".into());
     }
-    if options.interactive {
+    if options.acp {
+        // ACP launch: piped stdio, never a PTY — even for an interactive run.
+        // A newline-delimited JSON-RPC 2.0 channel must never pass through a
+        // PTY's cooked-mode / echo / ANSI layer, so we allocate `-i` (stdin
+        // attached, no `-t`). This adds NO new host exposure — no ports, no
+        // `--network`, no new mounts (aspec/architecture/security.md): the
+        // JSON-RPC bytes ride the exact stdio pipes `-i` already wires up.
+        args.push("-i".into());
+    } else if options.interactive {
         // Interactive runs always allocate a PTY. When a seeded prompt is also
         // present, the prompt is appended as a positional argv arg below so the
         // agent receives it without piping; stdin stays inherited for the user.
@@ -1217,6 +1327,16 @@ pub(super) fn build_run_argv(
         }
     }
 
+    // ACP launches are complete at the entrypoint (`cline --acp`). Everything an
+    // ACP agent needs — the prompt, model, tool policy, permission decisions — is
+    // delivered over the JSON-RPC 2.0 channel (`session/*`), never as argv. Any
+    // stdio-mode flag or positional appended past the entrypoint would be handed
+    // to the agent as raw argv and corrupt the launch (e.g. `cline --acp task`,
+    // `cline --acp task --yolo`). So emit nothing after the entrypoint for ACP.
+    if options.acp {
+        return args;
+    }
+
     // Mode flags appended to the agent argv.
     if let Some(flag) = &options.non_interactive_flag {
         // Some agents take a sub-command (e.g. "run") rather than a flag.
@@ -1280,7 +1400,11 @@ pub(super) fn build_run_argv(
     // (opencode treats it as a project directory and `open()`s it → ENAMETOOLONG).
     // Stdin stays inherited. Non-interactive + seeded prompt is handled via
     // stdin piping at spawn time.
-    if options.interactive {
+    //
+    // ACP is excluded: an ACP session delivers its prompt over the JSON-RPC
+    // channel (`session/prompt`), never as argv — appending it here would pass
+    // raw prompt text to `cline --acp` as a positional and corrupt the launch.
+    if options.interactive && !options.acp {
         if let Some(prompt) = &options.seeded_prompt {
             if let Some(flag) = &options.interactive_seed_flag {
                 args.push(flag.clone());
@@ -1699,6 +1823,219 @@ mod tests {
             Some("do the task"),
             "prompt must not be a bare positional after the image; got {argv:?}"
         );
+    }
+
+    #[test]
+    fn build_run_argv_interactive_acp_emits_i_not_it() {
+        // ACP framing must never pass through a PTY, so an interactive ACP run
+        // allocates `-i` (piped stdin, no `-t`) rather than `-it`.
+        let resolved = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Interactive(true),
+            ContainerOption::Acp(true),
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        assert!(
+            argv.contains(&"-i".to_string()),
+            "interactive ACP run needs -i; argv: {argv:?}"
+        );
+        assert!(
+            !argv.contains(&"-it".to_string()),
+            "interactive ACP run must NOT allocate a PTY via -it; argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn build_run_argv_non_interactive_acp_still_emits_i() {
+        // A headless (`-n`) ACP run still needs stdin piped open for the
+        // bidirectional JSON-RPC exchange.
+        let resolved = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Acp(true),
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        assert!(
+            argv.contains(&"-i".to_string()),
+            "non-interactive ACP run still needs -i; argv: {argv:?}"
+        );
+        assert!(
+            !argv.contains(&"-it".to_string()),
+            "ACP run must never use -it; argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn build_run_argv_acp_does_not_deliver_seeded_prompt_as_positional() {
+        // The ACP prompt travels over JSON-RPC (`session/prompt`), never argv.
+        let resolved = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Interactive(true),
+            ContainerOption::Acp(true),
+            ContainerOption::SeededPrompt("do the task".into()),
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        assert!(
+            !argv.iter().any(|a| a == "do the task"),
+            "ACP must not append the seeded prompt as an argv positional; argv: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn build_run_argv_acp_emits_nothing_after_the_entrypoint() {
+        // Regression for the "corrupted ACP argv" blocker: an ACP launch that
+        // also carries a non-interactive subcommand flag and agent mode flags
+        // (as every `exec workflow` / `--non-interactive` / `--yolo` ACP launch
+        // does) must NOT graft any of them onto `cline --acp` — the ACP argv is
+        // complete at the entrypoint. Before the fix this produced
+        // `cline --acp task --yolo`, silently corrupting the JSON-RPC launch.
+        use crate::engine::container::options::Entrypoint;
+        let resolved = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Entrypoint(Entrypoint::new(["cline", "--acp"])),
+            ContainerOption::Acp(true),
+            ContainerOption::NonInteractivePrintFlag("task".into()),
+            ContainerOption::AgentModeFlags(vec!["--yolo".into()]),
+            ContainerOption::SeededPrompt("do the task".into()),
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &resolved,
+        );
+        let img_pos = argv.iter().position(|a| a == "img:latest").unwrap();
+        assert_eq!(
+            &argv[img_pos + 1..],
+            &["cline".to_string(), "--acp".to_string()],
+            "ACP argv must end exactly at the entrypoint, with no stdio flags \
+             (task/--yolo/prompt) appended; argv: {argv:?}"
+        );
+    }
+
+    /// Regression guard for the security constraint (aspec/architecture/
+    /// security.md): the ACP argv path must introduce NO new host exposure —
+    /// no published ports, no host/custom `--network`, no added mounts beyond
+    /// what a non-ACP run of the same options would already emit.
+    #[test]
+    fn build_run_argv_acp_introduces_no_ports_or_network_flags() {
+        let acp = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Interactive(true),
+            ContainerOption::Acp(true),
+        ]);
+        let argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &acp,
+        );
+        for banned in ["-p", "--publish", "--network", "--net", "--add-host"] {
+            assert!(
+                !argv.iter().any(|a| a == banned),
+                "ACP argv must never contain {banned}; argv: {argv:?}"
+            );
+        }
+
+        // And the ACP flag must not add any `-v` mount that a plain
+        // interactive run of the same options wouldn't already produce.
+        let plain = resolve(vec![
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Interactive(true),
+        ]);
+        let plain_argv = build_run_argv(
+            &ContainerName::new("ctr"),
+            &ImageRef::new("img:latest"),
+            &plain,
+        );
+        let count_v = |v: &[String]| v.iter().filter(|a| a.as_str() == "-v").count();
+        assert_eq!(
+            count_v(&argv),
+            count_v(&plain_argv),
+            "ACP must not introduce any new -v mount; acp: {argv:?} plain: {plain_argv:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_piped_interactive_keeps_stdin_injector_after_seeded_write() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio::sync::mpsc;
+
+        // A stand-in for `docker run`: keep stdin open long enough for this
+        // test to distinguish the persistent ACP path from the one-shot
+        // `spawn_piped_docker` path, which drops its injector after seeding.
+        let tmp = tempfile::tempdir().unwrap();
+        let fake_cli = tmp.path().join("fake-docker");
+        std::fs::write(&fake_cli, "#!/bin/sh\nsleep 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&fake_cli).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_cli, permissions).unwrap();
+
+        let (stdout_tx, _stdout_rx) = mpsc::unbounded_channel();
+        let (stderr_tx, _stderr_rx) = mpsc::unbounded_channel();
+        let (stdin_tx, stdin_rx) = mpsc::unbounded_channel();
+        let io = crate::engine::agent_runtime::frontend::AgentIo {
+            stdout: stdout_tx,
+            stderr: stderr_tx,
+            stdin_tx,
+            stdin_rx,
+            resize: None,
+            initial_size: None,
+        };
+        let image = ImageRef::new("img:latest");
+        let name = ContainerName::new("acp-stdin-test");
+        let instance = Box::new(DockerContainerInstance {
+            id: ContainerId::new(name.as_str()),
+            name: name.clone(),
+            image: image.clone(),
+            options: resolve(vec![
+                ContainerOption::Image(image.clone()),
+                ContainerOption::Interactive(true),
+                ContainerOption::Acp(true),
+            ]),
+        });
+        let handle = handle_now(&instance.id, &name, &image);
+        let bridge_cfg = crate::engine::container::io_bridge::BridgeConfig {
+            grace_timeout: Duration::from_secs(60),
+            stuck_timeout: Duration::from_secs(60),
+            container_start_delay: Duration::ZERO,
+            cancel_on_grace_expired: None,
+            output_tail: Arc::new(
+                crate::engine::agent_runtime::output_tail::OutputTail::with_default_capacity(),
+            ),
+        };
+
+        let mut execution = spawn_piped_interactive_docker_with_bin(
+            instance,
+            io,
+            vec!["run".into(), "-i".into(), "img:latest".into()],
+            chrono::Utc::now(),
+            handle,
+            bridge_cfg,
+            &fake_cli,
+        )
+        .unwrap();
+
+        // The optional seed is accepted by the production wrapper for
+        // signature parity; a later injection must still work in ACP mode.
+        assert!(
+            execution.try_inject_stdin(b"seeded\n").unwrap(),
+            "ACP spawn must retain stdin_injector after the optional seed"
+        );
+        let exit = execution.wait().await.unwrap();
+        assert_eq!(exit.exit_code, 0);
     }
 
     #[test]

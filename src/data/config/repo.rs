@@ -109,6 +109,15 @@ pub enum AgentAuthMode {
     None,
 }
 
+/// How an agent process is connected to awman.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchMode {
+    #[default]
+    Stdio,
+    Acp,
+}
+
 /// Work-items configuration nested within `RepoConfig`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkItemsConfig {
@@ -314,6 +323,8 @@ pub struct RepoConfig {
     /// Resolved per-repo; `keychain` (default) injects host keychain creds.
     #[serde(rename = "auth", skip_serializing_if = "Option::is_none")]
     pub auth: Option<AgentAuthMode>,
+    #[serde(rename = "launchMode", skip_serializing_if = "Option::is_none")]
+    pub launch_mode: Option<LaunchMode>,
 }
 
 impl RepoConfig {

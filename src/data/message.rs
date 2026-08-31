@@ -115,6 +115,35 @@ impl UserMessageSink for RecordingMessageSink {
     }
 }
 
+/// A sink that writes messages straight to stderr, prefixed like the rest of
+/// awman's stderr output. Used where a message must stay visible but no
+/// frontend is available to hold it — notably the ACP client's reader task,
+/// which surfaces protocol warnings and agent stderr from a detached tokio task
+/// (a `RecordingMessageSink` there would buffer into a `Vec` nobody ever reads,
+/// silently swallowing every "ignoring malformed line" / "ACP agent stderr"
+/// warning in production).
+#[derive(Debug, Default)]
+pub struct StderrMessageSink;
+
+impl StderrMessageSink {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl UserMessageSink for StderrMessageSink {
+    fn write_message(&mut self, msg: UserMessage) {
+        let prefix = match msg.level {
+            MessageLevel::Warning => "awman warning: ",
+            MessageLevel::Error => "awman error: ",
+            MessageLevel::Info | MessageLevel::Success => "awman: ",
+        };
+        eprintln!("{prefix}{}", msg.text);
+    }
+
+    fn replay_queued(&mut self) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

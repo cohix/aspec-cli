@@ -331,3 +331,124 @@ fn ctrl_g_on_amie_tab_renders_no_git_sidebar() {
         "Ctrl-G must render no git sidebar for the amie tab (a non-project tab)"
     );
 }
+
+// ─── ACP agent windows (WI 0104) ───────────────────────────────────────────
+
+fn push_acp_slot(app: &mut App, agent: &str) -> crate::frontend::tui::tabs::SharedAcpState {
+    use crate::frontend::tui::tabs::{AcpSlotState, ContainerSlot};
+    let state: crate::frontend::tui::tabs::SharedAcpState =
+        std::sync::Arc::new(std::sync::Mutex::new(AcpSlotState::default()));
+    app.active_tab_mut().container_slots.push(ContainerSlot::new_acp(
+        String::new(),
+        agent.to_string(),
+        state.clone(),
+    ));
+    state
+}
+
+/// Coordinates of the first rounded top-left corner ('╭') rendered in
+/// `color`, scanning row-major (top-to-bottom, then left-to-right).
+fn find_border_corner_of_color(
+    buf: &ratatui::buffer::Buffer,
+    color: ratatui::style::Color,
+) -> Option<(u16, u16)> {
+    let area = *buf.area();
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let cell = buf.cell((x, y)).unwrap();
+            if cell.symbol() == "\u{256d}" && cell.fg == color {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn execution_window_border_is_acp_purple_not_green_when_focused_slot_is_acp() {
+    use crate::frontend::tui::acp_view::ACP_BORDER_COLOR;
+    use crate::frontend::tui::tabs::ExecutionPhase;
+    // Full-render companion to the unit-level
+    // `window_border_color_done_focused_acp_is_purple`: the focused+Done
+    // execution window must actually paint its border in the ACP identity
+    // color, not fall back to the stdio green.
+    let mut app = make_app();
+    push_acp_slot(&mut app, "claude");
+    app.focus = Focus::ExecutionWindow;
+    app.active_tab_mut().execution_phase = ExecutionPhase::Done {
+        command: "chat".into(),
+        exit_code: 0,
+    };
+    let buf = render_app(&mut app, 80, 24);
+    assert!(
+        find_border_corner_of_color(&buf, ACP_BORDER_COLOR).is_some(),
+        "the focused+Done execution window must render its border in the ACP identity color"
+    );
+    assert!(
+        find_border_corner_of_color(&buf, ratatui::style::Color::Green).is_none(),
+        "the focused+Done state must not render the stdio green border when the focused slot is ACP"
+    );
+}
+
+#[test]
+fn mixed_parallel_group_renders_one_purple_and_one_green_minimized_bar() {
+    use crate::frontend::tui::acp_view::ACP_BORDER_COLOR;
+    use crate::frontend::tui::tabs::ContainerWindowState;
+    // A two-slot tab mixing stdio + ACP (WI 0104), both minimized: the
+    // stdio slot's bar is green (`render_container_bars`), the ACP slot's
+    // bar is purple (`render_acp_bars`), and — since the idle execution
+    // phase keeps the tab bar and execution window both DarkGray — these
+    // are the only green/purple rounded corners in the frame, so finding
+    // one of each proves both bars actually drew.
+    let mut app = make_app();
+    app.active_tab_mut()
+        .start_container("claude".into(), "awman-a".into(), 80, 24);
+    push_acp_slot(&mut app, "codex");
+    app.active_tab_mut().container_window_state = ContainerWindowState::Minimized;
+
+    let buf = render_app(&mut app, 80, 30);
+    let green = find_border_corner_of_color(&buf, ratatui::style::Color::Green)
+        .expect("the stdio slot must render a green minimized bar");
+    let purple = find_border_corner_of_color(&buf, ACP_BORDER_COLOR)
+        .expect("the ACP slot must render a purple minimized bar");
+    assert!(
+        purple.1 > green.1,
+        "the bars tile in slot order — stdio (slot 0) above ACP (slot 1): \
+         green at {green:?}, purple at {purple:?}"
+    );
+}
+
+#[test]
+fn acp_permission_request_modal_renders_through_the_dialog_framework() {
+    // `TuiAcpFrontend::request_permission` opens exactly this `Dialog::Custom`
+    // shape (see `per_command/acp_frontend.rs`); this confirms the generic
+    // dialog framework actually renders it, title/body/hotkeys included.
+    let mut app = make_app();
+    app.active_dialog = Some(Dialog::Custom {
+        title: "ACP Permission Request".to_string(),
+        body: "The agent wants to run:\n\n  Write config.json (edit)\n\nAllow this action?"
+            .to_string(),
+        keys: vec![
+            ('1', "Allow once".to_string()),
+            ('2', "Reject".to_string()),
+        ],
+    });
+    let buf = render_app(&mut app, 80, 24);
+    let text = buffer_text(&buf);
+    assert!(
+        text.contains("ACP Permission Request"),
+        "modal title must render: {text}"
+    );
+    assert!(
+        text.contains("Write config.json"),
+        "modal body must render: {text}"
+    );
+    assert!(
+        text.contains("[1] Allow once"),
+        "the first hotkey option must render: {text}"
+    );
+    assert!(
+        text.contains("[2] Reject"),
+        "the second hotkey option must render: {text}"
+    );
+}

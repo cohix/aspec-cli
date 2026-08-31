@@ -610,3 +610,89 @@ fn cycle_container_window_clears_selection() {
          are relative to the window it started in"
     );
 }
+
+// ─── ACP window scroll (WI 0104) ───────────────────────────────────────────
+
+/// Install a single ACP slot (as command-wiring's launch path would) and put
+/// the tab in the same Maximized-with-known-inner-area state
+/// `setup_container_tab` uses for stdio, so the two are directly comparable.
+fn setup_acp_tab(app: &mut App) -> crate::frontend::tui::tabs::SharedAcpState {
+    use crate::frontend::tui::tabs::{AcpSlotState, ContainerSlot, ContainerWindowState};
+    let state: crate::frontend::tui::tabs::SharedAcpState =
+        std::sync::Arc::new(std::sync::Mutex::new(AcpSlotState::default()));
+    let tab = app.active_tab_mut();
+    tab.container_slots.push(ContainerSlot::new_acp(
+        String::new(),
+        "claude".into(),
+        state.clone(),
+    ));
+    tab.container_window_state = ContainerWindowState::Maximized;
+    tab.container_inner_area = Some(Rect::new(5, 3, 80, 24));
+    state
+}
+
+#[test]
+fn scroll_on_acp_slot_moves_its_own_offset_not_vt100_scrollback() {
+    use crate::engine::acp::protocol::ContentChunk;
+    use crate::engine::acp::{ContentBlock, SessionUpdate};
+
+    let mut app = make_app();
+    let state = setup_acp_tab(&mut app);
+    {
+        let mut s = state.lock().unwrap();
+        for i in 0..5 {
+            s.history.push_back(SessionUpdate::AgentMessageChunk {
+                chunk: ContentChunk {
+                    content: ContentBlock::Text {
+                        text: format!("line {i}"),
+                    },
+                    message_id: None,
+                },
+            });
+        }
+    }
+
+    crate::frontend::tui::mouse_handler::handle_mouse_event(
+        &mut app,
+        make_mouse_event(MouseEventKind::ScrollUp, 20, 10, KeyModifiers::NONE),
+    );
+    assert_eq!(
+        state.lock().unwrap().scroll_offset,
+        3,
+        "scrolling up over an ACP slot must advance the ACP window's own offset"
+    );
+    assert_eq!(
+        app.active_tab().container_scroll_offset,
+        0,
+        "the ACP scroll path must never touch the vt100 scrollback offset \
+         a stdio slot uses"
+    );
+
+    // Capped at the history length (5 updates), not free to scroll further.
+    for _ in 0..5 {
+        crate::frontend::tui::mouse_handler::handle_mouse_event(
+            &mut app,
+            make_mouse_event(MouseEventKind::ScrollUp, 20, 10, KeyModifiers::NONE),
+        );
+    }
+    assert_eq!(
+        state.lock().unwrap().scroll_offset,
+        5,
+        "the offset must clamp at the history length"
+    );
+
+    crate::frontend::tui::mouse_handler::handle_mouse_event(
+        &mut app,
+        make_mouse_event(MouseEventKind::ScrollDown, 20, 10, KeyModifiers::NONE),
+    );
+    assert_eq!(
+        state.lock().unwrap().scroll_offset,
+        2,
+        "scrolling down must move the ACP offset back toward the live view"
+    );
+    assert_eq!(
+        app.active_tab().container_scroll_offset,
+        0,
+        "vt100 scrollback must remain untouched throughout"
+    );
+}

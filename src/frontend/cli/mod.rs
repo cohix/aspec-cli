@@ -392,6 +392,15 @@ pub(crate) fn format_error(err: &CommandError) -> String {
             crate::engine::error::EngineError::NotImplemented(msg) => {
                 format!("not implemented: {msg}")
             }
+            // ACP (WI 0104). Minimal build-plumbing arms so the exhaustive match
+            // compiles after the foundation step added these variants; the
+            // cli-frontend step owns the final user-facing wording.
+            crate::engine::error::EngineError::AcpUnsupported { agent } => {
+                format!("agent '{agent}' does not support ACP (Agent Client Protocol) launch mode")
+            }
+            crate::engine::error::EngineError::Acp(msg) => {
+                format!("ACP protocol error: {msg}")
+            }
             crate::engine::error::EngineError::Other(msg) => msg.to_string(),
         },
         CommandError::Data(e) => format!("{e}"),

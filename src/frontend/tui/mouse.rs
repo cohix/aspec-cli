@@ -14,6 +14,18 @@ use crate::frontend::tui::tabs::Tab;
 /// is already scrolled back). The focused slot's parser holds the overlay's
 /// content and scrollback.
 pub(super) fn handle_container_scroll(tab: &mut Tab, is_up: bool) {
+    // ACP windows scroll their rendered update list, not a vt100 scrollback.
+    if let Some(state) = tab.focused_slot().and_then(|s| s.acp_state().cloned()) {
+        if let Ok(mut s) = state.lock() {
+            let max = s.history.len();
+            if is_up {
+                s.scroll_offset = (s.scroll_offset + 3).min(max);
+            } else {
+                s.scroll_offset = s.scroll_offset.saturating_sub(3);
+            }
+        }
+        return;
+    }
     if is_up {
         let Some(slot) = tab.focused_slot_mut() else {
             return;

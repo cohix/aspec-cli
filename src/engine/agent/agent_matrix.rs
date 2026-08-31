@@ -75,6 +75,11 @@ pub struct AgentMatrix {
     /// stdin without losing state. The wiring on the Docker side keeps the
     /// spawned subprocess's stdin alive for re-injection.
     pub supports_stdin_injection: bool,
+    /// Whether this agent's CLI can run in ACP (Agent Client Protocol) mode.
+    pub supports_acp: bool,
+    /// Entrypoint used when launching in ACP mode. `None` when ACP is not
+    /// supported by this agent.
+    pub acp_entrypoint: Option<Vec<&'static str>>,
     /// How context system prompts are delivered to this agent.
     pub system_prompt_delivery: SystemPromptMode,
     /// CLI flag for system prompt delivery (e.g. `--append-system-prompt-file`).
@@ -146,6 +151,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when claude ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::Append,
             system_prompt_flag: Some("--append-system-prompt-file"),
             sbx_kit_kind: SbxKitKind::Mixin,
@@ -166,6 +174,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when codex ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             // codex takes the system prompt as `--config developer_instructions=<text>`.
             system_prompt_delivery: SystemPromptMode::AppendInline {
                 key: "developer_instructions",
@@ -188,6 +199,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             // prompt makes opencode `open()` the prompt as a path (ENAMETOOLONG).
             interactive_seed_delivery: InteractiveSeedDelivery::Flag("--prompt"),
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when opencode ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::AgentsMd,
             system_prompt_flag: None,
             sbx_kit_kind: SbxKitKind::Mixin,
@@ -204,6 +218,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when maki ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::Unsupported,
             system_prompt_flag: None,
             sbx_kit_kind: SbxKitKind::Agent,
@@ -220,6 +237,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when gemini ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::EnvFile {
                 var: "GEMINI_SYSTEM_MD",
             },
@@ -238,6 +258,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when copilot ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::EnvFile {
                 var: "COPILOT_CUSTOM_INSTRUCTIONS_DIRS",
             },
@@ -256,6 +279,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when crush ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::Unsupported,
             system_prompt_flag: None,
             sbx_kit_kind: SbxKitKind::Agent,
@@ -272,6 +298,8 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             model_flag: ModelFlagDelivery::SpaceArg,
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            supports_acp: true,
+            acp_entrypoint: Some(vec!["cline", "--acp"]),
             system_prompt_delivery: SystemPromptMode::Replace,
             system_prompt_flag: Some("--system"),
             sbx_kit_kind: SbxKitKind::Agent,
@@ -305,6 +333,9 @@ pub fn matrix_for(agent: &str) -> Result<AgentMatrix, EngineError> {
             // until the flag form is verified end-to-end.
             interactive_seed_delivery: InteractiveSeedDelivery::Positional,
             supports_stdin_injection: false,
+            // TODO(acp): verify and wire up if/when antigravity ships ACP support
+            supports_acp: false,
+            acp_entrypoint: None,
             system_prompt_delivery: SystemPromptMode::AddDir { flag: "--add-dir" },
             system_prompt_flag: None,
             sbx_kit_kind: SbxKitKind::Agent,
@@ -337,6 +368,20 @@ pub fn entrypoint_for(matrix: &AgentMatrix, non_interactive: bool) -> Entrypoint
     Entrypoint(parts)
 }
 
+/// Build the entrypoint used for an ACP launch.
+pub fn entrypoint_for_acp(matrix: &AgentMatrix) -> Result<Entrypoint, EngineError> {
+    let parts = matrix
+        .acp_entrypoint
+        .as_ref()
+        .ok_or_else(|| EngineError::AcpUnsupported {
+            agent: matrix.agent.to_string(),
+        })?
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    Ok(Entrypoint(parts))
+}
+
 /// Translate a model name into the matrix-specific flag form.
 pub fn model_flag_for(matrix: &AgentMatrix, model: &str) -> Result<ModelFlagForm, EngineError> {
     match matrix.model_flag {
@@ -358,7 +403,39 @@ mod tests {
     #[test]
     fn matrix_supports_all_agents() {
         for a in SUPPORTED_AGENTS {
-            assert!(matrix_for(a).is_ok(), "matrix missing for {a}");
+            let matrix = matrix_for(a).expect("matrix missing for agent");
+            assert_eq!(
+                matrix.acp_entrypoint.is_some(),
+                matrix.supports_acp,
+                "ACP metadata invariant failed for {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn cline_has_verified_acp_entrypoint() {
+        let matrix = matrix_for("cline").unwrap();
+        assert!(matrix.supports_acp);
+        assert_eq!(matrix.acp_entrypoint, Some(vec!["cline", "--acp"]));
+        assert_eq!(
+            entrypoint_for_acp(&matrix).unwrap(),
+            Entrypoint(vec!["cline".to_string(), "--acp".to_string()])
+        );
+    }
+
+    #[test]
+    fn unsupported_agents_have_no_acp_entrypoint() {
+        for agent in SUPPORTED_AGENTS {
+            if *agent == "cline" {
+                continue;
+            }
+            let matrix = matrix_for(agent).unwrap();
+            assert!(!matrix.supports_acp, "unexpected ACP support for {agent}");
+            assert!(matrix.acp_entrypoint.is_none());
+            assert!(matches!(
+                entrypoint_for_acp(&matrix),
+                Err(EngineError::AcpUnsupported { .. })
+            ));
         }
     }
 

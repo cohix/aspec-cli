@@ -368,8 +368,22 @@ fn window_border_color_error_always_red() {
         command: "x".into(),
         message: "y".into(),
     };
-    assert_eq!(window_border_color(&phase, true), Color::Red);
-    assert_eq!(window_border_color(&phase, false), Color::Red);
+    assert_eq!(window_border_color(&phase, true, false), Color::Red);
+    assert_eq!(window_border_color(&phase, false, false), Color::Red);
+}
+
+#[test]
+fn window_border_color_error_acp_is_still_red() {
+    use ratatui::style::Color;
+    // Phase-based color takes precedence over the ACP identity color: an
+    // Error phase renders red even when the focused slot is ACP, matching
+    // the stdio window's existing precedence (`window_border_color_error_always_red`).
+    let phase = ExecutionPhase::Error {
+        command: "x".into(),
+        message: "y".into(),
+    };
+    assert_eq!(window_border_color(&phase, true, true), Color::Red);
+    assert_eq!(window_border_color(&phase, false, true), Color::Red);
 }
 
 #[test]
@@ -378,7 +392,7 @@ fn window_border_color_running_focused_is_blue() {
     let phase = ExecutionPhase::Running {
         command: "x".into(),
     };
-    assert_eq!(window_border_color(&phase, true), Color::Blue);
+    assert_eq!(window_border_color(&phase, true, false), Color::Blue);
 }
 
 #[test]
@@ -387,7 +401,7 @@ fn window_border_color_running_unfocused_is_gray() {
     let phase = ExecutionPhase::Running {
         command: "x".into(),
     };
-    assert_eq!(window_border_color(&phase, false), Color::Gray);
+    assert_eq!(window_border_color(&phase, false, false), Color::Gray);
 }
 
 #[test]
@@ -397,7 +411,21 @@ fn window_border_color_done_focused_is_green() {
         command: "x".into(),
         exit_code: 0,
     };
-    assert_eq!(window_border_color(&phase, true), Color::Green);
+    assert_eq!(window_border_color(&phase, true, false), Color::Green);
+}
+
+#[test]
+fn window_border_color_done_focused_acp_is_purple() {
+    // Companion to the green case: the same focused+Done state renders in the
+    // ACP identity color when the focused agent slot is an ACP window.
+    let phase = ExecutionPhase::Done {
+        command: "x".into(),
+        exit_code: 0,
+    };
+    assert_eq!(
+        window_border_color(&phase, true, true),
+        crate::frontend::tui::acp_view::ACP_BORDER_COLOR
+    );
 }
 
 #[test]
@@ -407,18 +435,18 @@ fn window_border_color_done_unfocused_is_gray() {
         command: "x".into(),
         exit_code: 0,
     };
-    assert_eq!(window_border_color(&phase, false), Color::Gray);
+    assert_eq!(window_border_color(&phase, false, false), Color::Gray);
 }
 
 #[test]
 fn window_border_color_idle_is_dark_gray_regardless_of_focus() {
     use ratatui::style::Color;
     assert_eq!(
-        window_border_color(&ExecutionPhase::Idle, true),
+        window_border_color(&ExecutionPhase::Idle, true, false),
         Color::DarkGray
     );
     assert_eq!(
-        window_border_color(&ExecutionPhase::Idle, false),
+        window_border_color(&ExecutionPhase::Idle, false, false),
         Color::DarkGray
     );
 }
@@ -481,6 +509,43 @@ fn tab_color_running_maximized_container_is_green() {
     };
     tab.container_window_state = ContainerWindowState::Maximized;
     assert_eq!(tab_color(&tab), Color::Green);
+}
+
+#[test]
+fn tab_color_running_with_acp_container_visible_is_purple() {
+    use ratatui::style::Color;
+    // Companion to `tab_color_running_with_pty_container_visible_is_green`:
+    // the same running+container-visible state renders in the ACP identity
+    // color when the focused slot is an ACP window, not green.
+    let mut tab = make_tab();
+    let state: SharedAcpState = Arc::new(Mutex::new(AcpSlotState::default()));
+    tab.container_slots
+        .push(ContainerSlot::new_acp(String::new(), "claude".into(), state));
+    tab.execution_phase = ExecutionPhase::Running {
+        command: "chat".into(),
+    };
+    tab.container_window_state = ContainerWindowState::Minimized;
+    assert_eq!(
+        tab_color(&tab),
+        crate::frontend::tui::acp_view::ACP_BORDER_COLOR
+    );
+    assert_ne!(tab_color(&tab), Color::Green);
+}
+
+#[test]
+fn tab_color_error_with_acp_focused_slot_is_still_red() {
+    use ratatui::style::Color;
+    // Phase-based color takes precedence over the ACP identity color, the
+    // same precedence the stdio path already has (`tab_color_error_is_red`).
+    let mut tab = make_tab();
+    let state: SharedAcpState = Arc::new(Mutex::new(AcpSlotState::default()));
+    tab.container_slots
+        .push(ContainerSlot::new_acp(String::new(), "claude".into(), state));
+    tab.execution_phase = ExecutionPhase::Error {
+        command: "chat".into(),
+        message: "oops".into(),
+    };
+    assert_eq!(tab_color(&tab), Color::Red);
 }
 
 #[test]
@@ -919,6 +984,36 @@ fn cycle_focused_slot_advances_cyclically_through_three_slots() {
     assert_eq!(
         tab.focused_slot_idx, 0,
         "one full cycle of three slots returns to slot 0"
+    );
+}
+
+#[test]
+fn mixed_parallel_group_focused_slot_and_iteration_track_kind() {
+    // A parallel group mixing a stdio slot and an ACP slot (WI 0104): both
+    // `focused_slot()` and the minimized-bar iteration must agree on which
+    // index is which kind, regardless of `AgentWindowKind`.
+    let mut tab = make_tab();
+    let state: SharedAcpState = Arc::new(Mutex::new(AcpSlotState::default()));
+    tab.container_slots.push(slot("a")); // stdio
+    tab.container_slots
+        .push(ContainerSlot::new_acp("b".into(), "codex".into(), state));
+
+    assert_eq!(tab.active_slot_count(), 2);
+    assert!(
+        !tab.focused_slot().unwrap().is_acp(),
+        "slot 0 (default focus) is stdio"
+    );
+    assert!(!tab.container_slots[0].is_acp());
+    assert!(
+        tab.container_slots[1].is_acp(),
+        "slot 1 is the ACP slot the minimized-bar iteration must skip in the stdio pass"
+    );
+
+    tab.cycle_focused_slot();
+    assert_eq!(tab.focused_slot_idx, 1);
+    assert!(
+        tab.focused_slot().unwrap().is_acp(),
+        "cycling focus must reach the ACP slot"
     );
 }
 

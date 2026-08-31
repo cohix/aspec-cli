@@ -142,6 +142,14 @@ pub enum ContainerOption {
     /// `interactive_seed_delivery` is `Flag`.
     InteractiveSeedFlag(String),
     Interactive(bool),
+    /// Launch the agent over ACP (Agent Client Protocol) instead of raw
+    /// container stdio. Selects the persistent-piped spawn path (`-i`, no PTY)
+    /// so a newline-delimited JSON-RPC 2.0 channel can ride the container's
+    /// stdio pipes for the whole session. Introduces NO new host exposure —
+    /// no ports, no `--network`, no new mounts (see
+    /// `aspec/architecture/security.md`); the bytes flow over the exact stdio
+    /// pipes `-i` already wires up.
+    Acp(bool),
     AllowDocker(bool),
     Yolo(YoloMode),
     Auto(AutoMode),
@@ -310,6 +318,10 @@ pub struct ResolvedContainerOptions {
     /// since opencode treats a bare positional as a project directory).
     pub interactive_seed_flag: Option<String>,
     pub interactive: bool,
+    /// When `true`, the runtime uses the persistent-piped spawn path (`-i`,
+    /// never a PTY) so an ACP JSON-RPC channel can span the whole session.
+    /// Default `false` keeps today's PTY/one-shot-piped behaviour unchanged.
+    pub acp: bool,
     pub allow_docker: bool,
     pub yolo: YoloMode,
     pub auto: AutoMode,
@@ -376,6 +388,7 @@ impl ResolvedContainerOptions {
             ContainerOption::SeededPrompt(v) => self.seeded_prompt = Some(v),
             ContainerOption::InteractiveSeedFlag(v) => self.interactive_seed_flag = Some(v),
             ContainerOption::Interactive(v) => self.interactive = v,
+            ContainerOption::Acp(v) => self.acp = v,
             ContainerOption::AllowDocker(v) => self.allow_docker = v,
             ContainerOption::Yolo(v) => self.yolo = v,
             ContainerOption::Auto(v) => self.auto = v,
@@ -493,6 +506,24 @@ mod tests {
         assert!(resolved.interactive);
         assert_eq!(resolved.allowed_tools, vec!["Bash".to_string()]);
         assert!(matches!(resolved.yolo, YoloMode::Disabled));
+    }
+
+    #[test]
+    fn acp_defaults_to_false_and_round_trips_when_set() {
+        // Default: no ACP option → `acp` stays false (today's behaviour).
+        let default = ResolvedContainerOptions::resolve([ContainerOption::Image(ImageRef::new(
+            "img:latest",
+        ))])
+        .expect("resolve should succeed");
+        assert!(!default.acp, "acp must default to false");
+
+        // Explicitly requested → the resolved bag carries it through.
+        let enabled = ResolvedContainerOptions::resolve([
+            ContainerOption::Image(ImageRef::new("img:latest")),
+            ContainerOption::Acp(true),
+        ])
+        .expect("resolve should succeed");
+        assert!(enabled.acp, "ContainerOption::Acp(true) must set acp");
     }
 
     #[test]

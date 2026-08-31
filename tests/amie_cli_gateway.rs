@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -567,25 +567,42 @@ fn build_shared_awman_copy() -> std::path::PathBuf {
         .keep();
     let dest = dir.join("awman");
 
-    // The source (especially the top-level convenience path) can be unlinked
-    // between resolution and the copy while cargo republishes it, so re-resolve
-    // and retry a few times rather than panicking on a transient ENOENT.
-    let mut last_err: Option<(std::path::PathBuf, std::io::Error)> = None;
-    for attempt in 0..40 {
-        let src = resolve_awman_source();
-        match std::fs::copy(&src, &dest) {
-            Ok(_) => {
-                last_err = None;
-                break;
-            }
-            Err(err) => {
-                last_err = Some((src, err));
-                std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+    // The freshly built binary is guaranteed to exist for a legitimate `cargo
+    // test`, but the source can be momentarily unresolvable, and for longer
+    // than a single relink: cargo republishes the top-level path with an
+    // unlink-then-relink, and a *concurrent* `cargo` invocation sharing this
+    // target dir (e.g. a CI job that overlaps a build with the test run) both
+    // widens that window and churns the `deps/` artifacts the fallback probes,
+    // so every resolution path can be transiently unavailable at once. Retry
+    // resolve-then-copy against a generous wall-clock deadline rather than
+    // giving up after a fixed, too-short burst — the old fixed-attempt loops
+    // could panic while the binary was merely mid-rebuild. In the common case
+    // the source resolves on the first iteration and this returns immediately.
+    let top_level = std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut backoff = Duration::from_millis(25);
+    let mut last_copy_err: Option<String> = None;
+    loop {
+        if let Some(src) = resolve_awman_source() {
+            match std::fs::copy(&src, &dest) {
+                Ok(_) => break,
+                Err(err) => {
+                    last_copy_err = Some(format!("last copy from {}: {err:?}", src.display()))
+                }
             }
         }
-    }
-    if let Some((src, err)) = last_err {
-        panic!("copying awman binary from {}: {err:?}", src.display());
+        if Instant::now() >= deadline {
+            panic!(
+                "awman binary never became usable within 120s; top-level {} try_exists={:?}; {}",
+                top_level.display(),
+                top_level.try_exists(),
+                last_copy_err
+                    .as_deref()
+                    .unwrap_or("top-level absent and no real-CLI deps/awman-<hash> found"),
+            );
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(Duration::from_millis(500));
     }
     #[cfg(unix)]
     {
@@ -596,13 +613,14 @@ fn build_shared_awman_copy() -> std::path::PathBuf {
     dest
 }
 
-/// Locate the freshly built `awman` binary.
+/// Best-effort *single* resolution of the freshly built `awman` binary. Returns
+/// `None` when no source is currently available; the caller retries against a
+/// deadline (see `build_shared_awman_copy`).
 ///
-/// The primary source is `CARGO_BIN_EXE_awman` (`target/debug/awman`). Because
-/// cargo publishes that convenience path with an unlink-then-relink — and a
-/// concurrent (re)build can widen that window well beyond a single relink — we
-/// retry while it is momentarily absent. If it stays absent, we fall back to a
-/// per-hash binary under `target/debug/deps/`.
+/// The primary source is `CARGO_BIN_EXE_awman` (`target/debug/awman`). While
+/// that convenience path is momentarily missing — cargo publishes it with an
+/// unlink-then-relink, which a concurrent (re)build can widen well beyond a
+/// single relink — fall back to a per-hash binary under `target/debug/deps/`.
 ///
 /// The fallback must be careful: `deps/` also holds the bin crate's own *libtest
 /// harness* executables, which are likewise named `awman-<hash>` but only accept
@@ -612,24 +630,16 @@ fn build_shared_awman_copy() -> std::path::PathBuf {
 /// binary is ever hard-linked to it — so we positively identify the real CLI by
 /// probing each candidate with `--version` and keeping the newest that answers
 /// like the CLI.
-fn resolve_awman_source() -> std::path::PathBuf {
+fn resolve_awman_source() -> Option<std::path::PathBuf> {
     let top_level = std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"));
-    for attempt in 0..40 {
-        if top_level.exists() {
-            return top_level;
-        }
-        if let Some(from_deps) = newest_real_cli_deps_binary(&top_level) {
-            return from_deps;
-        }
-        std::thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+    // `try_exists` distinguishes a genuine absence (`Ok(false)`) from a
+    // transient stat error (`Err(_)`, e.g. under fd pressure). Only a confirmed
+    // absence sends us to the `deps/` fallback; on an ambiguous error prefer the
+    // real path and let the copy surface any genuine failure.
+    if !matches!(top_level.try_exists(), Ok(false)) {
+        return Some(top_level);
     }
-    // Last resort: the newest real-CLI deps binary, else fail loudly.
-    newest_real_cli_deps_binary(&top_level).unwrap_or_else(|| {
-        panic!(
-            "awman binary never settled at {} and no real-CLI deps/awman-<hash> was found",
-            top_level.display()
-        )
-    })
+    newest_real_cli_deps_binary(&top_level)
 }
 
 /// The newest `target/debug/deps/awman-<hash>` executable that probes as the real

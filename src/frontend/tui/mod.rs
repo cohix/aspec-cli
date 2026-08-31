@@ -20,6 +20,7 @@ use crate::command::dispatch::parsed_input::ParsedCommandBoxInput;
 use crate::data::session_manager::SessionManager;
 use crate::frontend::cli::RuntimeContext;
 
+pub mod acp_view;
 pub mod amie_attach;
 pub mod amie_poll;
 pub mod app;

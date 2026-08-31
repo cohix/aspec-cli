@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::data::config::repo::LaunchMode;
+
 /// Flag-derived overrides that Layer 0 honours when computing the effective config.
 ///
 /// Every field is `None` when the user did not pass the corresponding flag.
@@ -18,6 +20,8 @@ pub struct FlagConfig {
     pub agent: Option<String>,
     /// Override the model (`--model <name>`).
     pub model: Option<String>,
+    /// `--launch-mode <stdio|acp>`.
+    pub launch_mode: Option<LaunchMode>,
     /// Override scrollback line count.
     pub terminal_scrollback_lines: Option<usize>,
     /// Override agent-stuck timeout.
