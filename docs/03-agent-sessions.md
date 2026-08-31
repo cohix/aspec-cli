@@ -3,6 +3,10 @@
 An agent session is a Docker container running your configured AI agent (Claude Code, Codex, OpenCode, Maki, Gemini, Antigravity, GitHub Copilot CLI, Crush, or Cline) against your project. awman handles starting the container, injecting your credentials, and connecting your terminal to the agent's input/output.
 
 There are two session types: **freeform chat** and **work item implementation**.
+Either type normally uses the standard stdio launch mode. You can also use
+[ACP mode](17-acp-mode.md) when you want awman to render structured agent
+activity instead of the agent's raw terminal stream. ACP is currently
+supported only by **Cline**.
 
 ---
 
@@ -19,6 +23,26 @@ chat
 In the TUI, the container window opens immediately and all keyboard input is forwarded to the agent. In command mode, the container's stdin/stdout/stderr are directly connected to your terminal.
 
 Press **Ctrl+C** to exit the agent session when you're done.
+
+---
+
+## ACP launch mode
+
+ACP (Agent Client Protocol) mode lets awman present an agent's messages, tool
+activity, plans, and permission requests in awman's own interface. It is
+available today for `cline` only; all other supported agents use the regular
+stdio launch mode.
+
+Select it for one session with `--launch-mode acp`:
+
+```sh
+awman chat --agent cline --launch-mode acp
+awman exec prompt --agent cline --launch-mode acp "Review the failing tests"
+```
+
+The flag is also accepted on `exec workflow`, but ACP is not yet driven for
+workflow steps. See [ACP Mode](17-acp-mode.md) for the CLI experience,
+configuration, and the current TUI and workflow limits.
 
 ---
 
@@ -756,6 +780,7 @@ When `--refresh` is also set, the audit runs and its results are included once c
 | `--agent=<name>` | ✓ | ✓ | ✓ | Override the agent for this session |
 | `--model=<NAME>` | ✓ | ✓ | ✓ | Override the model used by the agent |
 | `--non-interactive` / `-n` | ✓ | ✓ | ✓ | Print/batch mode |
+| `--launch-mode <stdio\|acp>` | ✓ | ✓ | ✓ | Choose standard stdio or ACP mode |
 | `--plan` | ✓ | ✓ | ✓ | Read-only analysis mode |
 | `--allow-docker` | ✓ | ✓ | ✓ | Mount host Docker socket |
 | `--overlay=<SPEC>` | ✓ | ✓ | ✓ | `dir()`, `env()`, `skill()`, `ssh()` overlays (repeatable) |

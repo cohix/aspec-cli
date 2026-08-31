@@ -10,6 +10,7 @@ use ratatui::layout::Rect;
 use crate::command::dispatch::CommandOutcome;
 use crate::command::error::CommandError;
 use crate::data::session::Session;
+use crate::engine::acp::{PermissionRequest, SessionUpdate};
 use crate::engine::agent_runtime::execution::{AgentStats, StuckEvent};
 use crate::frontend::tui::dialogs::{DialogRequest, DialogResponse};
 use crate::frontend::tui::git_sidebar::{
@@ -208,14 +209,86 @@ pub struct LastContainerSummary {
     pub exit_code: i32,
 }
 
+/// Upper bound on the rendered ACP update history kept per slot. Once full,
+/// the oldest entry is dropped as new ones arrive — a plain ring buffer.
+/// There is no raw terminal scrollback to fall back on for an ACP window, so
+/// this cap is the only backstop against unbounded growth.
+pub const ACP_HISTORY_LIMIT: usize = 2000;
+
+/// Rendered state for an ACP (Agent Client Protocol) agent window.
+///
+/// Unlike a stdio slot there is no raw terminal byte stream and no vt100
+/// grid: the agent speaks structured [`SessionUpdate`] frames, which are kept
+/// here as a bounded history and drawn as a scrollable list. A pending
+/// permission request is parked here while its modal is open.
+///
+/// The state is shared (`Arc<Mutex<…>>`, see [`SharedAcpState`]) between the
+/// TUI render thread, which reads the history to draw the window, and the ACP
+/// frontend running on the engine task, which appends updates in
+/// `render_update`. This mirrors the other engine→TUI shared handles
+/// (`SharedStatusLog`, `SharedYoloState`): the render loop repaints every
+/// tick, so an append is picked up on the next frame with no explicit redraw
+/// signal.
+#[derive(Debug, Default)]
+pub struct AcpSlotState {
+    /// Rendered update history, oldest first. Bounded to [`ACP_HISTORY_LIMIT`]
+    /// entries (a ring buffer).
+    pub history: std::collections::VecDeque<SessionUpdate>,
+    /// The permission request currently awaiting a user decision, if any. Set
+    /// when the modal opens and cleared when it resolves.
+    pub pending_permission: Option<PermissionRequest>,
+    /// Lines-from-bottom scroll offset into the rendered history. `0` follows
+    /// the latest updates; increasing it scrolls toward older output. This is
+    /// the ACP window's own simple list scroll — it never touches the
+    /// vt100 scrollback path stdio slots use.
+    pub scroll_offset: usize,
+}
+
+impl AcpSlotState {
+    /// Append an update, enforcing the [`ACP_HISTORY_LIMIT`] ring-buffer cap.
+    pub fn push_update(&mut self, update: SessionUpdate) {
+        self.history.push_back(update);
+        while self.history.len() > ACP_HISTORY_LIMIT {
+            self.history.pop_front();
+        }
+    }
+}
+
+/// Cross-thread handle to an ACP window's [`AcpSlotState`]. Held by both the
+/// [`ContainerSlot`] (TUI thread) and the ACP frontend (engine task).
+pub type SharedAcpState = Arc<Mutex<AcpSlotState>>;
+
+/// Which kind of agent window a [`ContainerSlot`] hosts.
+///
+/// A **stdio** slot bridges a real PTY/piped byte stream into the vt100 grid,
+/// using the `vt100_parser`, `region_scroll`, terminal-mode flags, and I/O
+/// channels on [`ContainerSlot`]. An **ACP** slot has no raw terminal stream:
+/// its structured updates live in the shared [`AcpSlotState`] instead, and the
+/// vt100 fields on the slot stay inert.
+///
+/// Keeping both behind one `ContainerSlot` type is what lets a parallel
+/// workflow group mix stdio and ACP windows in a single `container_slots`
+/// vec, so `focused_slot()` and the minimized-bar iteration stay uniform over
+/// one slot type.
+#[derive(Debug, Clone)]
+pub enum AgentWindowKind {
+    Stdio,
+    Acp(SharedAcpState),
+}
+
 /// One running container. This is THE container representation — a plain
 /// containerized command (`chat`, `exec prompt`) is simply a tab with one
 /// slot, and a parallel workflow group is a tab with N of them (WI-0096).
 ///
 /// Each slot owns its own PTY parser, terminal-mode flags, stats, and I/O
 /// channels. The slot at `Tab::focused_slot_idx` renders maximized; the
-/// others render as stacked minimized status bars.
+/// others render as stacked minimized status bars. A slot's [`AgentWindowKind`]
+/// selects whether it is driven by that stdio/PTY machinery or by a structured
+/// ACP update stream (in which case the vt100 fields stay inert).
 pub struct ContainerSlot {
+    /// Whether this slot is a stdio (PTY/vt100) window or an ACP window.
+    /// Stdio is the default; ACP slots carry their shared render state here.
+    pub kind: AgentWindowKind,
     /// Workflow step this container runs, or empty for non-workflow
     /// commands and sequential workflow steps (whose step name comes from
     /// the workflow view state instead).
@@ -252,6 +325,7 @@ impl ContainerSlot {
     /// as they are known; live I/O channels are attached by the caller.
     pub fn new(step_name: String, agent_display_name: String, scrollback: usize) -> Self {
         Self {
+            kind: AgentWindowKind::Stdio,
             step_name,
             vt100_parser: vt100::Parser::new(24, 80, scrollback),
             region_scroll: crate::frontend::tui::region_scroll::RegionScrollEmulator::new(),
@@ -273,6 +347,33 @@ impl ContainerSlot {
             yolo_state: Arc::new(Mutex::new(None)),
             yolo_cancel_flag: Arc::new(AtomicBool::new(false)),
             stuck_rx: None,
+        }
+    }
+
+    /// Create a fresh ACP window slot. The vt100 fields exist but stay inert
+    /// (no PTY stream feeds them); the window renders from `state` instead.
+    /// `state` is the same handle the ACP frontend appends updates to, so the
+    /// caller shares one `Arc` between the slot and the frontend.
+    pub fn new_acp(
+        step_name: String,
+        agent_display_name: String,
+        state: SharedAcpState,
+    ) -> Self {
+        let mut slot = Self::new(step_name, agent_display_name, 0);
+        slot.kind = AgentWindowKind::Acp(state);
+        slot
+    }
+
+    /// Whether this slot hosts an ACP window (rather than a stdio/PTY one).
+    pub fn is_acp(&self) -> bool {
+        matches!(self.kind, AgentWindowKind::Acp(_))
+    }
+
+    /// The shared ACP render state, when this is an ACP slot.
+    pub fn acp_state(&self) -> Option<&SharedAcpState> {
+        match &self.kind {
+            AgentWindowKind::Acp(state) => Some(state),
+            AgentWindowKind::Stdio => None,
         }
     }
 
@@ -638,7 +739,15 @@ pub fn tab_color(tab: &Tab) -> ratatui::style::Color {
         ExecutionPhase::Error { .. } => Color::Red,
         ExecutionPhase::Running { .. } => {
             if tab.container_window_state != ContainerWindowState::Hidden {
-                Color::Green
+                // The container-visible "running" color is the agent-window
+                // identity color: purple when the focused slot is an ACP
+                // window, green for a stdio one. The Blue/Red/DarkGray phase
+                // states below and above are unchanged.
+                if tab.focused_slot().is_some_and(|s| s.is_acp()) {
+                    crate::frontend::tui::acp_view::ACP_BORDER_COLOR
+                } else {
+                    Color::Green
+                }
             } else {
                 Color::Blue
             }
@@ -648,7 +757,16 @@ pub fn tab_color(tab: &Tab) -> ratatui::style::Color {
 }
 
 /// Execution window border color based on phase and focus.
-pub fn window_border_color(phase: &ExecutionPhase, focused: bool) -> ratatui::style::Color {
+///
+/// `acp` is `true` when the focused agent slot is an ACP window: the only
+/// green state (focused + Done) then becomes the ACP identity color, matching
+/// [`tab_color`]. The Blue/Gray/Red/DarkGray phase states are unchanged — the
+/// stdio window's appearance is identical (callers pass `acp = false`).
+pub fn window_border_color(
+    phase: &ExecutionPhase,
+    focused: bool,
+    acp: bool,
+) -> ratatui::style::Color {
     use ratatui::style::Color;
     match phase {
         ExecutionPhase::Error { .. } => Color::Red,
@@ -661,7 +779,11 @@ pub fn window_border_color(phase: &ExecutionPhase, focused: bool) -> ratatui::st
         }
         ExecutionPhase::Done { .. } => {
             if focused {
-                Color::Green
+                if acp {
+                    crate::frontend::tui::acp_view::ACP_BORDER_COLOR
+                } else {
+                    Color::Green
+                }
             } else {
                 Color::Gray
             }

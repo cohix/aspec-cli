@@ -41,14 +41,15 @@ use crate::command::commands::worktree_lifecycle::{
     ExistingWorktreeDecision, PostWorkflowWorktreeAction, PreWorktreeDecision,
     WorktreeLifecycleFrontend, WorktreeMergeMode,
 };
+use crate::command::dispatch::CommandFrontend;
 use crate::command::dispatch::catalogue::{CommandCatalogue, FrontendKind};
 use crate::command::dispatch::projections::raw_args::ParsedArgs;
-use crate::command::dispatch::CommandFrontend;
 use crate::command::error::CommandError;
 use crate::data::config::repo::WorkItemsConfig;
 use crate::data::message::{UserMessage, UserMessageSink};
 use crate::data::session::AgentName;
 use crate::data::workflow_definition::WorkflowStep;
+use crate::engine::acp::{AcpFrontend, PermissionDecision, PermissionRequest, SessionUpdate};
 use crate::engine::agent_runtime::execution::AgentExitInfo;
 use crate::engine::agent_runtime::frontend::{AgentFrontend, AgentProgress, AgentStatus};
 use crate::engine::error::EngineError;
@@ -1040,6 +1041,26 @@ impl ApiServerCommandFrontend for ApiDispatchFrontend {
 
 impl ChatCommandFrontend for ApiDispatchFrontend {
     fn set_pty_active(&mut self, _active: bool) {}
+}
+
+impl AcpFrontend for ApiDispatchFrontend {
+    fn render_update(&mut self, update: SessionUpdate) {
+        self.event_bus.emit(EventPayload::StatusMessage {
+            phase: "acp".to_string(),
+            message: crate::engine::acp::protocol::summarize_update(&update),
+        });
+    }
+
+    fn request_permission(&mut self, _request: PermissionRequest) -> PermissionDecision {
+        // Fail closed: `AcpSession` only reaches the frontend when neither
+        // `--yolo` nor `--auto` is set, and API dispatch has no way to ask a
+        // human, so it must deny rather than silently approve a tool call.
+        PermissionDecision::Cancelled
+    }
+
+    fn next_prompt(&mut self) -> Option<String> {
+        None
+    }
 }
 
 impl ExecPromptCommandFrontend for ApiDispatchFrontend {}

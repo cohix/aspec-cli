@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use crate::data::config::env::EnvSnapshot;
 use crate::data::config::flags::FlagConfig;
-use crate::data::config::global::GlobalConfig;
-use crate::data::config::repo::{AgentAuthMode, RepoConfig};
+use crate::data::config::global::{GlobalConfig, LaunchModeFallback};
+use crate::data::config::repo::{AgentAuthMode, LaunchMode, RepoConfig};
 use crate::data::config::{DEFAULT_AGENT_STUCK_TIMEOUT_SECS, DEFAULT_SCROLLBACK_LINES};
 
 /// Merged view of every configuration source, in precedence order.
@@ -197,6 +197,28 @@ impl EffectiveConfig {
     /// Effective container runtime name (e.g. `"docker"`, `"apple-containers"`).
     pub fn runtime(&self) -> Option<String> {
         self.global.runtime.clone()
+    }
+
+    /// Effective agent launch mode (flag > env > repo > built-in `stdio`).
+    ///
+    /// Launch mode is intentionally not inherited from global configuration;
+    /// it is scoped to an invocation or repository. The repository setting is
+    /// agent-independent, so no agent name is needed here (the agent-support
+    /// check happens separately, in the command layer and `build_options`).
+    pub fn launch_mode(&self) -> LaunchMode {
+        if let Some(mode) = self.flags.launch_mode {
+            return mode;
+        }
+        if let Some(mode) = self.env.launch_mode() {
+            return mode;
+        }
+        self.repo.launch_mode.unwrap_or_default()
+    }
+
+    /// Effective ACP fallback policy. This is global-only; flags, environment
+    /// and repository configuration do not override it.
+    pub fn launch_mode_fallback(&self) -> LaunchModeFallback {
+        self.global.launch_mode_fallback.unwrap_or_default()
     }
 
     /// Effective base image tag for setup/teardown containers (repo > global > None).
@@ -984,5 +1006,93 @@ mod tests {
             GlobalConfig::default(),
         );
         assert_eq!(ec.auth_mode(), AgentAuthMode::Keychain);
+    }
+
+    // ── launch_mode ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn launch_mode_defaults_to_stdio_and_ignores_global_config() {
+        let global = GlobalConfig {
+            launch_mode_fallback: Some(LaunchModeFallback::Stdio),
+            ..Default::default()
+        };
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            global,
+        );
+        assert_eq!(ec.launch_mode(), LaunchMode::Stdio);
+    }
+
+    #[test]
+    fn launch_mode_uses_repo_when_flag_and_env_are_unset() {
+        let repo = RepoConfig {
+            launch_mode: Some(LaunchMode::Acp),
+            ..Default::default()
+        };
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            repo,
+            GlobalConfig::default(),
+        );
+        assert_eq!(ec.launch_mode(), LaunchMode::Acp);
+    }
+
+    #[test]
+    fn launch_mode_env_beats_repo() {
+        let env =
+            EnvSnapshot::with_overrides([(crate::data::config::env::AWMAN_LAUNCH_MODE, "stdio")]);
+        let repo = RepoConfig {
+            launch_mode: Some(LaunchMode::Acp),
+            ..Default::default()
+        };
+        let ec = make_effective(FlagConfig::default(), env, repo, GlobalConfig::default());
+        assert_eq!(ec.launch_mode(), LaunchMode::Stdio);
+    }
+
+    #[test]
+    fn launch_mode_flag_beats_env_and_repo() {
+        let flags = FlagConfig {
+            launch_mode: Some(LaunchMode::Acp),
+            ..Default::default()
+        };
+        let env =
+            EnvSnapshot::with_overrides([(crate::data::config::env::AWMAN_LAUNCH_MODE, "stdio")]);
+        let repo = RepoConfig {
+            launch_mode: Some(LaunchMode::Stdio),
+            ..Default::default()
+        };
+        let ec = make_effective(flags, env, repo, GlobalConfig::default());
+        assert_eq!(ec.launch_mode(), LaunchMode::Acp);
+    }
+
+    // ── launch_mode_fallback ─────────────────────────────────────────────────
+
+    #[test]
+    fn launch_mode_fallback_defaults_to_error() {
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            GlobalConfig::default(),
+        );
+        assert_eq!(ec.launch_mode_fallback(), LaunchModeFallback::Error);
+    }
+
+    #[test]
+    fn launch_mode_fallback_uses_global_config_only() {
+        let global = GlobalConfig {
+            launch_mode_fallback: Some(LaunchModeFallback::Stdio),
+            ..Default::default()
+        };
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            global,
+        );
+        assert_eq!(ec.launch_mode_fallback(), LaunchModeFallback::Stdio);
     }
 }

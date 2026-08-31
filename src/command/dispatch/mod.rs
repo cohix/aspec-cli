@@ -1089,6 +1089,25 @@ pub(crate) fn parse_amie_interval(command: &[&str], raw: &str) -> Result<u64, Co
         })
 }
 
+/// Convert the catalogue-validated launch-mode enum into the Layer 0 type.
+/// Keeping this conversion at the dispatch boundary means command wiring only
+/// ever sees a typed `LaunchMode`.
+fn parse_launch_mode(
+    raw: Option<String>,
+    command: &[&str],
+) -> Result<Option<crate::data::config::repo::LaunchMode>, CommandError> {
+    match raw.as_deref() {
+        None => Ok(None),
+        Some("stdio") => Ok(Some(crate::data::config::repo::LaunchMode::Stdio)),
+        Some("acp") => Ok(Some(crate::data::config::repo::LaunchMode::Acp)),
+        Some(value) => Err(CommandError::InvalidFlagValue {
+            command: command.iter().map(|part| (*part).to_string()).collect(),
+            flag: "launch-mode".into(),
+            reason: format!("unknown enum value {value:?}"),
+        }),
+    }
+}
+
 // ─── Per-command flag readers ───────────────────────────────────────────────
 
 fn read_ready_flags<F: CommandFrontend>(
@@ -1117,6 +1136,7 @@ fn read_chat_flags<F: CommandFrontend>(
         auto: f.flag_bool(p, "auto")?.unwrap_or(false),
         agent: f.flag_string(p, "agent")?,
         model: f.flag_string(p, "model")?,
+        launch_mode: parse_launch_mode(f.flag_enum(p, "launch-mode")?, p)?,
         overlay: f.flag_strings(p, "overlay")?,
     })
 }
@@ -1136,6 +1156,7 @@ fn read_exec_prompt_flags<F: CommandFrontend>(
         auto: f.flag_bool(p, "auto")?.unwrap_or(false),
         agent: f.flag_string(p, "agent")?,
         model: f.flag_string(p, "model")?,
+        launch_mode: parse_launch_mode(f.flag_enum(p, "launch-mode")?, p)?,
         overlay: f.flag_strings(p, "overlay")?,
         issue_source: crate::data::issue::IssueSourceFlags { issue },
     })
@@ -1168,6 +1189,7 @@ fn read_exec_workflow_flags<F: CommandFrontend>(
         auto: f.flag_bool(p, "auto")?.unwrap_or(false),
         agent: f.flag_string(p, "agent")?,
         model: f.flag_string(p, "model")?,
+        launch_mode: parse_launch_mode(f.flag_enum(p, "launch-mode")?, p)?,
         overlay: f.flag_strings(p, "overlay")?,
         max_concurrent: f.flag_usize(p, "max-concurrent")?,
         issue_source: crate::data::issue::IssueSourceFlags { issue },

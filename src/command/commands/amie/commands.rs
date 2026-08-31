@@ -5,18 +5,18 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde::Serialize;
 
+use crate::command::commands::Command;
 use crate::command::commands::amie::daemon::{
     AmieDaemonCommand, AmieDaemonOutcome, AmieDaemonSubcommand, AmieLogsFlags, AmieStartFlags,
     AmieStatusFlags, AmieStopFlags,
 };
 use crate::command::commands::amie::gateway::{
-    ConditionDetail, ConditionGateway, CreateCondition, DaemonStatus, DEFAULT_RUN_HISTORY_LIMIT,
+    ConditionDetail, ConditionGateway, CreateCondition, DEFAULT_RUN_HISTORY_LIMIT, DaemonStatus,
 };
-use crate::command::commands::Command;
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
-use crate::data::fs::condition_store::{Condition, ConditionStatus, MountScope};
 use crate::data::fs::AmiePaths;
+use crate::data::fs::condition_store::{Condition, ConditionStatus, MountScope};
 use crate::data::message::UserMessageSink;
 
 #[derive(Debug, Clone)]
@@ -236,8 +236,7 @@ impl Command for AmieCommand {
                         // resolved through `AmiePaths::condition_dir`, which is
                         // `validate_under_root`-guarded, so a crafted name can
                         // never escape the conditions root.
-                        let removed_dir =
-                            remove_condition_dir(frontend.as_mut(), &name, yes)?;
+                        let removed_dir = remove_condition_dir(frontend.as_mut(), &name, yes)?;
                         Ok(AmieOutcome::Removed { name, removed_dir })
                     }
                     AmieSubcommand::Pause(name) => {
@@ -265,7 +264,8 @@ fn collect_condition_interview(
     let name = frontend.ask_condition_name()?;
     let description = frontend.ask_condition_description()?;
     let interval_raw = frontend.ask_condition_interval()?;
-    let interval_secs = crate::command::dispatch::parse_amie_interval(&["amie", "add"], &interval_raw)?;
+    let interval_secs =
+        crate::command::dispatch::parse_amie_interval(&["amie", "add"], &interval_raw)?;
     let repo_scope = frontend.ask_condition_repo()?;
     let agent = frontend.ask_condition_agent()?;
     let model = frontend.ask_condition_model()?;

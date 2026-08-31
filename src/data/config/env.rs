@@ -31,6 +31,9 @@ pub const AWMAN_API_KEY: &str = "AWMAN_API_KEY";
 /// for workflow execution.
 pub const AWMAN_MAX_CONCURRENT_AGENTS: &str = "AWMAN_MAX_CONCURRENT_AGENTS";
 
+/// `AWMAN_LAUNCH_MODE` — overrides the repository launch mode.
+pub const AWMAN_LAUNCH_MODE: &str = "AWMAN_LAUNCH_MODE";
+
 /// `XDG_CONFIG_HOME` — XDG base directory for user-specific configuration.
 pub const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 
@@ -114,6 +117,17 @@ impl EnvSnapshot {
         self.get(AWMAN_MAX_CONCURRENT_AGENTS)?.parse().ok()
     }
 
+    /// `AWMAN_LAUNCH_MODE` parsed as a launch mode, if set to a recognized
+    /// value. Invalid environment values are ignored, matching the tolerant
+    /// behavior of other typed environment accessors.
+    pub fn launch_mode(&self) -> Option<crate::data::config::repo::LaunchMode> {
+        match self.get(AWMAN_LAUNCH_MODE)? {
+            "stdio" => Some(crate::data::config::repo::LaunchMode::Stdio),
+            "acp" => Some(crate::data::config::repo::LaunchMode::Acp),
+            _ => None,
+        }
+    }
+
     /// `XDG_CONFIG_HOME` as a `PathBuf` if set and non-empty.
     pub fn xdg_config_home(&self) -> Option<PathBuf> {
         self.get(XDG_CONFIG_HOME)
@@ -147,6 +161,7 @@ impl Env {
             AWMAN_REMOTE_SESSION,
             AWMAN_API_KEY,
             AWMAN_MAX_CONCURRENT_AGENTS,
+            AWMAN_LAUNCH_MODE,
             XDG_CONFIG_HOME,
             XDG_DATA_HOME,
         ];

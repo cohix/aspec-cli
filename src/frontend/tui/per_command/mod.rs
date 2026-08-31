@@ -4,6 +4,7 @@
 //! `TuiCommandFrontend`, following the same pattern as
 //! `src/frontend/cli/per_command/`.
 
+mod acp_frontend;
 mod agent_auth;
 mod agent_setup;
 mod amie;
@@ -26,4 +27,5 @@ mod status;
 mod workflow_frontend;
 mod worktree_lifecycle;
 
+pub use acp_frontend::{AcpPromptReceiver, AcpPromptSender, TuiAcpFrontend};
 pub use container_frontend::TuiContainerProxy;

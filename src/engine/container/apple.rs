@@ -434,6 +434,16 @@ impl AgentInstance for AppleContainerInstance {
             return spawn_pty_bridged_apple(self, io, argv, seeded, started_at, handle, bridge_cfg);
         }
 
+        // ACP path: persistent piped stdio (no PTY), stdin kept open for the
+        // whole JSON-RPC session. Parity with the Docker backend is mandatory —
+        // shipping ACP only under Docker would be a platform-inconsistent
+        // regression (WI 0104 Edge Case Considerations).
+        if self.options.acp {
+            return spawn_piped_interactive_apple(
+                self, io, argv, seeded, started_at, handle, bridge_cfg,
+            );
+        }
+
         // Piped path
         spawn_piped_apple(self, io, argv, seeded, started_at, handle, bridge_cfg)
     }
@@ -581,6 +591,79 @@ fn spawn_piped_apple(
         pty_child: None,
         pty_master: None,
         stdin_injector: None,
+        container_name: instance.name.0.clone(),
+        started_at,
+    };
+    Ok(AgentExecution::new(
+        handle,
+        Box::new(backend),
+        bridge.stuck_tx,
+        Some(bridge.output_tail),
+    ))
+}
+
+/// Spawn `container run -i` (no PTY) with piped stdio for an ACP session and
+/// bridge through `AgentIo`.
+///
+/// The Apple-backend sibling of `docker.rs::spawn_piped_interactive_docker`,
+/// and the persistent-piped counterpart of [`spawn_piped_apple`]. The one
+/// difference from `spawn_piped_apple` — and the whole point — is that it does
+/// **not** `drop(bridge.stdin_injector)`: the stdin channel is retained on the
+/// `AppleExecution` for the session's entire lifetime, exactly as
+/// [`spawn_pty_bridged_apple`] keeps its PTY master alive. That keeps the
+/// container's stdin pipe open so the ACP driver can write JSON-RPC request
+/// lines (via `try_inject_stdin`) across a full bidirectional exchange.
+///
+/// No seeded prompt is written to stdin: an ACP session delivers its prompt
+/// over the JSON-RPC channel (`session/prompt`), so writing raw text to stdin
+/// would corrupt the newline-delimited framing. `_seeded` is accepted only to
+/// keep the signature parallel with `spawn_piped_apple`.
+///
+/// Security: identical wiring to `spawn_piped_apple` — the JSON-RPC bytes ride
+/// the stdio pipes `-i` already wires up. No ports, no `--network`, no new
+/// mounts (see `aspec/architecture/security.md`).
+fn spawn_piped_interactive_apple(
+    instance: Box<AppleContainerInstance>,
+    io: crate::engine::agent_runtime::frontend::AgentIo,
+    argv: Vec<String>,
+    _seeded: Option<String>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    handle: crate::data::session::AgentHandle,
+    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
+) -> Result<AgentExecution, EngineError> {
+    let mut cmd = Command::new("container");
+    cmd.args(&argv);
+    // Agent credentials are passed as name-only `-e KEY` in argv; set their
+    // values on the `container` child's environment so the CLI resolves them
+    // without the secret ever touching the argument vector.
+    for (k, v) in &instance.options.agent_credentials {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            EngineError::ContainerRuntimeUnavailable {
+                binary: "container".into(),
+            }
+        } else {
+            EngineError::Container(format!("spawn container: {e}"))
+        }
+    })?;
+
+    let bridge = crate::engine::container::io_bridge::bridge_piped(io, &mut child, bridge_cfg);
+
+    // Persistent-piped (ACP) path: KEEP the stdin_injector alive (do NOT drop
+    // it, unlike `spawn_piped_apple`). Retaining the sender both enables
+    // `try_inject_stdin` and prevents the writer task from ever seeing EOF, so
+    // the container's stdin pipe stays open for the whole JSON-RPC session.
+    let backend = AppleExecution {
+        child: Some(child),
+        pty_child: None,
+        pty_master: None,
+        stdin_injector: Some(bridge.stdin_injector),
         container_name: instance.name.0.clone(),
         started_at,
     };

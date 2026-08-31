@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use crate::data::config::effective::EffectiveConfig;
+use crate::data::config::repo::LaunchMode;
 use crate::data::image_tags::{agent_image_tag, project_image_tag};
 use crate::data::repo_dockerfile_paths::RepoDockerfilePaths;
 use crate::data::session::{AgentName, Session};
@@ -39,6 +40,12 @@ pub struct AgentRunOptions {
     pub yolo: Option<crate::engine::container::options::YoloMode>,
     pub auto: Option<crate::engine::container::options::AutoMode>,
     pub plan: Option<crate::engine::container::options::PlanMode>,
+    /// How awman talks to the agent process's stdio: raw PTY/stdio
+    /// (`LaunchMode::Stdio`, the default and today's behaviour) or a
+    /// newline-delimited JSON-RPC 2.0 ACP channel (`LaunchMode::Acp`). Threaded
+    /// through exactly like `plan`/`yolo`/`auto`; `Default` is `Stdio`, so
+    /// existing call sites keep raw-stdio behaviour with no change.
+    pub launch_mode: LaunchMode,
     pub allowed_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
     pub initial_prompt: Option<String>,
@@ -196,6 +203,16 @@ impl AgentEngine {
                 agent: agent.as_str().to_string(),
             });
         }
+        // Validate ACP support. Every launch path (direct chat/exec prompt and
+        // each exec workflow step) funnels through build_options, so this single
+        // guard guarantees an agent that doesn't speak ACP can never reach a
+        // container with JSON-RPC framing, regardless of any Layer 2 pre-flight
+        // decision. Mirrors the plan-mode-unsupported check above.
+        if matches!(run.launch_mode, LaunchMode::Acp) && !matrix.supports_acp {
+            return Err(EngineError::AcpUnsupported {
+                agent: agent.as_str().to_string(),
+            });
+        }
         // Plan + yolo are mutually exclusive — engine layer detection.
         if matches!(run.plan, Some(PlanMode::Enabled))
             && matches!(run.yolo, Some(YoloMode::Enabled))
@@ -210,7 +227,18 @@ impl AgentEngine {
             .clone()
             .unwrap_or_else(|| agent_image_tag(session.git_root(), agent.as_str()));
         let image = ImageRef::new(image_tag.clone());
-        let entrypoint = agent_matrix::entrypoint_for(&matrix, run.non_interactive);
+        // ACP launches use the agent's ACP entrypoint (e.g. `cline --acp`) and
+        // select the persistent piped-stdio container path instead of a PTY, so
+        // the JSON-RPC 2.0 framing never passes through a terminal's cooked-mode
+        // layer. The guard above has already rejected `Acp` for any agent whose
+        // matrix lacks an `acp_entrypoint`, so `entrypoint_for_acp` cannot fail
+        // here in practice — the `?` is defence-in-depth.
+        let acp = matches!(run.launch_mode, LaunchMode::Acp);
+        let entrypoint = if acp {
+            agent_matrix::entrypoint_for_acp(&matrix)?
+        } else {
+            agent_matrix::entrypoint_for(&matrix, run.non_interactive)
+        };
 
         let mut options = vec![
             ContainerOption::Image(image),
@@ -222,6 +250,13 @@ impl AgentEngine {
                 value: session.id().to_string(),
             },
         ];
+
+        // Select the persistent piped-stdio (`-i`, no PTY) container path when
+        // launching over ACP. Emitted only when actually ACP so ordinary stdio
+        // launches keep today's PTY/one-shot-piped behaviour untouched.
+        if acp {
+            options.push(ContainerOption::Acp(true));
+        }
 
         // Mode flags.
         if let Some(y) = run.yolo {
@@ -435,6 +470,24 @@ impl AgentEngine {
             return Err(EngineError::PlanModeUnsupported {
                 agent: agent.as_str().to_string(),
             });
+        }
+        // ACP guards. First the same `supports_acp` check the container path
+        // runs, so an unsupported agent surfaces `AcpUnsupported` identically on
+        // both paradigms. Then, because ACP is a container-paradigm-only launch
+        // mode (`ContainerOption::Acp` has no sandbox equivalent — the sandbox
+        // `ResolvedSandboxOptions` type carries no ACP-piping option), a sandbox
+        // launch that survived the first guard (e.g. cline under `docker-sbx-
+        // experimental`) is rejected as `NotImplemented` per the WI 0089
+        // convention rather than silently launching in the wrong (stdio) mode.
+        if matches!(run.launch_mode, LaunchMode::Acp) {
+            if !matrix.supports_acp {
+                return Err(EngineError::AcpUnsupported {
+                    agent: agent.as_str().to_string(),
+                });
+            }
+            return Err(EngineError::NotImplemented(
+                "ACP launch mode is not supported by sandbox-class runtimes",
+            ));
         }
         if matches!(run.plan, Some(PlanMode::Enabled))
             && matches!(run.yolo, Some(YoloMode::Enabled))
@@ -841,6 +894,107 @@ mod tests {
         assert!(
             matches!(result, Err(EngineError::PlanModeUnsupported { .. })),
             "expected PlanModeUnsupported for opencode with plan mode, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_options_rejects_acp_for_unsupported_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, session) = make_agent_engine(tmp.path());
+        // codex does not support ACP (only cline does today).
+        let agent = crate::data::session::AgentName::new("codex").unwrap();
+        let run = AgentRunOptions {
+            launch_mode: LaunchMode::Acp,
+            ..Default::default()
+        };
+        let result = engine.build_options(&session, &agent, &run);
+        assert!(
+            matches!(result, Err(EngineError::AcpUnsupported { .. })),
+            "expected AcpUnsupported for codex with ACP launch mode, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_options_acp_for_cline_emits_acp_option_and_acp_entrypoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, session) = make_agent_engine(tmp.path());
+        let agent = crate::data::session::AgentName::new("cline").unwrap();
+        let run = AgentRunOptions {
+            launch_mode: LaunchMode::Acp,
+            ..Default::default()
+        };
+        let opts = engine.build_options(&session, &agent, &run).unwrap();
+
+        assert!(
+            opts.iter().any(|o| matches!(o, ContainerOption::Acp(true))),
+            "cline + ACP must emit ContainerOption::Acp(true); got {opts:?}"
+        );
+        let entrypoint = opts
+            .iter()
+            .find_map(|o| {
+                if let ContainerOption::Entrypoint(e) = o {
+                    Some(e.0.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("Entrypoint option must be present");
+        assert_eq!(
+            entrypoint,
+            vec!["cline".to_string(), "--acp".to_string()],
+            "cline ACP launch must use the `cline --acp` entrypoint"
+        );
+    }
+
+    #[test]
+    fn build_options_stdio_launch_mode_emits_no_acp_option() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, session) = make_agent_engine(tmp.path());
+        // cline supports ACP, but the default Stdio launch mode must not opt in.
+        let agent = crate::data::session::AgentName::new("cline").unwrap();
+        let opts = engine
+            .build_options(&session, &agent, &AgentRunOptions::default())
+            .unwrap();
+        assert!(
+            !opts.iter().any(|o| matches!(o, ContainerOption::Acp(_))),
+            "default (Stdio) launch mode must not emit a ContainerOption::Acp; got {opts:?}"
+        );
+    }
+
+    #[test]
+    fn build_sandbox_options_acp_for_cline_is_not_implemented() {
+        // cline passes the supports_acp guard, but the sandbox paradigm has no
+        // ACP-piping option, so the request surfaces NotImplemented rather than
+        // silently launching in stdio mode (WI 0089 convention).
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, session) = make_agent_engine(tmp.path());
+        let agent = crate::data::session::AgentName::new("cline").unwrap();
+        let run = AgentRunOptions {
+            launch_mode: LaunchMode::Acp,
+            ..Default::default()
+        };
+        let result = engine.build_sandbox_options(&session, &agent, &run);
+        assert!(
+            matches!(result, Err(EngineError::NotImplemented(_))),
+            "expected NotImplemented for cline + ACP on the sandbox path, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_sandbox_options_acp_for_unsupported_agent_is_acp_unsupported() {
+        // An agent that doesn't support ACP fails the supports_acp guard first,
+        // so both paradigms surface AcpUnsupported consistently.
+        let tmp = tempfile::tempdir().unwrap();
+        let (engine, session) = make_agent_engine(tmp.path());
+        let agent = crate::data::session::AgentName::new("codex").unwrap();
+        let run = AgentRunOptions {
+            launch_mode: LaunchMode::Acp,
+            ..Default::default()
+        };
+        let result = engine.build_sandbox_options(&session, &agent, &run);
+        assert!(
+            matches!(result, Err(EngineError::AcpUnsupported { .. })),
+            "expected AcpUnsupported for codex + ACP on the sandbox path, got {result:?}"
         );
     }
 

@@ -39,6 +39,12 @@ pub enum EngineError {
     #[error("sandbox backend error: {0}")]
     Sandbox(String),
 
+    #[error("agent '{agent}' does not support ACP")]
+    AcpUnsupported { agent: String },
+
+    #[error("ACP error: {0}")]
+    Acp(String),
+
     #[error(
         "runtime '{runtime}' was given {got}-paradigm options; \
          this indicates a Layer 2 dispatch bug"

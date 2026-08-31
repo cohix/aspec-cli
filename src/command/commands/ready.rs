@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::command::commands::{resolve_agent, Command};
+use crate::command::commands::{Command, resolve_agent};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::message::{MessageLevel, UserMessage};

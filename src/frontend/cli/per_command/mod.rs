@@ -25,6 +25,7 @@ mod init;
 mod ready;
 
 // Engine-level frontend trait impls used by multiple commands.
+mod acp_frontend;
 mod agent_auth;
 mod agent_setup;
 mod container_frontend_marker;

@@ -1346,8 +1346,8 @@ const REMOTE_EXEC_PROMPT: CommandSpec = CommandSpec {
 //
 // Per the work item: `remote exec workflow` accepts the same flags as the
 // local `exec workflow`, minus flags that make no sense remotely (`--workdir`
-// is implicit, `--worktree` is a server-side concern). Plus remote-transport
-// flags (--remote-addr, --session, --api-key, --follow).
+// is implicit and `--worktree` is a server-side concern). Plus remote-transport
+// flags (`--remote-addr`, `--session`, `--api-key`, `--follow`).
 //
 // The flag list is built at compile time by const fn so that any future
 // addition to AGENT_RUN_FLAGS_NO_WORKTREE / EXEC_WORKFLOW_FLAGS is picked up
@@ -1814,7 +1814,7 @@ const NEW_SKILL: CommandSpec = CommandSpec {
 /// Agent-run flag set used by `chat` and `exec prompt` (no worktree, no
 /// workflow). All optional. Mode flags `yolo` / `auto` / `plan` are mutually
 /// exclusive.
-const AGENT_RUN_FLAGS_NO_WORKTREE: [FlagSpec; 8] = [
+const AGENT_RUN_FLAGS_NO_WORKTREE: [FlagSpec; 9] = [
     FlagSpec {
         long: "non-interactive",
         short: Some('n'),
@@ -1843,6 +1843,17 @@ const AGENT_RUN_FLAGS_NO_WORKTREE: [FlagSpec; 8] = [
         help: "Mount the host Docker daemon socket into the agent container.",
         kind: FlagKind::Bool,
         default: FlagDefault::Bool(false),
+        frontends: FrontendVisibility::All,
+        conflicts_with: &[],
+        implies: &[],
+        optional: true,
+    },
+    FlagSpec {
+        long: "launch-mode",
+        short: None,
+        help: "Launch the agent over stdio or ACP.",
+        kind: FlagKind::Enum(&["stdio", "acp"]),
+        default: FlagDefault::None,
         frontends: FrontendVisibility::All,
         conflicts_with: &[],
         implies: &[],
@@ -1907,7 +1918,7 @@ const AGENT_RUN_FLAGS_NO_WORKTREE: [FlagSpec; 8] = [
 
 /// Agent-run flags for `exec prompt` — extends `AGENT_RUN_FLAGS_NO_WORKTREE`
 /// with `--issue`. Scoped to `exec prompt` only; `chat` retains the base set.
-const EXEC_PROMPT_FLAGS: [FlagSpec; 9] = [
+const EXEC_PROMPT_FLAGS: [FlagSpec; 10] = [
     FlagSpec {
         long: "non-interactive",
         short: Some('n'),
@@ -1936,6 +1947,17 @@ const EXEC_PROMPT_FLAGS: [FlagSpec; 9] = [
         help: "Mount the host Docker daemon socket into the agent container.",
         kind: FlagKind::Bool,
         default: FlagDefault::Bool(false),
+        frontends: FrontendVisibility::All,
+        conflicts_with: &[],
+        implies: &[],
+        optional: true,
+    },
+    FlagSpec {
+        long: "launch-mode",
+        short: None,
+        help: "Launch the agent over stdio or ACP.",
+        kind: FlagKind::Enum(&["stdio", "acp"]),
+        default: FlagDefault::None,
         frontends: FrontendVisibility::All,
         conflicts_with: &[],
         implies: &[],
@@ -2009,7 +2031,7 @@ const EXEC_PROMPT_FLAGS: [FlagSpec; 9] = [
     },
 ];
 
-const EXEC_WORKFLOW_FLAGS: [FlagSpec; 14] = [
+const EXEC_WORKFLOW_FLAGS: [FlagSpec; 15] = [
     FlagSpec {
         long: "work-item",
         short: None,
@@ -2049,6 +2071,17 @@ const EXEC_WORKFLOW_FLAGS: [FlagSpec; 14] = [
         help: "Mount the host Docker daemon socket into the agent container.",
         kind: FlagKind::Bool,
         default: FlagDefault::Bool(false),
+        frontends: FrontendVisibility::All,
+        conflicts_with: &[],
+        implies: &[],
+        optional: true,
+    },
+    FlagSpec {
+        long: "launch-mode",
+        short: None,
+        help: "Launch the agent over stdio or ACP.",
+        kind: FlagKind::Enum(&["stdio", "acp"]),
+        default: FlagDefault::None,
         frontends: FrontendVisibility::All,
         conflicts_with: &[],
         implies: &[],
@@ -2736,5 +2769,46 @@ mod tests {
             .removed_flag_hint(["chat", "--mount-ssh-extra"])
             .is_none());
         assert!(cat.removed_flag_hint(Vec::<String>::new()).is_none());
+    }
+
+    #[test]
+    fn launch_mode_rejects_unknown_enum_value() {
+        let cat = CommandCatalogue::get();
+        let err = cat
+            .parse_raw_args(
+                &["exec", "prompt"],
+                &["--launch-mode".to_string(), "bogus".to_string()],
+            )
+            .expect_err("an unrecognized launch mode must be rejected");
+
+        match err {
+            crate::command::error::CommandError::InvalidFlagValue {
+                command,
+                flag,
+                reason,
+            } => {
+                assert_eq!(command, vec!["exec".to_string(), "prompt".to_string()]);
+                assert_eq!(flag, "launch-mode");
+                assert_eq!(reason, "'bogus' is not one of [\"stdio\", \"acp\"]");
+            }
+            other => panic!("expected InvalidFlagValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn launch_mode_is_registered_on_each_local_agent_command() {
+        let cat = CommandCatalogue::get();
+        let paths: &[&[&str]] = &[&["chat"], &["exec", "prompt"], &["exec", "workflow"]];
+        for path in paths {
+            let command = cat.lookup(path).expect("agent command must exist");
+            let flag = command
+                .find_flag("launch-mode")
+                .expect("agent command must expose --launch-mode");
+            assert!(flag.optional);
+            match flag.kind {
+                FlagKind::Enum(values) => assert_eq!(values, &["stdio", "acp"]),
+                other => panic!("expected enum flag, got {other:?}"),
+            }
+        }
     }
 }

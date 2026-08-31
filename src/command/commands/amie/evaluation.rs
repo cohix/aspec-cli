@@ -17,23 +17,23 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use crate::command::commands::Command;
 use crate::command::commands::amie::runtime_guard::require_container_tier;
 use crate::command::commands::dynamic_repair::{RepairDecision, WorkflowRepairLoop};
 use crate::command::commands::exec_workflow::{
+    ExecWorkflowCommand, ExecWorkflowCommandFlags, ExecWorkflowCommandFrontend, LeaderSpec,
     build_effective_agents_to_models, ensure_agent_image, format_agents_with_models,
-    format_available_agents, validate_generated_workflow, ExecWorkflowCommand,
-    ExecWorkflowCommandFlags, ExecWorkflowCommandFrontend, LeaderSpec,
+    format_available_agents, validate_generated_workflow,
 };
 use crate::command::commands::mount_scope::MountScopeDecision;
-use crate::command::commands::Command;
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
+use crate::data::EngineWorkflowStateStore;
 use crate::data::config::env::EnvSnapshot;
 use crate::data::dynamic_workflow_assets::build_amie_leader_prompt;
 use crate::data::fs::condition_store::{Condition, MountScope};
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::data::session::{AgentName, Session, SessionOpenOptions};
-use crate::data::EngineWorkflowStateStore;
 use crate::engine::agent::AgentRunOptions;
 use crate::engine::agent_runtime::frontend::AgentFrontend;
 use crate::engine::amie::{
@@ -281,7 +281,7 @@ impl LocalConditionEvaluator {
             )) {
                 RepairDecision::Accepted(workflow) => break *workflow,
                 RepairDecision::Exhausted(message) => {
-                    return Ok(EvaluationOutcome::Failed { error: message })
+                    return Ok(EvaluationOutcome::Failed { error: message });
                 }
                 RepairDecision::Retry { attempt, error } => {
                     tracing::warn!(
@@ -413,6 +413,7 @@ fn amie_workflow_flags(workflow_path: &Path) -> ExecWorkflowCommandFlags {
         auto: false,
         agent: None,
         model: None,
+        launch_mode: None,
         overlay: Vec::new(),
         max_concurrent: None,
         issue_source: Default::default(),

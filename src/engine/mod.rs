@@ -8,6 +8,7 @@
 //! No upward calls. When an engine needs user I/O, it accepts a frontend
 //! trait *defined here* and Layer 3 implements it.
 
+pub mod acp;
 pub mod agent;
 pub mod agent_runtime;
 pub mod amie;

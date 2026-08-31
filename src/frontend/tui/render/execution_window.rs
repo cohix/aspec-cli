@@ -19,7 +19,10 @@ use super::*;
 pub(super) fn render_execution_window(app: &mut App, area: Rect, frame: &mut Frame) {
     let tab = app.active_tab();
     let focused = app.focus == Focus::ExecutionWindow;
-    let border_color = window_border_color(&tab.execution_phase, focused);
+    // The execution window borrows the ACP identity color in its one green
+    // (focused + Done) state when the focused agent slot is an ACP window.
+    let acp = tab.focused_slot().is_some_and(|s| s.is_acp());
+    let border_color = window_border_color(&tab.execution_phase, focused, acp);
     let title = phase_label(&tab.execution_phase);
 
     let container_maximized = tab.container_overlay_active();

@@ -15,6 +15,7 @@ Created by `awman init`; commit it so the whole team shares the same setup.
 ```json
 {
   "agent": "claude",
+  "launchMode": "stdio",
   "terminal_scrollback_lines": 10000,
   "dockerfile": "docker/Dockerfile.base",
   "yoloDisallowedTools": ["Bash"],
@@ -45,6 +46,7 @@ Applies to every project on the machine unless a repo overrides it.
 ```json
 {
   "default_agent": "claude",
+  "launchModeFallback": "error",
   "runtime": "docker",
   "terminal_scrollback_lines": 10000,
   "yoloDisallowedTools": ["Bash"],
@@ -114,6 +116,18 @@ Examples:
 - `awman exec workflow ... --max-concurrent 4` beats `AWMAN_MAX_CONCURRENT_AGENTS`, which beats `maxConcurrentAgents` in repo config, which beats `maxConcurrentAgents` in global config.
 - With nothing set anywhere, built-in defaults apply: 10,000 scrollback lines, 30-second agent-stuck timeout, 2 API workers, API port 9876, unlimited concurrent agents per workflow.
 
+Launch mode follows the same order where those sources apply:
+
+```
+--launch-mode  >  AWMAN_LAUNCH_MODE  >  repo launchMode  >  stdio
+```
+
+`launchMode` is a repository setting; there is no global `launchMode` value.
+`launchModeFallback` is global-only and follows `global launchModeFallback >
+error`. Its setting matters when ACP was requested but the selected agent does
+not support ACP: `error` stops the launch, while `stdio` permits a visible
+fallback to the regular mode.
+
 Two wrinkles:
 
 - **List fields replace, they don't merge.** A repo `yoloDisallowedTools` list completely replaces the global one — even an empty list. To inherit the global list, omit the field from the repo config.
@@ -179,6 +193,27 @@ awman config set --global runtime docker-sbx-experimental # experimental
 ```
 
 See [Runtimes](#runtimes) below.
+
+### Choose ACP launch mode
+
+To use ACP by default in this repository, add the following field to
+`.awman/config.json`:
+
+```json
+{ "launchMode": "acp" }
+```
+
+The allowed values are `"stdio"` (the default) and `"acp"`. To choose what
+happens when a workflow step's agent does not support ACP, add
+`launchModeFallback` to `$HOME/.awman/config.json`:
+
+```json
+{ "launchModeFallback": "stdio" }
+```
+
+Its allowed values are `"error"` (the default) and `"stdio"`. The command-line
+flag takes priority over both the environment variable and repository setting;
+see [ACP Mode](17-acp-mode.md).
 
 ### Custom work item paths
 
@@ -301,6 +336,7 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | JSON key | Type | Default | Meaning | Settable via `config set` |
 |----------|------|---------|---------|---------------------------|
 | `agent` | string | (unset → global `default_agent`) | Agent for this repo | yes (repo or global scope) |
+| `launchMode` | `"stdio"` \| `"acp"` | `"stdio"` | Default agent launch mode for this repo | no (edit file) |
 | `auto_agent_auth_accepted` | bool | (unset) | Records that you accepted the agent auth consent prompt; managed by awman, shown read-only | no (managed) |
 | `terminal_scrollback_lines` | integer | 10000 | Scrollback lines in the container terminal | yes |
 | `yoloDisallowedTools` | string array | `[]` | Tools forbidden under `--yolo`; replaces the global list entirely | yes |
@@ -336,6 +372,7 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `remote.defaultAPIKey` | string | (unset) | API key for the default remote server; only sent when the target address matches `remote.defaultAddr` | yes |
 | `remote.savedDirs` | string array | `[]` | Remote-host paths shown in the `remote session start` picker — see [Remote Mode](10-remote-mode.md) | no (edit file) |
 | `amie` | object | (unset) | Global amie daemon settings; see [Amie daemon configuration](#amie-daemon-configuration) | no (edit file) |
+| `launchModeFallback` | `"stdio"` \| `"error"` | `"error"` | What to do when a requested ACP launch uses an agent without ACP support | no (edit file) |
 
 ### `awman config` subcommands
 
@@ -372,6 +409,10 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `dynamicWorkflows.defaultLeader` | repo only |
 | `dynamicWorkflows.maxConcurrentSteps` | repo only |
 
+`launchMode` and `launchModeFallback` are currently config-file-only fields;
+they are not accepted by `config set` or `config get`. Edit the JSON files
+shown above directly.
+
 Value handling:
 
 - `yoloDisallowedTools`, `overlays`, `api.workDirs` — comma-separated values are stored as arrays; an empty string stores an empty array.
@@ -390,6 +431,7 @@ Value handling:
 | `XDG_DATA_HOME` | Global data (workflows, skills, worktrees, API state, and the shared database) goes to `$XDG_DATA_HOME/awman/` |
 | `AWMAN_API_ROOT` | Relocate only the API server storage root |
 | `AWMAN_OVERLAYS` | Comma-separated overlay specs (e.g. `env(TOKEN),dir(/a:/b:ro)`); merged with config and flags — see [Overlays](08-overlays.md) |
+| `AWMAN_LAUNCH_MODE` | Choose `stdio` or `acp`; overrides repo `launchMode` and is overridden by `--launch-mode` |
 | `AWMAN_MAX_CONCURRENT_AGENTS` | Cap on concurrently-running workflow steps; beats `maxConcurrentAgents` in repo/global config, beaten by `--max-concurrent` — see [Parallel Workflows](15-parallel-workflows.md) |
 | `AWMAN_REMOTE_ADDR` | Remote API server address; beats `remote.defaultAddr`, beaten by `--remote-addr` |
 | `AWMAN_API_KEY` | Remote API key; beats `remote.defaultAPIKey`, beaten by `--api-key` |

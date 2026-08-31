@@ -340,4 +340,4 @@ always tell what's running unattended versus what you started yourself. See
 
 ---
 
-[← Parallel Workflows](15-parallel-workflows.md) · [← Back to contents](contents.md)
+[← Parallel Workflows](15-parallel-workflows.md) · [Next: ACP Mode →](17-acp-mode.md) · [← Back to contents](contents.md)

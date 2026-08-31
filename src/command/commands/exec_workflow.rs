@@ -1,5 +1,6 @@
 //! `ExecWorkflowCommand` — run a workflow file.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,21 +8,21 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde::Serialize;
 
+use crate::command::commands::Command;
 use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::{MountScope, MountScopeFrontend};
 use crate::command::commands::worktree_lifecycle::{WorktreeLifecycle, WorktreeLifecycleFrontend};
-use crate::command::commands::Command;
 use crate::command::commands::{
-    collect_all_overlay_specs, parse_overlay_list, resolve_context_overlays, warn_legacy_config,
-    TypedOverlay,
+    TypedOverlay, collect_all_overlay_specs, parse_overlay_list, resolve_context_overlays,
+    warn_legacy_config,
 };
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::data::session::Session;
 use crate::data::workflow_definition::{Workflow, WorkflowStep};
-use crate::data::workflow_prompt_template::{substitute_prompt, WorkItemContext};
+use crate::data::workflow_prompt_template::{WorkItemContext, substitute_prompt};
 use crate::engine::agent::AgentRunOptions;
 use crate::engine::agent_runtime::execution::AgentExitInfo;
 use crate::engine::agent_runtime::frontend::AgentFrontend;
@@ -53,6 +54,7 @@ pub struct ExecWorkflowCommandFlags {
     pub auto: bool,
     pub agent: Option<String>,
     pub model: Option<String>,
+    pub launch_mode: Option<crate::data::config::repo::LaunchMode>,
     pub overlay: Vec<String>,
     pub max_concurrent: Option<usize>,
     pub issue_source: crate::data::issue::IssueSourceFlags,
@@ -424,38 +426,47 @@ impl WorkflowFrontend for WorkflowProxy {
 // Passed to `AgentInstance::run_with_frontend`. The current Docker backend
 // discards it; a future PTY-wiring backend will use it.
 
-struct AgentFrontendProxy(Arc<Mutex<Box<dyn ExecWorkflowCommandFrontend>>>);
+struct AgentFrontendProxy {
+    frontend: Arc<Mutex<Box<dyn ExecWorkflowCommandFrontend>>>,
+    acp: bool,
+}
 
 #[async_trait]
 impl AgentFrontend for AgentFrontendProxy {
     fn report_status(&mut self, status: crate::engine::agent_runtime::frontend::AgentStatus) {
-        self.0.lock().unwrap().report_status(status);
+        self.frontend.lock().unwrap().report_status(status);
     }
 
     fn report_progress(&mut self, progress: crate::engine::agent_runtime::frontend::AgentProgress) {
-        self.0.lock().unwrap().report_progress(progress);
+        self.frontend.lock().unwrap().report_progress(progress);
     }
 
     fn take_io(&mut self) -> crate::engine::agent_runtime::frontend::AgentIo {
-        self.0.lock().unwrap().take_io()
+        let mut io = self.frontend.lock().unwrap().take_io();
+        if self.acp {
+            // ACP framing is line-delimited JSON, never a PTY stream.
+            io.initial_size = None;
+            io.resize = None;
+        }
+        io
     }
 
     fn grace_timeout(&self) -> std::time::Duration {
-        self.0.lock().unwrap().grace_timeout()
+        self.frontend.lock().unwrap().grace_timeout()
     }
 
     fn stuck_timeout(&self) -> std::time::Duration {
-        self.0.lock().unwrap().stuck_timeout()
+        self.frontend.lock().unwrap().stuck_timeout()
     }
 }
 
 impl UserMessageSink for AgentFrontendProxy {
     fn write_message(&mut self, msg: UserMessage) {
-        self.0.lock().unwrap().write_message(msg);
+        self.frontend.lock().unwrap().write_message(msg);
     }
 
     fn replay_queued(&mut self) {
-        self.0.lock().unwrap().replay_queued();
+        self.frontend.lock().unwrap().replay_queued();
     }
 }
 
@@ -479,6 +490,8 @@ struct CommandLayerFactory {
     /// amie identity to stamp on every step container, when this is an
     /// amie-generated workflow. `None` for an ordinary `exec workflow`.
     amie_identity: Option<crate::engine::amie::launcher::AmieContainerIdentity>,
+    /// Fixed by workflow pre-flight before any step can launch.
+    launch_modes: Arc<HashMap<String, crate::data::config::repo::LaunchMode>>,
 }
 
 impl AgentExecutionFactory for CommandLayerFactory {
@@ -526,6 +539,11 @@ impl AgentExecutionFactory for CommandLayerFactory {
             yolo: self.flags.yolo.then_some(YoloMode::Enabled),
             auto: self.flags.auto.then_some(AutoMode::Enabled),
             plan: self.flags.plan.then_some(PlanMode::Enabled),
+            launch_mode: self
+                .launch_modes
+                .get(&step.name)
+                .copied()
+                .unwrap_or_default(),
             allowed_tools: vec![],
             disallowed_tools: vec![],
             initial_prompt: Some(substitution.rendered),
@@ -570,7 +588,10 @@ impl AgentExecutionFactory for CommandLayerFactory {
             None => resolved,
         };
         let instance = self.engines.runtime.build(resolved)?;
-        let proxy = AgentFrontendProxy(Arc::clone(&self.shared));
+        let proxy = AgentFrontendProxy {
+            frontend: Arc::clone(&self.shared),
+            acp: run_opts.launch_mode == crate::data::config::repo::LaunchMode::Acp,
+        };
         instance.run_with_frontend(Box::new(proxy))
     }
 
@@ -703,6 +724,19 @@ impl Command for ExecWorkflowCommand {
         // be empty.
         warn_context_workflow_in_phase(&workflow, frontend.as_mut());
         let _ = gemini_warning_emitted;
+
+        // ACP compatibility is a workflow-wide pre-flight check.  Do it
+        // before mount scope, worktree preparation, image setup, overlays, or
+        // the workflow engine so `fallback: error` cannot leave partial work.
+        let launch_modes = match validate_workflow_acp_preflight(
+            &workflow,
+            &self.session,
+            &self.flags,
+            frontend.as_mut(),
+        ) {
+            Ok(modes) => modes,
+            Err(e) => return Err(CommandError::from(e)),
+        };
 
         // 2. Resolve mount scope — confirm with the user when cwd differs from git root.
         let cwd = self.session.working_dir().to_path_buf();
@@ -999,6 +1033,7 @@ impl Command for ExecWorkflowCommand {
             cwd,
             original_session: self.session,
             issue_temp_file: _issue_temp_file,
+            launch_modes,
         };
         execute_prepared(
             &self.flags,
@@ -1036,6 +1071,7 @@ struct PreparedRun {
     /// Kept alive for the duration of the run; its Drop removes the issue temp
     /// file. `None` for non-issue invocations.
     issue_temp_file: Option<IssueTempFile>,
+    launch_modes: HashMap<String, crate::data::config::repo::LaunchMode>,
 }
 
 /// Execute a fully-prepared workflow: persisted-state resume check, engine
@@ -1061,6 +1097,7 @@ async fn execute_prepared(
         cwd,
         original_session,
         issue_temp_file: _issue_temp_file,
+        launch_modes,
     } = prepared;
     let mut frontend = frontend;
 
@@ -1243,6 +1280,7 @@ async fn execute_prepared(
             image_git_root: git_root_for_scope.clone(),
             workflow_overlays: workflow_overlays_for_factory,
             amie_identity: amie_identity.cloned(),
+            launch_modes: Arc::new(launch_modes),
         };
         let mut engine = match WorkflowEngine::resume(
             &session,
@@ -1579,6 +1617,7 @@ fn workflow_flag_config(flags: &ExecWorkflowCommandFlags) -> crate::data::config
     crate::data::config::FlagConfig {
         agent: flags.agent.clone(),
         model: flags.model.clone(),
+        launch_mode: flags.launch_mode,
         yolo: Some(flags.yolo),
         auto: Some(flags.auto),
         non_interactive: Some(flags.non_interactive),
@@ -1590,6 +1629,85 @@ fn workflow_flag_config(flags: &ExecWorkflowCommandFlags) -> crate::data::config
         max_concurrent_agents: flags.max_concurrent,
         ..Default::default()
     }
+}
+
+/// Resolve launch mode for every main workflow step before the engine is
+/// constructed.  Returning a complete map makes the result immutable command
+/// policy: a later step cannot discover an unsupported ACP agent after an
+/// earlier step has already launched.
+pub(crate) fn validate_workflow_acp_preflight(
+    workflow: &Workflow,
+    session: &Session,
+    flags: &ExecWorkflowCommandFlags,
+    sink: &mut dyn UserMessageSink,
+) -> Result<HashMap<String, crate::data::config::repo::LaunchMode>, EngineError> {
+    use crate::data::config::global::LaunchModeFallback;
+    use crate::data::config::repo::LaunchMode;
+
+    let current = session.effective_config();
+    let config = crate::data::config::effective::EffectiveConfig::new(
+        workflow_flag_config(flags),
+        current.env().clone(),
+        current.repo().clone(),
+        current.global().clone(),
+    );
+    let requested = config.launch_mode();
+    let effective_default_agent = config.agent();
+    let mut modes = HashMap::with_capacity(workflow.steps.len());
+    for step in &workflow.steps {
+        let agent_name = step
+            .agent
+            .as_deref()
+            .or(workflow.agent.as_deref())
+            .or(effective_default_agent.as_deref())
+            .ok_or_else(|| {
+                EngineError::Other(format!(
+                    "workflow step '{}' resolves to no agent",
+                    step.name
+                ))
+            })?;
+        let agent = crate::data::session::AgentName::new(agent_name).map_err(EngineError::Data)?;
+        let mode = if requested == LaunchMode::Acp
+            && !crate::engine::agent::agent_matrix::matrix_for(agent.as_str())?.supports_acp
+        {
+            if config.launch_mode_fallback() == LaunchModeFallback::Error {
+                return Err(EngineError::Other(format!(
+                    "workflow ACP pre-flight failed: step '{}' uses agent '{}', which does not support ACP",
+                    step.name,
+                    agent.as_str()
+                )));
+            }
+            sink.write_message(UserMessage {
+                level: MessageLevel::Warning,
+                text: format!(
+                    "workflow step '{}': agent '{}' does not support ACP; falling back to stdio for this session — see launchModeFallback",
+                    step.name,
+                    agent.as_str()
+                ),
+            });
+            LaunchMode::Stdio
+        } else {
+            requested
+        };
+        modes.insert(step.name.clone(), mode);
+    }
+
+    // Workflow steps cannot yet be driven over ACP. Unlike direct `chat` /
+    // `exec prompt`, the workflow `AgentExecutionFactory` owns and returns the
+    // `AgentExecution` that an `AcpSession` also needs to own to run the
+    // JSON-RPC driver (initialize → session/new → session/prompt). Until that
+    // ownership contract is reworked, a workflow ACP step would launch a
+    // container we never speak ACP to — the agent blocks awaiting `initialize`
+    // while awman holds stdin open — and the step would report a false success.
+    // Fail closed, before any container starts, rather than ship that hang.
+    // Unsupported-agent steps that fell back to `stdio` above still run.
+    if modes.values().any(|m| matches!(m, LaunchMode::Acp)) {
+        return Err(EngineError::NotImplemented(
+            "ACP launch mode is not yet supported for workflow steps; run the agent over ACP \
+             with `awman chat` or `awman exec prompt`, or set launchMode: stdio for workflows",
+        ));
+    }
+    Ok(modes)
 }
 
 /// Validate the `--dynamic` / `--leader` flag relationships before any IO.
@@ -2229,6 +2347,18 @@ impl ExecWorkflowCommand {
             .unwrap_or_else(|_| panic!("no other Arc references remain after leader phase"))
             .into_inner()
             .unwrap();
+        let mut frontend = frontend;
+
+        // The dynamically generated workflow is not known until after the
+        // leader phase, so this is its first possible whole-workflow ACP
+        // pre-flight. It still runs before any generated workflow step.
+        let launch_modes = validate_workflow_acp_preflight(
+            &validated_workflow,
+            &base_session,
+            &effective_flags,
+            frontend.as_mut(),
+        )
+        .map_err(CommandError::from)?;
 
         // Build the CLI overlay list (includes the implied context(workflow)).
         let mut cli_typed = Vec::new();
@@ -2257,6 +2387,7 @@ impl ExecWorkflowCommand {
             cwd,
             original_session: base_session,
             issue_temp_file: None,
+            launch_modes,
         };
         execute_prepared(
             &effective_flags,
@@ -2285,7 +2416,7 @@ impl ExecWorkflowCommand {
         label: &str,
         engine_rx: &mut tokio::sync::mpsc::UnboundedReceiver<EngineRequest>,
     ) -> Result<LeaderDriveOutcome, CommandError> {
-        use crate::engine::agent_runtime::execution::{StuckEvent, KILLED_EXIT_CODE};
+        use crate::engine::agent_runtime::execution::{KILLED_EXIT_CODE, StuckEvent};
 
         let run_opts = AgentRunOptions {
             yolo: Some(YoloMode::Enabled),
@@ -2332,7 +2463,10 @@ impl ExecWorkflowCommand {
         });
         shared.lock().unwrap().set_pty_active(true);
 
-        let proxy = AgentFrontendProxy(Arc::clone(&shared));
+        let proxy = AgentFrontendProxy {
+            frontend: Arc::clone(&shared),
+            acp: false,
+        };
         let mut execution = match instance.run_with_frontend(Box::new(proxy)) {
             Ok(e) => e,
             Err(e) => {
@@ -3364,6 +3498,7 @@ prompt = "do something"
             auto: false,
             agent: None,
             model: None,
+            launch_mode: None,
             overlay: vec![],
             max_concurrent: None,
             issue_source: crate::data::issue::IssueSourceFlags { issue: None },
@@ -3453,6 +3588,7 @@ prompt = "do something"
             auto: false,
             agent: None,
             model: None,
+            launch_mode: None,
             overlay: vec![],
             max_concurrent: None,
             issue_source: crate::data::issue::IssueSourceFlags { issue: None },
@@ -3479,6 +3615,7 @@ prompt = "do something"
             auto: false,
             agent: None,
             model: None,
+            launch_mode: None,
             overlay: vec![],
             max_concurrent: None,
             issue_source: crate::data::issue::IssueSourceFlags { issue: None },
@@ -3507,7 +3644,7 @@ prompt = "do something"
     /// calls, sibling steps would inherit each other's overlays.
     #[test]
     fn collect_single_entry_overlays_isolates_env_per_entry() {
-        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
+        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3564,7 +3701,7 @@ prompt = "do something"
     /// hard-coded `git_root.join("Dockerfile.dev")`.
     #[test]
     fn collect_single_entry_overlays_uses_repo_config_dockerfile_path() {
-        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
+        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3624,7 +3761,7 @@ prompt = "do something"
         tmp: &tempfile::TempDir,
         default_agent: Option<&str>,
     ) -> Session {
-        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
+        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         if let Some(agent) = default_agent {
@@ -3672,6 +3809,78 @@ prompt = "do something"
             teardown_on_failure: false,
             overlays: None,
         }
+    }
+
+    #[test]
+    fn acp_preflight_rejects_before_workflow_launch_when_fallback_is_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session_with_default_agent(&tmp, None);
+        let workflow = make_workflow(None, &[Some("cline"), Some("claude")]);
+        let mut sink = crate::data::message::RecordingMessageSink::new();
+        let mut flags = make_dynamic_flags(false, Some("wf.toml"), None, None, false, None);
+        flags.launch_mode = Some(crate::data::config::repo::LaunchMode::Acp);
+
+        let error = validate_workflow_acp_preflight(&workflow, &session, &flags, &mut sink)
+            .expect_err("unsupported step must stop ACP workflow pre-flight");
+        assert!(error.to_string().contains("step 'step1'"));
+        assert!(error.to_string().contains("claude"));
+        assert!(sink.all().is_empty(), "error fallback must not downgrade");
+    }
+
+    #[test]
+    fn acp_preflight_downgrades_unsupported_steps_to_stdio_and_runs() {
+        // A workflow whose steps all resolve to unsupported agents under
+        // `launchModeFallback: stdio` downgrades every step to stdio (one
+        // warning each) and is permitted — no step resolves to ACP, so the
+        // not-yet-implemented workflow-ACP guard never fires.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{"launchModeFallback":"stdio"}"#,
+        )
+        .unwrap();
+        let session = make_session_with_default_agent(&tmp, None);
+        let workflow = make_workflow(None, &[Some("claude"), Some("codex")]);
+        let mut sink = crate::data::message::RecordingMessageSink::new();
+        let mut flags = make_dynamic_flags(false, Some("wf.toml"), None, None, false, None);
+        flags.launch_mode = Some(crate::data::config::repo::LaunchMode::Acp);
+
+        let modes = validate_workflow_acp_preflight(&workflow, &session, &flags, &mut sink)
+            .expect("stdio fallback of all-unsupported steps must permit the workflow");
+        assert_eq!(modes["step0"], crate::data::config::repo::LaunchMode::Stdio);
+        assert_eq!(modes["step1"], crate::data::config::repo::LaunchMode::Stdio);
+        let messages = sink.all();
+        assert_eq!(messages.len(), 2, "one downgrade warning per step");
+        assert!(messages.iter().all(|m| m.level == MessageLevel::Warning));
+    }
+
+    #[test]
+    fn acp_preflight_rejects_workflow_acp_as_not_yet_implemented() {
+        // An ACP-capable step (cline) under `launchMode: acp` resolves to ACP,
+        // which workflows cannot yet drive — pre-flight must reject the whole
+        // workflow before any container spawns rather than launch an ACP
+        // container it never speaks the protocol to (the "silent false success"
+        // blocker). `launchModeFallback: stdio` does not rescue it: fallback
+        // only downgrades UNsupported agents; a supported agent stays ACP.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{"launchModeFallback":"stdio"}"#,
+        )
+        .unwrap();
+        let session = make_session_with_default_agent(&tmp, None);
+        let workflow = make_workflow(None, &[Some("cline")]);
+        let mut sink = crate::data::message::RecordingMessageSink::new();
+        let mut flags = make_dynamic_flags(false, Some("wf.toml"), None, None, false, None);
+        flags.launch_mode = Some(crate::data::config::repo::LaunchMode::Acp);
+
+        let error = validate_workflow_acp_preflight(&workflow, &session, &flags, &mut sink)
+            .expect_err("workflow ACP must be rejected as not yet implemented");
+        assert!(
+            matches!(error, EngineError::NotImplemented(_)),
+            "expected NotImplemented, got: {error:?}"
+        );
+        assert!(error.to_string().contains("not yet supported for workflow"));
     }
 
     #[test]
@@ -3807,8 +4016,8 @@ prompt = "do something"
 
     // ── issue_source_overlay + IssueTempFile ─────────────────────────────────
 
-    use crate::data::issue::github::GithubIssueSource;
     use crate::data::issue::Issue;
+    use crate::data::issue::github::GithubIssueSource;
 
     fn make_issue(source_id: &str, title: &str, body: &str) -> Issue {
         Issue {
@@ -3931,6 +4140,7 @@ prompt = "do something"
             auto: false,
             agent: None,
             model: model.map(|s| s.to_string()),
+            launch_mode: None,
             overlay: vec![],
             max_concurrent: None,
             issue_source: crate::data::issue::IssueSourceFlags { issue: None },
@@ -3956,7 +4166,7 @@ prompt = "do something"
         tmp: &tempfile::TempDir,
         default_leader: &str,
     ) -> crate::data::session::Session {
-        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
+        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         let cfg_dir = tmp.path().join(".awman");

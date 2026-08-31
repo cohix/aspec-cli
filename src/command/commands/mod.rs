@@ -43,6 +43,94 @@ pub mod worktree_lifecycle;
 
 pub use command_trait::Command;
 
+/// Result of resolving an ACP request for a concrete agent.
+///
+/// This is deliberately command-layer policy: the engine remains the final
+/// safety guard, while this decision determines whether a repository default
+/// may use the configured fallback before any setup, overlay, or runtime work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LaunchModeDecision {
+    Stdio,
+    Acp,
+    StdioWithFallbackWarning,
+}
+
+#[cfg(test)]
+mod launch_mode_tests {
+    use super::*;
+    use crate::data::config::global::{GlobalConfig, LaunchModeFallback};
+    use crate::data::config::repo::LaunchMode;
+
+    fn config(fallback: LaunchModeFallback) -> crate::data::config::effective::EffectiveConfig {
+        crate::data::config::effective::EffectiveConfig::new(
+            crate::data::config::FlagConfig {
+                launch_mode: Some(LaunchMode::Acp),
+                ..Default::default()
+            },
+            Default::default(),
+            Default::default(),
+            GlobalConfig {
+                launch_mode_fallback: Some(fallback),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn fallback_decision_matrix() {
+        let supported = crate::data::session::AgentName::new("cline").unwrap();
+        let unsupported = crate::data::session::AgentName::new("claude").unwrap();
+
+        assert_eq!(
+            resolve_launch_mode(&config(LaunchModeFallback::Error), &supported, false).unwrap(),
+            LaunchModeDecision::Acp
+        );
+        assert!(matches!(
+            resolve_launch_mode(&config(LaunchModeFallback::Error), &unsupported, false),
+            Err(crate::engine::error::EngineError::AcpUnsupported { .. })
+        ));
+        assert_eq!(
+            resolve_launch_mode(&config(LaunchModeFallback::Stdio), &unsupported, false).unwrap(),
+            LaunchModeDecision::StdioWithFallbackWarning
+        );
+        assert!(matches!(
+            resolve_launch_mode(&config(LaunchModeFallback::Stdio), &unsupported, true),
+            Err(crate::engine::error::EngineError::AcpUnsupported { .. })
+        ));
+    }
+}
+
+/// Apply the ACP support and fallback policy after normal agent resolution.
+/// Explicit single-agent ACP intent is never downgraded.
+pub(crate) fn resolve_launch_mode(
+    config: &crate::data::config::effective::EffectiveConfig,
+    agent: &crate::data::session::AgentName,
+    explicit_single_agent_acp: bool,
+) -> Result<LaunchModeDecision, crate::engine::error::EngineError> {
+    use crate::data::config::global::LaunchModeFallback;
+    use crate::data::config::repo::LaunchMode;
+
+    if config.launch_mode() == LaunchMode::Stdio {
+        return Ok(LaunchModeDecision::Stdio);
+    }
+    if crate::engine::agent::agent_matrix::matrix_for(agent.as_str())?.supports_acp {
+        return Ok(LaunchModeDecision::Acp);
+    }
+    if explicit_single_agent_acp || config.launch_mode_fallback() == LaunchModeFallback::Error {
+        return Err(crate::engine::error::EngineError::AcpUnsupported {
+            agent: agent.as_str().to_string(),
+        });
+    }
+    Ok(LaunchModeDecision::StdioWithFallbackWarning)
+}
+
+pub(crate) fn acp_fallback_warning(agent: &crate::data::session::AgentName) -> String {
+    format!(
+        "agent '{}' does not support ACP; falling back to stdio for this session — see launchModeFallback",
+        agent.as_str()
+    )
+}
+
 /// Resolve the agent name to use for a command, in precedence order:
 ///   1. explicit CLI flag (`flag`)
 ///   2. `session.default_agent()` (which itself resolves flag > repo > global)
@@ -529,7 +617,7 @@ pub fn resolve_context_overlays(
 > {
     use crate::data::fs::ContextDirResolver;
     use crate::data::message::{MessageLevel, UserMessage};
-    use crate::engine::agent::agent_matrix::{matrix_for, SystemPromptMode};
+    use crate::engine::agent::agent_matrix::{SystemPromptMode, matrix_for};
     use crate::engine::context_prompt::ContextPromptBuilder;
     use crate::engine::overlay::ContextOverlay;
 
@@ -928,7 +1016,7 @@ mod skill_parser_tests {
 #[cfg(test)]
 mod collect_overlay_specs_tests {
     use super::*;
-    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME, AWMAN_OVERLAYS};
+    use crate::data::config::env::{AWMAN_CONFIG_HOME, AWMAN_OVERLAYS, EnvSnapshot};
     use crate::data::config::global::GlobalConfig;
     use crate::data::config::repo::RepoConfig;
     use crate::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
@@ -1282,7 +1370,7 @@ mod collect_overlay_specs_tests {
 #[cfg(test)]
 mod warn_legacy_config_tests {
     use super::*;
-    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
+    use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
     use crate::data::message::{MessageLevel, RecordingMessageSink};
     use crate::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
 
@@ -1549,7 +1637,7 @@ mod context_parser_tests {
 #[cfg(test)]
 mod context_collect_0087_tests {
     use super::*;
-    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
+    use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
     use crate::data::config::global::GlobalConfig;
     use crate::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
     use crate::engine::overlay::ContextScope;
