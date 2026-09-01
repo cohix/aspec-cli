@@ -751,10 +751,8 @@ mod tests {
 
     #[test]
     fn register_seeds_state_and_counts_lease() {
-        // Bind the monitor to an isolated, per-test temp HOME so the tick
-        // thread the registration starts can never read the developer's real
-        // credential or spawn a real host ping (F3), and so two tests can
-        // never share a home directory.
+        // A per-test temp HOME, so nothing here can touch the developer's real
+        // file-backed credential and no two tests share a home directory.
         let home = tempfile::tempdir().unwrap();
         let monitor = CredentialRefreshMonitor::with_resolver(
             MonitorConfig::default(),
@@ -770,26 +768,32 @@ mod tests {
             staged_root: staged.path().to_path_buf(),
             initial_fingerprint: CredentialFingerprint::zeroed(),
         };
+
+        // Seeding is asserted through the `seed_state` call `register` itself
+        // makes, BEFORE any monitor thread exists. Asserting it after
+        // `register` would race that thread's first tick, which reads the host
+        // credential (a keychain lookup on macOS, so a temp HOME does not make
+        // it a guaranteed miss) and then legitimately rewrites either the
+        // failure counter or `last_materialized`.
+        monitor.seed_state(&delivery);
+        assert_eq!(
+            monitor
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(agent.as_str())
+                .and_then(|st| st.last_materialized),
+            Some(CredentialFingerprint::zeroed()),
+            "register must seed change detection from the delivery's fingerprint"
+        );
+
+        // Lease counting has no such race: the tick thread never adds to or
+        // removes from the registry.
         let lease = monitor.register(&delivery, "awman-test");
         assert_eq!(monitor.live_lease_count(), 1);
         let status = monitor.status();
         assert_eq!(status.len(), 1);
         assert_eq!(status[0].live_leases, 1);
-        // The seeded state is the delivery's initial fingerprint. Assert that
-        // rather than the failure counter: `register` starts the monitor
-        // thread, whose very first tick races this assertion and — finding no
-        // credential under the empty temp HOME — legitimately records a
-        // failure. `last_materialized` has no such race, because only a
-        // *successful* materialization advances it and none can happen here.
-        assert_eq!(
-            monitor
-                .state
-                .lock()
-                .unwrap()
-                .get(agent.as_str())
-                .and_then(|st| st.last_materialized),
-            Some(CredentialFingerprint::zeroed()),
-        );
         drop(lease);
         assert_eq!(monitor.live_lease_count(), 0);
     }
