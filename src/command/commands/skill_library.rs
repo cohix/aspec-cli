@@ -3,11 +3,11 @@
 use std::path::{Component, Path, PathBuf};
 
 use crate::command::error::CommandError;
-use crate::data::fs::SkillDirs;
 use crate::data::fs::skill_library::{
-    GithubSlug, LIBRARY_META_FILENAME, SkillLibraryMeta, parse_github_slug, read_library_meta,
-    write_library_meta,
+    parse_github_slug, read_library_meta, write_library_meta, GithubSlug, SkillLibraryMeta,
+    LIBRARY_META_FILENAME,
 };
+use crate::data::fs::SkillDirs;
 use crate::data::session::AgentName;
 use crate::engine::git::GitEngine;
 
@@ -251,7 +251,7 @@ fn discover_skills(skills_dir: &Path) -> Result<Vec<String>, CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
     use std::process::Command;
 
     /// Serialises tests that toggle the process-global `GIT_CONFIG_*` env vars.

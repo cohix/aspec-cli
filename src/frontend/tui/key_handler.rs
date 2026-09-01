@@ -33,16 +33,16 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         // actively running.  Once the command finishes the overlay is closed, but
         // guard here too so a race can't leave the user unable to type.
         FocusContext::ContainerMaximized
-    } else if app.active_tab().is_amie
+    } else if app.active_tab().is_squad
         && app.active_tab().container_slots.is_empty()
         && app.focus == Focus::ExecutionWindow
     {
-        // WI 0102: the amie condition list holds focus. While an attach session
+        // WI 0102: the squad task list holds focus. While an attach session
         // owns the tab's slots (`container_slots` non-empty) this falls through
         // to the ordinary ContainerMaximized/ExecutionWindow handling, so
         // Ctrl-S slot cycling and PTY passthrough behave exactly as in a normal
         // workflow run.
-        FocusContext::AmieList
+        FocusContext::SquadList
     } else {
         match app.focus {
             Focus::CommandBox => FocusContext::CommandBox,
@@ -140,7 +140,7 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         return;
     }
 
-    // WI 0102: Ctrl-A inside the New Tab dialog opens the amie tab. Safe
+    // WI 0102: Ctrl-A inside the New Tab dialog opens the squad tab. Safe
     // because keymap.rs already gates the global Ctrl-A -> PreviousTab mapping
     // on `ctx != FocusContext::Dialog`, so the key is genuinely unclaimed here.
     // Do NOT add a second global Ctrl-A mapping and do NOT relax that guard.
@@ -150,7 +150,7 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
     {
         app.active_dialog = None;
         app.command_dialog_active = false;
-        app.open_or_focus_amie_tab();
+        app.open_or_focus_squad_tab();
         return;
     }
 
@@ -173,7 +173,7 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 .to_string();
             app.active_dialog = Some(Dialog::TextInput {
                 title: "New Tab".to_string(),
-                prompt: "Working directory:\nPress Ctrl-A to open amie".to_string(),
+                prompt: "Working directory:\nPress Ctrl-A to open squad".to_string(),
                 editor: {
                     let mut ed = text_edit::TextEdit::new(false);
                     ed.set_text(&cwd);
@@ -256,9 +256,9 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         Action::ToggleGitSidebar => {
-            // WI 0102: the git sidebar is meaningless for the amie tab's
+            // WI 0102: the git sidebar is meaningless for the squad tab's
             // synthetic session, so Ctrl-G is a no-op while it is active.
-            if app.active_tab().is_amie {
+            if app.active_tab().is_squad {
                 return;
             }
             let tab = app.active_tab_mut();
@@ -342,8 +342,8 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         Action::ScrollUp => {
             if ctx == FocusContext::Dialog {
                 dialog_router::handle_dialog_scroll(app, -1);
-            } else if ctx == FocusContext::AmieList {
-                if let Some(state) = app.active_tab_mut().amie.as_mut() {
+            } else if ctx == FocusContext::SquadList {
+                if let Some(state) = app.active_tab_mut().squad.as_mut() {
                     state.move_selection(-1);
                 }
             } else {
@@ -354,8 +354,8 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         Action::ScrollDown => {
             if ctx == FocusContext::Dialog {
                 dialog_router::handle_dialog_scroll(app, 1);
-            } else if ctx == FocusContext::AmieList {
-                if let Some(state) = app.active_tab_mut().amie.as_mut() {
+            } else if ctx == FocusContext::SquadList {
+                if let Some(state) = app.active_tab_mut().squad.as_mut() {
                     state.move_selection(1);
                 }
             } else {
@@ -544,70 +544,97 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
 
-        // ── amie list actions (WI 0102) ───────────────────────────────
+        // ── squad list actions (WI 0102) ───────────────────────────────
         // Each either opens a dialog or dispatches through `spawn_command`
         // into Layer 2. None calls a gateway method directly — the keys are a
         // shortcut over the same Layer-2 path the command box uses, never a
         // second path.
-        Action::AmieShowDetail => {
-            let detail = app.active_tab().amie.as_ref().and_then(|state| {
-                let condition = state.selected_condition()?;
+        Action::SquadShowDetail => {
+            let detail = app.active_tab().squad.as_ref().and_then(|state| {
+                let task = state.selected_task()?;
                 let runs = state
                     .snapshot
                     .lock()
                     .ok()
                     .map(|snap| snap.runs.clone())
                     .unwrap_or_default();
-                Some(dialogs::AmieDetailState {
-                    name: condition.name.clone(),
-                    condition,
+                Some(dialogs::SquadDetailState {
+                    name: task.name.clone(),
+                    task,
                     runs,
                     scroll: 0,
                 })
             });
             if let Some(detail) = detail {
-                app.active_dialog = Some(Dialog::AmieConditionDetail(detail));
+                app.active_dialog = Some(Dialog::SquadTaskDetail(detail));
             }
         }
-        Action::AmieAttach => {
+        Action::SquadAttach => {
             let name = app
                 .active_tab()
-                .amie
+                .squad
                 .as_ref()
                 .and_then(|state| state.selected_name());
             if let Some(name) = name {
-                crate::frontend::tui::amie_attach::start_amie_attach(app, &name);
+                crate::frontend::tui::squad_attach::start_squad_attach(app, &name);
             }
         }
-        Action::AmieNew => {
+        Action::SquadNew => {
             let mut flags = std::collections::BTreeMap::new();
             flags.insert(
                 "interview".to_string(),
                 crate::command::dispatch::parsed_input::FlagValue::Bool(true),
             );
             app.spawn_command(
-                "amie add --interview",
+                "squad add --interview",
                 crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
-                    path: vec!["amie".into(), "add".into()],
+                    path: vec!["squad".into(), "add".into()],
                     flags,
                     arguments: Default::default(),
                 },
             );
         }
-        Action::AmiePause => {
-            amie_dispatch_by_name(app, "pause");
-        }
-        Action::AmieResume => {
-            amie_dispatch_by_name(app, "resume");
-        }
-        Action::AmieDelete => {
+        Action::SquadPause => {
             let name = app
                 .active_tab()
-                .amie
+                .squad
                 .as_ref()
                 .and_then(|state| state.selected_name());
             if let Some(name) = name {
-                app.active_dialog = Some(Dialog::AmieRemoveConfirm { name });
+                squad_dispatch_by_name(app, "pause", &name);
+            }
+        }
+        Action::SquadResume => {
+            let name = app
+                .active_tab()
+                .squad
+                .as_ref()
+                .and_then(|state| state.selected_name());
+            if let Some(name) = name {
+                squad_dispatch_by_name(app, "resume", &name);
+            }
+        }
+        Action::SquadDelete => {
+            let name = app
+                .active_tab()
+                .squad
+                .as_ref()
+                .and_then(|state| state.selected_name());
+            if let Some(name) = name {
+                app.active_dialog = Some(Dialog::SquadRemoveConfirm { name });
+            }
+        }
+        // WI 0106 Part 5: card-grid column movement. Row movement (Up/Down)
+        // stays on `Action::ScrollUp`/`ScrollDown` above — only Left/Right are
+        // grid-new.
+        Action::SquadMoveLeft => {
+            if let Some(state) = app.active_tab_mut().squad.as_mut() {
+                state.move_selection_col(-1);
+            }
+        }
+        Action::SquadMoveRight => {
+            if let Some(state) = app.active_tab_mut().squad.as_mut() {
+                state.move_selection_col(1);
             }
         }
 
@@ -776,29 +803,25 @@ fn handle_command_submit(app: &mut App) {
     }
 }
 
-// ─── amie list helpers (WI 0102) ─────────────────────────────────────────────
+// ─── squad list helpers (WI 0102) ─────────────────────────────────────────────
 
-/// Dispatch an `amie <subcommand> <name>` action (pause/resume) for the
-/// selected condition through the ordinary Layer-2 path. No-op when the list
+/// Dispatch an `squad <subcommand> <name>` action (pause/resume) for the
+/// selected task through the ordinary Layer-2 path. No-op when the list
 /// is empty.
-fn amie_dispatch_by_name(app: &mut App, subcommand: &str) {
-    let name = app
-        .active_tab()
-        .amie
-        .as_ref()
-        .and_then(|state| state.selected_name());
-    let Some(name) = name else {
-        return;
-    };
+/// Dispatch `squad <subcommand> <name>` through the ordinary Layer-2 path.
+/// `pub(super)` so the detail modal's action tooltip (`dialog_router.rs`) can
+/// reuse it against the task the modal is showing, rather than the list's
+/// current selection.
+pub(super) fn squad_dispatch_by_name(app: &mut App, subcommand: &str, name: &str) {
     let mut arguments = std::collections::BTreeMap::new();
     arguments.insert(
         "name".to_string(),
-        crate::command::dispatch::parsed_input::ArgValue::Single(name.clone()),
+        crate::command::dispatch::parsed_input::ArgValue::Single(name.to_string()),
     );
     app.spawn_command(
-        &format!("amie {subcommand} {name}"),
+        &format!("squad {subcommand} {name}"),
         crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
-            path: vec!["amie".into(), subcommand.into()],
+            path: vec!["squad".into(), subcommand.into()],
             flags: Default::default(),
             arguments,
         },

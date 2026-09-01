@@ -60,7 +60,7 @@ An agent designing your pipeline is only useful if you can constrain it. A `dyna
 
 `agentsToModels` pins the exact agents and models the leader may pick from. `guidance` is a list of house rules that get injected straight into the leader's prompt (i.e. the constraints you're tired of repeating in every work item description). And because 0.11 also ships real DAG parallelism (`maxConcurrentAgents`, plus Ctrl-S to flip between running containers in the TUI), the workflows a leader designs actually run their independent steps at the same time instead of sequentially.
 
-There's a full [Dynamic Workflows guide](https://github.com/prettysmartdev/awman/blob/main/docs/13-dynamic-workflows.md) covering the leader resolution order, the repair loop, and every edge case.
+There's a full [Dynamic Workflows guide](https://github.com/prettysmartdev/awman/blob/main/docs/06-dynamic-workflows.md) covering the leader resolution order, the repair loop, and every edge case.
 
 ## Also in 0.11
 

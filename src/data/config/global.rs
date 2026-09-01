@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::data::config::env::{Env, EnvSnapshot};
-use crate::data::config::repo::{AmieConfig, ApiConfig, RemoteConfig};
+use crate::data::config::repo::{ApiConfig, RemoteConfig, SquadConfig};
 use crate::data::error::DataError;
 
 /// Behavior when a configured ACP launch is requested for an agent that does
@@ -45,7 +45,7 @@ pub struct GlobalConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api: Option<ApiConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub amie: Option<AmieConfig>,
+    pub squad: Option<SquadConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,8 +136,8 @@ impl GlobalConfig {
                 ));
             }
         }
-        if let Some(amie) = &cfg.amie {
-            amie.validate()?;
+        if let Some(squad) = &cfg.squad {
+            squad.validate()?;
         }
         Ok(cfg)
     }
@@ -163,7 +163,7 @@ impl GlobalConfig {
 mod tests {
     use super::*;
     use crate::data::config::env::AWMAN_CONFIG_HOME;
-    use crate::data::config::repo::{AmieConfig, ApiConfig, RemoteConfig};
+    use crate::data::config::repo::{ApiConfig, RemoteConfig, SquadConfig};
 
     fn isolated_env(home_dir: &std::path::Path) -> EnvSnapshot {
         EnvSnapshot::with_overrides([(AWMAN_CONFIG_HOME, home_dir.to_str().unwrap())])
@@ -193,7 +193,7 @@ mod tests {
                 work_dirs: Some(vec!["/work".to_string()]),
                 always_non_interactive: Some(true),
             }),
-            amie: Some(AmieConfig {
+            squad: Some(SquadConfig {
                 agents_to_models: Some(std::collections::HashMap::from([(
                     "claude".to_string(),
                     vec!["claude-opus-4-8".to_string()],
@@ -252,17 +252,17 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_invalid_amie_config() {
+    fn load_rejects_invalid_squad_config() {
         let tmp = tempfile::tempdir().unwrap();
         let env = isolated_env(tmp.path());
         let path = GlobalConfig::path_with(&env).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, r#"{"amie":{"maxConcurrentEvaluations":0}}"#).unwrap();
+        std::fs::write(&path, r#"{"squad":{"maxConcurrentEvaluations":0}}"#).unwrap();
 
         let err = GlobalConfig::load_with(&env).unwrap_err();
         assert!(err
             .to_string()
-            .contains("amie.maxConcurrentEvaluations must be >= 1"));
+            .contains("squad.maxConcurrentEvaluations must be >= 1"));
     }
 
     #[test]

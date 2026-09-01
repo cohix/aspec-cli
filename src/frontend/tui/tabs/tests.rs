@@ -519,8 +519,11 @@ fn tab_color_running_with_acp_container_visible_is_purple() {
     // color when the focused slot is an ACP window, not green.
     let mut tab = make_tab();
     let state: SharedAcpState = Arc::new(Mutex::new(AcpSlotState::default()));
-    tab.container_slots
-        .push(ContainerSlot::new_acp(String::new(), "claude".into(), state));
+    tab.container_slots.push(ContainerSlot::new_acp(
+        String::new(),
+        "claude".into(),
+        state,
+    ));
     tab.execution_phase = ExecutionPhase::Running {
         command: "chat".into(),
     };
@@ -539,8 +542,11 @@ fn tab_color_error_with_acp_focused_slot_is_still_red() {
     // same precedence the stdio path already has (`tab_color_error_is_red`).
     let mut tab = make_tab();
     let state: SharedAcpState = Arc::new(Mutex::new(AcpSlotState::default()));
-    tab.container_slots
-        .push(ContainerSlot::new_acp(String::new(), "claude".into(), state));
+    tab.container_slots.push(ContainerSlot::new_acp(
+        String::new(),
+        "claude".into(),
+        state,
+    ));
     tab.execution_phase = ExecutionPhase::Error {
         command: "chat".into(),
         message: "oops".into(),
@@ -1336,25 +1342,25 @@ fn yolo_started_shares_cancel_flag_and_tick_updates_slot_state() {
     assert!(b.yolo_state.lock().unwrap().is_none());
 }
 
-// ── amie tab (WI 0102) ──────────────────────────────────────────────────
+// ── squad tab (WI 0102) ──────────────────────────────────────────────────
 
-/// A tab whose `is_amie` bit is set, for the `tab_color`/`new_amie` tests
-/// below. Its session basename is deliberately unrelated to "amie" — mirrors
+/// A tab whose `is_squad` bit is set, for the `tab_color`/`new_squad` tests
+/// below. Its session basename is deliberately unrelated to "squad" — mirrors
 /// the fact that the real synthetic session is rooted at whatever
-/// `AWMAN_AMIE_ROOT` resolves to, which `project_name` must never leak.
-fn make_amie_tab() -> Tab {
-    Tab::new_amie(make_test_session())
+/// `AWMAN_SQUAD_ROOT` resolves to, which `project_name` must never leak.
+fn make_squad_tab() -> Tab {
+    Tab::new_squad(make_test_session())
 }
 
 #[test]
-fn tab_color_amie_is_cyan_regardless_of_execution_phase() {
+fn tab_color_squad_is_cyan_regardless_of_execution_phase() {
     use ratatui::style::Color;
-    // D8 (implementation-contract.md §0.0): `is_amie` sits at the same tier
+    // D8 (implementation-contract.md §0.0): `is_squad` sits at the same tier
     // as `is_remote`, below `stuck`/yolo but above every execution-phase
     // colour. Vary phase and container-window state; the colour must never
     // move off Cyan.
-    let mut tab = make_amie_tab();
-    assert_eq!(tab_color(&tab), Color::Cyan, "idle amie tab");
+    let mut tab = make_squad_tab();
+    assert_eq!(tab_color(&tab), Color::Cyan, "idle squad tab");
 
     tab.execution_phase = ExecutionPhase::Running {
         command: "chat".into(),
@@ -1379,43 +1385,43 @@ fn tab_color_amie_is_cyan_regardless_of_execution_phase() {
 }
 
 #[test]
-fn tab_color_stuck_takes_priority_over_amie() {
+fn tab_color_stuck_takes_priority_over_squad() {
     // Companion to `tab_color_stuck_takes_priority_over_remote`: D8 narrowed
-    // the amie unit test to "regardless of execution phase" only — `stuck`
+    // the squad unit test to "regardless of execution phase" only — `stuck`
     // legitimately wins at the tier above, exactly as it does over `is_remote`.
     use ratatui::style::Color;
-    let mut tab = make_amie_tab();
+    let mut tab = make_squad_tab();
     tab.stuck = true;
     assert_eq!(tab_color(&tab), Color::Yellow);
 }
 
 #[test]
-fn project_name_is_amie_regardless_of_session_basename() {
+fn project_name_is_squad_regardless_of_session_basename() {
     // The synthetic session's working-dir basename comes from wherever
-    // `AWMAN_AMIE_ROOT` resolves to (see `App::amie_synthetic_session`), which
-    // has nothing to do with "amie" in general. `project_name` must ignore it
-    // entirely for an `is_amie` tab.
+    // `AWMAN_SQUAD_ROOT` resolves to (see `App::squad_synthetic_session`), which
+    // has nothing to do with "squad" in general. `project_name` must ignore it
+    // entirely for an `is_squad` tab.
     let (mut tab, _tmp) = make_named_tab("totally-unrelated-directory-name");
-    tab.is_amie = true;
-    assert_eq!(tab.project_name(30), "amie");
-    // Narrow tabs must not truncate the fixed "amie" label either.
-    assert_eq!(tab.project_name(20), "amie");
+    tab.is_squad = true;
+    assert_eq!(tab.project_name(30), "squad");
+    // Narrow tabs must not truncate the fixed "squad" label either.
+    assert_eq!(tab.project_name(20), "squad");
 }
 
 #[test]
-fn new_amie_starts_no_git_poll() {
-    let tab = make_amie_tab();
-    assert!(tab.is_amie, "Tab::new_amie must set is_amie");
+fn new_squad_starts_no_git_poll() {
+    let tab = make_squad_tab();
+    assert!(tab.is_squad, "Tab::new_squad must set is_squad");
     assert!(
-        tab.amie.is_some(),
-        "Tab::new_amie must install AmieTabState"
+        tab.squad.is_some(),
+        "Tab::new_squad must install SquadTabState"
     );
     assert!(
         tab.git_poll_root.is_none(),
-        "Tab::new_amie must not start a git poll (no meaningful diff for the amie storage root)"
+        "Tab::new_squad must not start a git poll (no meaningful diff for the squad storage root)"
     );
     assert!(
         tab.git_poll_handle.is_none(),
-        "Tab::new_amie must not spawn a git poll task"
+        "Tab::new_squad must not spawn a git poll task"
     );
 }

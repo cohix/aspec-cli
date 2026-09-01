@@ -58,7 +58,7 @@ Applies to every project on the machine unless a repo overrides it.
     "workDirs": ["/home/user/my-project"],
     "alwaysNonInteractive": false
   },
-  "amie": {
+  "squad": {
     "agentsToModels": {
       "claude": ["claude-opus-4-8", "claude-sonnet-4-6"]
     },
@@ -74,19 +74,25 @@ Applies to every project on the machine unless a repo overrides it.
 }
 ```
 
-### Amie daemon configuration
+### Squad daemon configuration
 
-The optional `amie` block is global, so it belongs in
+The optional `squad` block is global, so it belongs in
 `~/.awman/config.json` (or the relocated global config file). It controls the
-agents and models available to the amie daemon and the guidance it passes to
-condition evaluations:
+agents and models available to the squad daemon and the guidance it passes to
+task evaluations:
+
+Task-specific workspace, interval, and overlay choices are configured with
+`awman squad add` rather than in this global block. See [Squad](12-squad.md)
+for the durable workspace, task-creation, and daemon details. The squad daemon
+and API server cannot run at the same time because they share the awman
+database; see [API server and squad daemon](09-api-and-remote-mode.md#api-server-and-squad-daemon).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `agentsToModels` | object (agent name → non-empty string array) | unset | Models available for each agent; every map key must be a valid agent name |
-| `maxConcurrentEvaluations` | positive integer | `2` | Maximum number of condition evaluations running at once |
-| `defaultLeader` | string (`agent::model`) | unset | Default agent and model for evaluations when a condition does not specify them |
-| `guidance` | non-empty string array | unset | Instructions added to every condition evaluation and generated workflow |
+| `maxConcurrentEvaluations` | positive integer | `2` | Maximum number of task evaluations running at once |
+| `defaultLeader` | string (`agent::model`) | unset | Default agent and model for evaluations when a task does not specify them |
+| `guidance` | non-empty string array | unset | Instructions added to every task evaluation and generated workflow |
 
 All four keys are optional. Configuration is rejected when
 `maxConcurrentEvaluations` is zero; an `agentsToModels` entry has no models or
@@ -213,7 +219,7 @@ happens when a workflow step's agent does not support ACP, add
 
 Its allowed values are `"error"` (the default) and `"stdio"`. The command-line
 flag takes priority over both the environment variable and repository setting;
-see [ACP Mode](17-acp-mode.md).
+see [ACP launch mode](03-agent-sessions.md#acp-launch-mode).
 
 ### Custom work item paths
 
@@ -240,7 +246,7 @@ awman exec workflow aspec/workflows/implement-hard.toml --max-concurrent 2
 AWMAN_MAX_CONCURRENT_AGENTS=2 awman exec workflow aspec/workflows/implement-hard.toml
 ```
 
-Leaving `maxConcurrentAgents` unset (the default) means unlimited — every step whose dependencies are satisfied launches immediately. Lower it to match your machine's CPU/memory budget or your Docker daemon's capacity. See [Parallel Workflows](15-parallel-workflows.md) for how the engine uses this cap to schedule steps.
+Leaving `maxConcurrentAgents` unset (the default) means unlimited — every step whose dependencies are satisfied launches immediately. Lower it to match your machine's CPU/memory budget or your Docker daemon's capacity. See [Parallel workflows](05-workflows.md#parallel-workflows) for how the engine uses this cap to schedule steps.
 
 ### Configure dynamic workflow agents, models, and leader
 
@@ -253,7 +259,7 @@ awman config set dynamicWorkflows.maxConcurrentSteps 3
 
 `dynamicWorkflows.guidance` is a list of instructions the leader agent must follow whenever it designs a workflow. It's set one entry at a time, addressed by index — `awman config set dynamicWorkflows.guidance.0 "Never spawn more than two agents in parallel."` (an empty value removes that entry and re-indexes the rest) — or inline in the TUI config dialog, where **Ctrl+N** appends a new entry.
 
-See [Dynamic Workflows](13-dynamic-workflows.md#configuring-dynamic-workflows) for the full reference.
+See [Dynamic Workflows](06-dynamic-workflows.md#configuring-dynamic-workflows) for the full reference.
 
 ### Custom Dockerfile path
 
@@ -272,7 +278,7 @@ awman config set yoloDisallowedTools "Bash,computer"   # this repo
 awman config set yoloDisallowedTools ""                # set an empty list
 ```
 
-An empty repo list actively overrides a non-empty global list. To stop overriding, remove the field from the repo config file. See [Yolo Mode](06-yolo-mode.md).
+An empty repo list actively overrides a non-empty global list. To stop overriding, remove the field from the repo config file. See [Permission modes](03-agent-sessions.md#permission-modes).
 
 ### Control credential injection (`auth` mode)
 
@@ -302,11 +308,11 @@ The global `runtime` key selects how agent processes are isolated from your host
 |-------|----------|-------|
 | `docker` (default) | Linux, macOS, Windows | Standard Docker; ephemeral containers torn down when the session ends |
 | `apple-containers` | macOS 26+ only | Native `container` CLI; same user experience as Docker. On Linux/Windows this value is an error, not a silent fallback. `--allow-docker` is not supported under this runtime |
-| `docker-sbx-experimental` | macOS arm64, Windows x86_64 | Docker Sandboxes (persistent microVMs per session; hypervisor-grade isolation). Requires the `sbx` CLI and a Docker account. Linux is blocked by an upstream virtiofs bug. See [Runtimes](12-runtimes.md) |
+| `docker-sbx-experimental` | macOS arm64, Windows x86_64 | Docker Sandboxes (persistent microVMs per session; hypervisor-grade isolation). Requires the `sbx` CLI and a Docker account. Linux is blocked by an upstream virtiofs bug. See [Runtimes](11-runtimes.md) |
 
 An unrecognized value (e.g. a typo) is a fatal error — awman never falls back to a different isolation model than the one you configured. CLI commands print the invalid value and the list of valid values, then exit; the TUI shows the same message in a startup modal (Enter quits). Fix the value in `$HOME/.awman/config.json` and relaunch.
 
-`awman ready` validates the configured runtime before any other check and reports which one is active. For full details on platform support, setup, credential registration, and the persistent-sandbox lifecycle see [Runtimes](12-runtimes.md).
+`awman ready` validates the configured runtime before any other check and reports which one is active. For full details on platform support, setup, credential registration, and the persistent-sandbox lifecycle see [Runtimes](11-runtimes.md).
 
 ---
 
@@ -344,13 +350,13 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `workItems.template` | string | `<workItems.dir>/0000-template.md` | Template for new work items | yes, as `work_items.template` |
 | `overlays` | string array | `[]` | Overlay specs (`dir(…)`, `env(…)`, `skill(…)`); merged with all other overlay sources | yes |
 | `agentStuckTimeout` | integer (seconds) | 30 | Inactivity period before an agent is flagged as stuck | yes |
-| `maxConcurrentAgents` | integer | (unset → unlimited) | Cap on concurrently-running workflow steps; overridden by `--max-concurrent` / `AWMAN_MAX_CONCURRENT_AGENTS` — see [Parallel Workflows](15-parallel-workflows.md) | yes |
+| `maxConcurrentAgents` | integer | (unset → unlimited) | Cap on concurrently-running workflow steps; overridden by `--max-concurrent` / `AWMAN_MAX_CONCURRENT_AGENTS` — see [Parallel workflows](05-workflows.md#parallel-workflows) | yes |
 | `baseImage` | string | (unset → global) | Image tag for workflow setup/teardown containers — see [Workflows](05-workflows.md) | no (edit file) |
 | `dockerfile` | string | `Dockerfile.dev` | Path to the project base Dockerfile, relative to repo root or absolute | no (edit file) |
-| `dynamicWorkflows.agentsToModels` | object (agent → string array) | (unset → Dockerfile discovery) | Restricts a dynamic workflow's leader to this agent/model set — see [Dynamic Workflows](13-dynamic-workflows.md#configuring-dynamic-workflows) | yes, per agent as `dynamicWorkflows.agentsToModels.<agentName>` (comma-separated; empty value removes) |
+| `dynamicWorkflows.agentsToModels` | object (agent → string array) | (unset → Dockerfile discovery) | Restricts a dynamic workflow's leader to this agent/model set — see [Dynamic Workflows](06-dynamic-workflows.md#configuring-dynamic-workflows) | yes, per agent as `dynamicWorkflows.agentsToModels.<agentName>` (comma-separated; empty value removes) |
 | `dynamicWorkflows.maxConcurrentSteps` | integer | (unset → unlimited) | Advisory cap on concurrent workflow steps passed to the leader prompt | yes, as `dynamicWorkflows.maxConcurrentSteps` |
 | `dynamicWorkflows.defaultLeader` | string (`agent::model`) | (unset) | Default leader agent/model for `exec workflow --dynamic`; overridden by `--leader` | yes, as `dynamicWorkflows.defaultLeader` |
-| `dynamicWorkflows.guidance` | string array | (unset → no guidance block) | Project-specific instructions injected into the leader prompt as a bullet list — see [Dynamic Workflows](13-dynamic-workflows.md#configuring-dynamic-workflows) | yes, per entry as `dynamicWorkflows.guidance.<index>` (empty value removes) |
+| `dynamicWorkflows.guidance` | string array | (unset → no guidance block) | Project-specific instructions injected into the leader prompt as a bullet list — see [Dynamic Workflows](06-dynamic-workflows.md#configuring-dynamic-workflows) | yes, per entry as `dynamicWorkflows.guidance.<index>` (empty value removes) |
 | `auth` | `"keychain"` \| `"passthrough"` \| `"none"` | `"keychain"` | Credential injection mode — see [Control credential injection](#control-credential-injection-auth-mode) | no (edit file) |
 
 ### Global config fields (`$HOME/.awman/config.json`)
@@ -363,15 +369,15 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `yoloDisallowedTools` | string array | `[]` | Machine-wide yolo tool denylist (unless a repo overrides it) | yes |
 | `overlays` | string array | `[]` | Overlay specs applied to every project; additive with other sources | yes |
 | `agentStuckTimeout` | integer (seconds) | 30 | Default agent-stuck timeout | yes |
-| `maxConcurrentAgents` | integer | (unset → unlimited) | Machine-wide default cap on concurrently-running workflow steps (unless a repo overrides it) — see [Parallel Workflows](15-parallel-workflows.md) | yes |
-| `workers` | integer | 2 | API server worker tasks processing the command queue in parallel — see [API Mode](09-api-mode.md) | no (edit file) |
+| `maxConcurrentAgents` | integer | (unset → unlimited) | Machine-wide default cap on concurrently-running workflow steps (unless a repo overrides it) — see [Parallel workflows](05-workflows.md#parallel-workflows) | yes |
+| `workers` | integer | 2 | API server worker tasks processing the command queue in parallel — see [API mode](09-api-and-remote-mode.md) | no (edit file) |
 | `baseImage` | string | (unset) | Default image tag for workflow setup/teardown containers | no (edit file) |
 | `api.workDirs` | string array | `[]` | Directories pre-approved for API session creation; merged with `--workdirs` at server start | yes |
 | `api.alwaysNonInteractive` | bool | `false` | Force non-interactive mode for all dispatched commands (useful on API servers with no TTY) | no (edit file) |
 | `remote.defaultAddr` | string | (unset) | Default remote awman API server address | yes |
 | `remote.defaultAPIKey` | string | (unset) | API key for the default remote server; only sent when the target address matches `remote.defaultAddr` | yes |
-| `remote.savedDirs` | string array | `[]` | Remote-host paths shown in the `remote session start` picker — see [Remote Mode](10-remote-mode.md) | no (edit file) |
-| `amie` | object | (unset) | Global amie daemon settings; see [Amie daemon configuration](#amie-daemon-configuration) | no (edit file) |
+| `remote.savedDirs` | string array | `[]` | Remote-host paths shown in the `remote session start` picker — see [Remote mode](09-api-and-remote-mode.md) | no (edit file) |
+| `squad` | object | (unset) | Global squad daemon settings; see [Squad daemon configuration](#squad-daemon-configuration) | no (edit file) |
 | `launchModeFallback` | `"stdio"` \| `"error"` | `"error"` | What to do when a requested ACP launch uses an agent without ACP support | no (edit file) |
 
 ### `awman config` subcommands
@@ -398,16 +404,20 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `runtime` | global only |
 | `default_agent` | global only |
 | `api` | global only |
-| `remote` | repo or global |
+| `remote` | global only in practice (see note) |
 | `work_items.dir` | repo only |
 | `work_items.template` | repo only |
 | `api.workDirs` | global only |
 | `api.port` | global only (default 9876) |
 | `api.background` | global only |
-| `remote.defaultAddr` | repo or global |
-| `remote.defaultAPIKey` | repo or global |
+| `remote.defaultAddr` | global only in practice (see note) |
+| `remote.defaultAPIKey` | global only in practice (see note) |
 | `dynamicWorkflows.defaultLeader` | repo only |
 | `dynamicWorkflows.maxConcurrentSteps` | repo only |
+| `dynamicWorkflows.agentsToModels` (and `.<agentName>`) | repo only |
+| `dynamicWorkflows.guidance` (and `.<index>`) | repo only |
+
+> **Note on `remote.*` scope.** `config set` accepts these at repo scope, but only the **global** file is ever read back — always pass `--global` when setting them.
 
 `launchMode` and `launchModeFallback` are currently config-file-only fields;
 they are not accepted by `config set` or `config get`. Edit the JSON files
@@ -432,12 +442,12 @@ Value handling:
 | `AWMAN_API_ROOT` | Relocate only the API server storage root |
 | `AWMAN_OVERLAYS` | Comma-separated overlay specs (e.g. `env(TOKEN),dir(/a:/b:ro)`); merged with config and flags — see [Overlays](08-overlays.md) |
 | `AWMAN_LAUNCH_MODE` | Choose `stdio` or `acp`; overrides repo `launchMode` and is overridden by `--launch-mode` |
-| `AWMAN_MAX_CONCURRENT_AGENTS` | Cap on concurrently-running workflow steps; beats `maxConcurrentAgents` in repo/global config, beaten by `--max-concurrent` — see [Parallel Workflows](15-parallel-workflows.md) |
+| `AWMAN_MAX_CONCURRENT_AGENTS` | Cap on concurrently-running workflow steps; beats `maxConcurrentAgents` in repo/global config, beaten by `--max-concurrent` — see [Parallel workflows](05-workflows.md#parallel-workflows) |
 | `AWMAN_REMOTE_ADDR` | Remote API server address; beats `remote.defaultAddr`, beaten by `--remote-addr` |
 | `AWMAN_API_KEY` | Remote API key; beats `remote.defaultAPIKey`, beaten by `--api-key` |
-| `AWMAN_AMIE_KEY` | Bearer key the CLI and TUI authenticate to the amie daemon with; printed once as a shell snippet on the daemon's first start — see [amie: Authenticating to the daemon](16-amie.md#authenticating-to-the-daemon) |
+| `AWMAN_SQUAD_KEY` | Bearer key the CLI and TUI authenticate to the squad daemon with; printed once as a shell snippet on the daemon's first start — see [squad: Authenticating to the daemon](12-squad.md#authenticating-to-the-daemon) |
 | `AWMAN_REMOTE_SESSION` | Sticky session id for `remote exec` commands; beaten by `--session` |
 
 ---
 
-[← Yolo Mode](06-yolo-mode.md) · [Next: Overlays →](08-overlays.md)
+[← Dynamic Workflows](06-dynamic-workflows.md) · [Next: Overlays →](08-overlays.md)

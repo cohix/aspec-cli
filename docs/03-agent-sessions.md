@@ -4,7 +4,7 @@ An agent session is a Docker container running your configured AI agent (Claude 
 
 There are two session types: **freeform chat** and **work item implementation**.
 Either type normally uses the standard stdio launch mode. You can also use
-[ACP mode](17-acp-mode.md) when you want awman to render structured agent
+[ACP mode](03-agent-sessions.md#acp-launch-mode) when you want awman to render structured agent
 activity instead of the agent's raw terminal stream. ACP is currently
 supported only by **Cline**.
 
@@ -28,21 +28,135 @@ Press **Ctrl+C** to exit the agent session when you're done.
 
 ## ACP launch mode
 
-ACP (Agent Client Protocol) mode lets awman present an agent's messages, tool
-activity, plans, and permission requests in awman's own interface. It is
-available today for `cline` only; all other supported agents use the regular
-stdio launch mode.
+ACP (Agent Client Protocol) mode gives awman a structured way to present an
+agent session. Instead of showing the agent's terminal stream directly, awman
+renders the agent's messages, tool activity, plans, and permission requests in
+its own interface.
 
-Select it for one session with `--launch-mode acp`:
+ACP is currently supported only by **Cline**. Other agents continue to use the
+standard stdio launch mode.
+
+ACP is available with the Docker and Apple Containers runtimes. The
+`docker-sbx-experimental` runtime does not currently support ACP.
+
+The interactive ACP experience currently ships in the **CLI**. See
+[ACP in the TUI](#acp-in-the-tui) and [Workflows](#workflows-and-unsupported-agents)
+below for the current limits.
+
+### Start an ACP session
+
+Use `--launch-mode acp` for a single session. Put the flags before the prompt
+positional so they are parsed:
 
 ```sh
 awman chat --agent cline --launch-mode acp
 awman exec prompt --agent cline --launch-mode acp "Review the failing tests"
 ```
 
-The flag is also accepted on `exec workflow`, but ACP is not yet driven for
-workflow steps. See [ACP Mode](17-acp-mode.md) for the CLI experience,
-configuration, and the current TUI and workflow limits.
+The flag is available on `chat` and `exec prompt`. The shortest form uses your
+configured agent, provided it supports ACP:
+
+```sh
+awman chat --launch-mode acp
+```
+
+To return to the normal terminal experience for one invocation, use
+`--launch-mode stdio`.
+
+---
+
+### What changes in ACP mode
+
+ACP changes how awman displays and drives the session. You see structured
+agent responses and activity through awman's interface, rather than the
+agent's raw terminal UI. Permission requests are presented by awman, and an
+ACP session can continue with follow-up prompts while it remains open.
+
+The agent still works on the current project through awman's normal isolated
+agent session. ACP is a presentation and interaction choice; it does not
+change which project you opened or which agent you selected.
+
+---
+
+### ACP in the CLI
+
+The CLI uses an interactive stdio experience for ACP sessions: agent messages
+stream to the terminal, while tool activity and other structured updates are
+printed as readable blocks. When the agent asks for permission, the CLI shows
+the available choices and reads your selection from standard input. After a
+turn, it displays a `>` prompt for a follow-up message.
+
+For `exec prompt`, the supplied prompt starts the first turn. For `chat`, you
+can begin by entering prompts as the session runs. Press **Ctrl+D** when you
+are finished entering follow-up prompts, or **Ctrl+C** to exit the session.
+
+In a non-interactive run (`--non-interactive`, or with `--yolo`/`--auto`), the
+CLI does not prompt for follow-ups or permissions — it runs the seeded turn and
+exits, matching the headless behavior of stdio agents.
+
+---
+
+### ACP in the TUI
+
+The full TUI agent window for ACP — a dedicated purple-bordered window with
+inline structured updates, command-box follow-ups, and dialog permission
+prompts — is **not yet available**. Launching an ACP session in the TUI renders
+update summaries in the message area and does not present interactive follow-up
+or permission dialogs; a permission request that is not pre-approved by
+`--yolo`/`--auto` is denied.
+
+For the interactive ACP experience today, run `awman chat --launch-mode acp`
+from the CLI (outside the TUI).
+
+---
+
+### Selecting a launch mode
+
+The `--launch-mode` flag accepts exactly two values:
+
+```sh
+awman chat --agent cline --launch-mode acp
+awman chat --agent cline --launch-mode stdio
+```
+
+For persistent settings, set `launchMode` in the repository's
+`.awman/config.json`. The default is `stdio`. The effective launch mode is
+chosen in this order:
+
+```
+--launch-mode  >  AWMAN_LAUNCH_MODE  >  repo launchMode  >  stdio
+```
+
+See [Configuration](07-configuration.md) for the config fields and the
+environment variable.
+
+---
+
+### Workflows and unsupported agents
+
+ACP is **not yet available for `exec workflow` steps**. If a repository sets
+`launchMode: acp` and a workflow step resolves to an ACP-capable agent, the
+workflow fails before any step starts, directing you to run that agent over ACP
+with `awman chat` or `awman exec prompt` instead — or to set `launchMode: stdio`
+for workflows.
+
+Workflow steps whose agents do **not** support ACP are governed by the global
+`launchModeFallback` setting, which defaults to `error`:
+
+- `error` stops the workflow before any step starts and reports the step and
+  agent that cannot use ACP.
+- `stdio` runs those steps in the regular stdio mode and prints a warning per
+  step, and the workflow proceeds.
+
+Set the policy in `$HOME/.awman/config.json`:
+
+```json
+{ "launchModeFallback": "stdio" }
+```
+
+An explicit `--launch-mode acp` request for a single unsupported agent remains
+an error, so a one-off request cannot silently change modes. See
+[Workflows](05-workflows.md) for workflow setup and execution.
 
 ---
 
@@ -106,7 +220,7 @@ Per-agent translation and expected `<NAME>` format:
 | `maki` | `--model <NAME>` | `provider/model-id` (e.g. `anthropic/claude-opus-4-6`) |
 | `crush` | `--model <NAME>` (on the `run` subcommand) | bare model ID *or* `provider/model` to disambiguate when multiple providers expose the same model name |
 | `cline` | `--model <NAME>` (on the `task` subcommand) | bare model ID; the provider is selected separately via `cline auth -p <provider>` and is not switchable per-invocation |
-| `copilot` | *(not supported — a `WARNING:` is printed, flag omitted)* | — |
+| `copilot` | `--model <NAME>` | bare model ID; cannot be applied under the `docker-sbx-experimental` runtime (use the `/model` slash command there) |
 
 For agents that support multiple providers (`opencode`, `crush`, `maki`), the `provider/model` slash form lets you target a specific provider when more than one is configured. awman passes the value through verbatim — the agent does the routing.
 
@@ -114,7 +228,7 @@ If an agent does not support `--model`, the behaviour varies. For Antigravity, t
 
 `--model` can be combined freely with `--agent`, `--yolo`, `--auto`, and all other flags. When used with `exec workflow`, the flag value acts as the default model for every workflow step that does not define its own `model` field. See [Per-step model overrides](05-workflows.md#per-step-model-overrides).
 
-Under the `docker-sbx-experimental` runtime, the flag is delivered through the sandbox's per-launch session config (built-in template agents) or as launch arguments (custom-kit agents) rather than directly on the command line; the supported agents and modes are the same, except copilot, which cannot receive a model override there. See [Runtimes](12-runtimes.md#known-limitations).
+Under the `docker-sbx-experimental` runtime, the flag is delivered through the sandbox's per-launch session config (built-in template agents) or as launch arguments (custom-kit agents) rather than directly on the command line; the supported agents and modes are the same, except copilot, which cannot receive a model override there. See [Runtimes](11-runtimes.md#known-limitations).
 
 ### `--non-interactive` / `-n`
 
@@ -125,36 +239,16 @@ Run the agent in print/batch mode — no interactivity required. The agent execu
 | Claude | `--print` |
 | Codex | `exec` subcommand |
 | OpenCode | `run` subcommand |
-| Maki | *(not supported — warning printed, agent launches in interactive mode)* |
-| Gemini | *(not supported — warning printed, agent launches in interactive mode)* |
+| Maki | *(not supported — agent launches in interactive mode)* |
+| Gemini | *(not supported — agent launches in interactive mode)* |
 | Antigravity | `--print` |
-| Copilot | *(not supported — warning printed, agent launches in interactive mode)* |
+| Copilot | *(not supported — agent launches in interactive mode)* |
 | Crush | `run` subcommand |
 | Cline | `task` subcommand |
 
 Useful for CI pipelines, scripting, or when you want the output captured rather than live.
 
-Under the `docker-sbx-experimental` runtime, agents that launch through Docker's built-in sandbox templates (`claude`, `codex`, `gemini`, `copilot`, `opencode`) cannot have their non-interactive flag enabled — awman warns at launch and pipes the prompt to the interactive entrypoint instead. See [Runtimes](12-runtimes.md#known-limitations).
-
-### `--plan`
-
-Run the agent in read-only mode — it can analyse the codebase and suggest changes, but cannot modify files. Useful for getting a second opinion on an approach before committing to implementation.
-
-| Agent | Plan mode |
-|-------|-----------|
-| Claude | `--plan` |
-| Codex | `--approval-mode plan` |
-| OpenCode | Not supported (flag is silently ignored) |
-| Maki | Not supported (flag is silently ignored) |
-| Gemini | `--approval-mode=plan` |
-| Antigravity | `--approval-mode=plan` |
-| Copilot | `--plan` |
-| Crush | Not supported (flag is silently ignored) |
-| Cline | `--plan` (on the `task` subcommand) |
-
-`--plan` can be combined with `--non-interactive`.
-
-Under the `docker-sbx-experimental` runtime, `--plan` / `--auto` / `--yolo` reach claude through its settings file (`permissions.defaultMode`) and the custom-kit agents (`crush`, `maki`, `cline`, `antigravity`) as launch arguments; the other built-in-template agents (`codex`, `gemini`, `copilot`, `opencode`) cannot receive them — awman warns at launch. See [Runtimes](12-runtimes.md#known-limitations).
+Under the `docker-sbx-experimental` runtime, agents that launch through Docker's built-in sandbox templates (`claude`, `codex`, `gemini`, `copilot`, `opencode`) cannot have their non-interactive flag enabled — awman warns at launch and pipes the prompt to the interactive entrypoint instead. See [Runtimes](11-runtimes.md#known-limitations).
 
 ### `--overlay <SPEC>`
 
@@ -183,35 +277,126 @@ Mount the host Docker socket into the container, giving the agent the ability to
 
 ### `--worktree`
 
-Run the agent in an isolated Git worktree instead of your main working tree. After the agent finishes you choose to merge, discard, or keep the branch. See [Security & Isolation](04-security-and-isolation.md#worktree-isolation).
+(`exec workflow` only) Run in an isolated Git worktree under `~/.awman/worktrees/`. Implied by `--yolo` and `--auto` when used with `exec workflow`. See [Security & Isolation](04-security-and-isolation.md).
 
-### `--auto`
+---
 
-Enable intermediate autonomous operation — the agent auto-approves file edits and writes, but still prompts before shell commands and other high-risk operations. Less permissive than `--yolo`.
+## Permission modes
 
-| Agent | Flag used |
-|-------|-----------|
-| `claude` | `--permission-mode auto` |
-| `codex` | `--sandbox workspace-write` |
-| `opencode` | *(no equivalent — a warning is printed, flag omitted)* |
-| `maki` | `--yolo` (maki's own flag) |
-| `gemini` | `--approval-mode=auto_edit` |
-| `antigravity` | *(no equivalent — warning printed, flag omitted)* |
-| `copilot` | `--autopilot` (copilot's only CLI autonomous mode — same flag as `--yolo`) |
-| `crush` | `--yolo` (crush's only autonomous flag — same as `--yolo`; a warning is printed that no intermediate mode exists) |
-| `cline` | `--auto-approve-all` (auto-approves actions while keeping interactive mode) |
+Every agent-launching command (`chat`, `exec prompt`, `exec workflow`, and their `remote` equivalents) runs at one of four permission levels. They differ only in how much the agent may do without asking you first:
 
-`--auto` applies `yoloDisallowedTools` config the same way `--yolo` does. Combined with `--workflow`, it implies `--worktree` but does **not** auto-advance stuck workflow steps.
+| Level | Flag | The agent… |
+|-------|------|-----------|
+| **Ask** (default) | *(none)* | Prompts before every file edit and shell command |
+| **Plan** | `--plan` | Reads and analyses only — cannot modify files at all |
+| **Auto** | `--auto` | Auto-approves file edits and writes; still prompts before shell commands and other high-risk operations |
+| **Yolo** | `--yolo` | Skips every permission prompt and never pauses for confirmation |
 
 When both `--yolo` and `--auto` are passed, `--yolo` wins.
 
+Not every agent implements every level. Where an agent has no equivalent, awman simply omits the flag — the session still launches, but at the agent's own default permission level rather than the one you asked for. **Under the container runtimes this is silent**, so check the table for your agent before relying on a mode. (Under `docker-sbx-experimental` the unsupported combinations are warned about at launch — see [Runtimes](11-runtimes.md#known-limitations).)
+
+### `--plan`
+
+Run the agent in read-only mode — it can analyse the codebase and suggest changes, but cannot modify files. Useful for getting a second opinion on an approach before committing to implementation.
+
+| Agent | Plan mode |
+|-------|-----------|
+| `claude` | `--permission-mode plan` |
+| `codex` | `--approval-mode plan` |
+| `opencode` | *(no equivalent — flag omitted)* |
+| `maki` | *(no equivalent — flag omitted)* |
+| `gemini` | `--approval-mode=plan` |
+| `antigravity` | *(no equivalent — flag omitted)* |
+| `copilot` | `--plan` |
+| `crush` | *(no equivalent — flag omitted)* |
+| `cline` | `--plan` (on the `task` subcommand) |
+
+`--plan` can be combined with `--non-interactive`.
+
+### `--auto`
+
+Enable intermediate autonomous operation — the agent auto-approves file edits and writes, but still prompts before shell commands and other high-risk operations.
+
+| Agent | `--auto` flag |
+|-------|--------------|
+| `claude` | `--permission-mode auto` |
+| `codex` | `--sandbox workspace-write` |
+| `opencode` | *(no equivalent — flag omitted)* |
+| `maki` | *(no equivalent — flag omitted)* |
+| `gemini` | `--approval-mode=auto_edit` |
+| `antigravity` | *(no equivalent — flag omitted)* |
+| `copilot` | *(no equivalent — flag omitted)* |
+| `crush` | *(no equivalent — flag omitted)* |
+| `cline` | `--auto-approve-all` (auto-approves actions while keeping interactive mode) |
+
+`--auto` applies `yoloDisallowedTools` the same way `--yolo` does. Combined with `exec workflow` it implies `--worktree`, but it does **not** auto-advance stuck steps — that countdown is `--yolo`-only.
+
 ### `--yolo`
 
-Enable fully autonomous operation — the agent skips all permission prompts. See [Yolo Mode](06-yolo-mode.md).
+Fully autonomous operation. Use it when you want to hand a task to the agent and come back to a finished result.
 
-### `--worktree`
+```sh
+awman exec workflow aspec/workflows/implement-feature.toml --yolo
+awman chat --yolo
+```
 
-(`exec workflow` only) Run in an isolated Git worktree under `~/.awman/worktrees/`. Implied by `--yolo` and `--auto` when used with `exec workflow`. See [Security & Isolation](04-security-and-isolation.md).
+Yolo mode is a good fit when you have a well-specified work item you trust the agent to implement, when you want a multi-step workflow to run end-to-end without manual advancement, or when you have already reviewed the approach in a `--plan` session. It is a poor fit for work that will hit decisions genuinely needing your input, for open-ended `chat` sessions, and for anything difficult to undo.
+
+`--yolo` does four things:
+
+**1. Skips all agent permission prompts.** The agent-specific flag is appended to the container entrypoint before launch:
+
+| Agent | Flag appended |
+|-------|--------------|
+| `claude` | `--dangerously-skip-permissions` |
+| `codex` | `--dangerously-bypass-approvals-and-sandbox` |
+| `opencode` | *(no equivalent — flag omitted)* |
+| `maki` | `--yolo` |
+| `gemini` | `--yolo` |
+| `antigravity` | `--dangerously-skip-permissions` |
+| `copilot` | `--autopilot` (copilot's only CLI autonomous mode) |
+| `crush` | `--yolo` (inserted before the `run` subcommand: `crush --yolo run`) |
+| `cline` | `--yolo` (on the `task` subcommand) |
+
+**2. Applies `yoloDisallowedTools`** — see [Disallowed tools](#disallowed-tools) below. Only Claude implements a deny list (`--disallowedTools tool1,tool2,…`); for every other agent the setting is omitted, so a yolo session with those agents runs unrestricted.
+
+**3. Implies `--worktree` for workflow execution.** Running a workflow with `--yolo` automatically creates an isolated Git worktree, and prints:
+
+```
+--yolo with workflow execution implies --worktree. Running in isolated worktree.
+```
+
+Passing `--worktree` as well is silently accepted — no duplicate worktree is created. With other commands (`chat`, `exec prompt`) `--worktree` is **not** implied; pass it explicitly if you want isolation.
+
+**4. Auto-advances stuck workflow steps.** When a step goes silent, a countdown advances the workflow for you. See [Auto-advance when stuck](05-workflows.md#auto-advance-when-stuck-yolo-mode) in the workflow guide for the countdown, how it appears in each frontend, and how to cancel it.
+
+### Disallowed tools
+
+Add `yoloDisallowedTools` to your per-repo or global config to restrict which tools the agent may use even under full autonomy:
+
+```json
+{
+  "yoloDisallowedTools": ["Bash", "computer"]
+}
+```
+
+This is your safety net for operations you never want the agent to perform autonomously, regardless of how well-specified the task is. `"Bash"` prevents arbitrary shell command execution; `"computer"` prevents GUI automation.
+
+**Config precedence:** per-repo config replaces global config entirely (lists are not merged). To inherit the global list for a repo, omit the field from the repo config. See [Configuration](07-configuration.md).
+
+### Yolo through the HTTP API
+
+Commands submitted through the API (`POST /v1/commands`) run with `--yolo` applied **by default** for `chat`, `exec prompt`, and `exec workflow` — the server assumes unattended execution unless your request specifies the flag itself. The response's `flags_applied` field confirms which defaults were used; see [Submit a command](09-api-and-remote-mode.md#submit-a-command).
+
+### Security considerations
+
+- `--yolo` removes the human checkpoints that catch unintended agent actions. Only use it with agents and work items you trust.
+- `yoloDisallowedTools` is a floor the agent can never cross — but only Claude enforces it.
+- `exec workflow --yolo` is the recommended autonomous pattern: isolated branch, structured phases, auto-advancing, easy to discard if the output isn't right.
+- Gemini's `--yolo` skips all tool confirmations including shell commands; `--auto` (`--approval-mode=auto_edit`) is the more conservative choice.
+- Copilot and Crush support `--yolo` only — `--auto` has no equivalent for either and is dropped.
+- Cline's `--auto` keeps interactive mode while auto-approving; its `--yolo` fully skips confirmations and implies non-interactive operation.
 
 ---
 
@@ -234,7 +419,7 @@ awman config set work_items.dir docs/work-items
 awman config set work_items.template docs/work-items/my-template.md
 ```
 
-If no template is found or confirmed, the new file is created with a minimal stub (`# Kind: Title`). See [Configuration: Work item paths](07-configuration.md#work-item-paths) for full details on path resolution and auto-discovery.
+If no template is found or confirmed, the new file is created with a minimal stub (`# Kind: Title`). See [Configuration: Work item paths](07-configuration.md#custom-work-item-paths) for full details on path resolution and auto-discovery.
 
 ```sh
 awman new spec --interview
@@ -254,7 +439,7 @@ awman new spec --issue https://github.com/prettysmartdev/awman/issues/84      # 
 
 Fetches the GitHub issue and launches an agent to generate a structured work item spec from its content. Combined with `--interview`, the issue description is pre-populated in the text box for editing before the agent runs.
 
-For full details on GitHub integration, authentication, and input formats, see [GitHub Integration](11-github-integration.md).
+For full details on GitHub integration, authentication, and input formats, see [GitHub Integration](10-github-integration.md).
 
 ### Updating a spec after implementation
 
@@ -438,10 +623,12 @@ CODE AGENTS
 If awman is launched outside of any Git repository, `status --watch` runs automatically instead of the normal startup.
 
 The status output includes a source marker for each container. Ordinary user
-sessions are marked `session`; a container launched by the amie daemon is
-marked `amie:<condition>`, such as `amie:issue-triage`. This marker identifies
-which condition owns the background evaluation. It can appear even if you have
-never enabled amie; it does not indicate a problem with a regular session.
+sessions are marked `session`; a container launched by the squad daemon is
+marked `squad:<task>`, such as `squad:issue-triage`. This marker identifies
+which task owns the background evaluation or generated workflow. It can appear
+even if you have never enabled squad; it does not indicate a problem with a
+regular session. See [Squad](12-squad.md) for task management and unattended
+execution.
 
 ---
 
@@ -565,7 +752,7 @@ Antigravity does not support the `--model` flag. Configure the model in `~/.gemi
 
 ## Gemini deprecation notice
 
-The `gemini` agent is deprecated by Google in favor of Antigravity. When you launch a `gemini` session using `awman chat gemini` or set `agent = "gemini"` in your config, a deprecation warning appears before the container starts:
+The `gemini` agent is deprecated by Google in favor of Antigravity. When you launch a `gemini` session using `awman chat --agent gemini` or set `agent = "gemini"` in your config, a deprecation warning appears before the container starts:
 
 ```
 The 'gemini' agent is deprecated by Google. Migrate to 'antigravity' — run 'awman chat antigravity' (or 'awman config set agent antigravity' to change your default).
@@ -573,7 +760,7 @@ The 'gemini' agent is deprecated by Google. Migrate to 'antigravity' — run 'aw
 
 The warning does not block execution — your gemini session still starts. However, you should plan to migrate to `antigravity`:
 
-1. Try it once — `awman chat antigravity` automatically downloads `Dockerfile.antigravity` and builds the agent image on first use.
+1. Try it once — `awman chat --agent antigravity` automatically downloads `Dockerfile.antigravity` and builds the agent image on first use.
 2. Make it your default: `awman config set agent antigravity` (add `--global` to apply across all repos).
 3. Set up authentication as described in [Antigravity authentication](#antigravity-authentication) above.
 
@@ -659,7 +846,6 @@ cat ~/.cline/data/secrets.json
 
 
 ## Reference: `awman init`
-## Reference: `awman init`
 
 ```sh
 awman init [--agent=<name>] [--aspec]
@@ -674,7 +860,7 @@ Initialises the current Git repository for use with awman. See [Getting Started]
 
 `--aspec` downloads the `aspec/` folder from `github.com/prettysmartdev/aspec`, providing spec templates and work item scaffolding. Skipped without the flag.
 
-When `--aspec` is not passed and no `aspec/` folder exists, `init` offers to configure a custom work items directory and template path interactively. This sets `work_items.dir` (and optionally `work_items.template`) in the repo config so commands like `new spec` and `exec workflow` work without requiring the `aspec/` folder layout. See [Work item paths](07-configuration.md#work-item-paths).
+When `--aspec` is not passed and no `aspec/` folder exists, `init` offers to configure a custom work items directory and template path interactively. This sets `work_items.dir` (and optionally `work_items.template`) in the repo config so commands like `new spec` and `exec workflow` work without requiring the `aspec/` folder layout. See [Work item paths](07-configuration.md#custom-work-item-paths).
 
 ---
 
@@ -788,6 +974,10 @@ When `--refresh` is also set, the audit runs and its results are included once c
 | `--auto` | ✓ | ✓ | ✓ | Auto-approve file edits, prompt for shell commands |
 | `--yolo` | ✓ | ✓ | ✓ | Fully autonomous mode |
 | `--work-item <N>` | — | — | ✓ | Work item number for template variable substitution |
+| `--issue <N|URL>` | — | ✓ | ✓ | Use a GitHub issue as the prompt / work item input — see [GitHub Integration](10-github-integration.md) |
+| `--dynamic` | — | — | ✓ | Have a leader agent design the workflow; implies `--yolo`, `--worktree`, `context(workflow)` |
+| `--leader <agent::model>` | — | — | ✓ | Leader agent and model for `--dynamic` |
+| `--max-concurrent <N>` | — | — | ✓ | Cap concurrently-running workflow steps |
 
 ---
 

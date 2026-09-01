@@ -774,9 +774,9 @@ impl ExecutionBackend for AppleExecution {
 
 // ─── Attach (re-attach into a foreign, already-running container) ───────────
 
-/// Configured-but-not-running Apple attach handle. Mirrors the Docker attach
-/// shape over `container exec`, reusing the shared attach helpers from
-/// `docker.rs` and an `AppleAttachExecution` that never stops the target.
+/// Configured-but-not-running Apple attach handle. It reconnects to the
+/// running container's primary process rather than execing a shell alongside
+/// it, and never stops the target when the local client closes.
 struct AppleAttachInstance {
     handle: AgentHandle,
 }
@@ -794,7 +794,7 @@ impl AgentInstance for AppleAttachInstance {
         self: Box<Self>,
         mut frontend: Box<dyn crate::engine::agent_runtime::frontend::AgentFrontend>,
     ) -> Result<AgentExecution, EngineError> {
-        use crate::engine::container::docker::{attach_bridge_config, default_attach_entrypoint};
+        use crate::engine::container::docker::attach_bridge_config;
 
         let started_at = chrono::Utc::now();
         let handle = self.handle.clone();
@@ -810,27 +810,17 @@ impl AgentInstance for AppleAttachInstance {
         let io = frontend.take_io();
         let bridge_cfg = attach_bridge_config(grace_timeout, stuck_timeout);
 
-        let entrypoint = default_attach_entrypoint();
-        let ep_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
+        let argv = vec!["attach".to_string(), handle.id.clone()];
 
-        if let Some((cols, rows)) = io.initial_size {
-            let cols_s = cols.to_string();
-            let rows_s = rows.to_string();
-            let argv = AppleBackend.exec_args(
-                &handle.id,
-                "/workspace",
-                &ep_refs,
-                &[("COLUMNS", &cols_s), ("LINES", &rows_s)],
-            );
+        if io.initial_size.is_some() {
             return spawn_pty_bridged_apple_attach(io, argv, started_at, handle, bridge_cfg);
         }
 
-        let argv = AppleBackend.exec_args(&handle.id, "/workspace", &ep_refs, &[]);
         spawn_piped_apple_attach(io, argv, started_at, handle, bridge_cfg)
     }
 }
 
-/// Spawn `container exec -it` via `portable-pty` and bridge through `AgentIo`.
+/// Spawn `container attach` via `portable-pty` and bridge through `AgentIo`.
 fn spawn_pty_bridged_apple_attach(
     io: crate::engine::agent_runtime::frontend::AgentIo,
     argv: Vec<String>,
@@ -859,7 +849,7 @@ fn spawn_pty_bridged_apple_attach(
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| EngineError::Container(format!("spawn container exec via pty: {e}")))?;
+        .map_err(|e| EngineError::Container(format!("spawn container attach via pty: {e}")))?;
     let child_pid = child.process_id();
 
     let (master_arc, bridge) =
@@ -881,7 +871,7 @@ fn spawn_pty_bridged_apple_attach(
     ))
 }
 
-/// Spawn `container exec` with piped stdio and bridge through `AgentIo`.
+/// Spawn `container attach` with piped stdio and bridge through `AgentIo`.
 fn spawn_piped_apple_attach(
     io: crate::engine::agent_runtime::frontend::AgentIo,
     argv: Vec<String>,
@@ -901,7 +891,7 @@ fn spawn_piped_apple_attach(
                 binary: "container".into(),
             }
         } else {
-            EngineError::Container(format!("spawn container exec: {e}"))
+            EngineError::Container(format!("spawn container attach: {e}"))
         }
     })?;
     let child_pid = Some(child.id());
@@ -926,7 +916,7 @@ fn spawn_piped_apple_attach(
 }
 
 /// Execution backend for an Apple attach session. Cancellation kills only the
-/// local `container exec` client — never `container stop <name>`, because the
+/// local `container attach` client — never `container stop <name>`, because the
 /// target container belongs to another process.
 struct AppleAttachExecution {
     child: Option<std::process::Child>,
@@ -942,7 +932,7 @@ impl ExecutionBackend for AppleAttachExecution {
         if let Some(mut child) = self.pty_child.take() {
             let status = child
                 .wait()
-                .map_err(|e| EngineError::Container(format!("wait container exec (pty): {e}")))?;
+                .map_err(|e| EngineError::Container(format!("wait container attach (pty): {e}")))?;
             self.pty_master = None;
             let exit_code = status.exit_code().try_into().unwrap_or(-1);
             return Ok(AgentExitInfo {
@@ -959,7 +949,7 @@ impl ExecutionBackend for AppleAttachExecution {
             .ok_or_else(|| EngineError::Container("execution already waited".into()))?;
         let status = child
             .wait()
-            .map_err(|e| EngineError::Container(format!("wait container exec: {e}")))?;
+            .map_err(|e| EngineError::Container(format!("wait container attach: {e}")))?;
         let exit_code = status.code().unwrap_or(-1);
         #[cfg(unix)]
         let signal = {

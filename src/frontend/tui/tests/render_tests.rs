@@ -166,7 +166,7 @@ fn status_bar_omits_summary_when_none() {
     );
 }
 
-// ─── amie tab rendering (WI 0102) ──────────────────────────────────────────
+// ─── squad tab rendering (WI 0102) ──────────────────────────────────────────
 
 fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
     let area = *buf.area();
@@ -180,97 +180,99 @@ fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
         .join("\n")
 }
 
-fn push_amie_tab(app: &mut App) -> usize {
-    let tab = crate::frontend::tui::tabs::Tab::new_amie(make_session());
+fn push_squad_tab(app: &mut App) -> usize {
+    let tab = crate::frontend::tui::tabs::Tab::new_squad(make_session());
     app.tabs.push(tab);
     let idx = app.tabs.len() - 1;
     app.active_tab = idx;
     idx
 }
 
-fn fake_condition(name: &str) -> crate::data::fs::condition_store::Condition {
-    use crate::data::fs::condition_store::{ConditionStatus, MountScope};
+fn fake_task(name: &str) -> crate::data::fs::task_store::Task {
+    use crate::data::fs::task_store::{MountScope, TaskStatus};
     let now = chrono::Utc::now();
-    crate::data::fs::condition_store::Condition {
+    crate::data::fs::task_store::Task {
         id: name.to_string(),
         name: name.to_string(),
-        description: "a test condition".into(),
+        description: "a test task".into(),
         repo_scope: std::path::PathBuf::from("/tmp"),
         mount_scope: MountScope::GitRoot,
+        overlays: Vec::new(),
         interval_secs: 300,
-        status: ConditionStatus::Active,
+        status: TaskStatus::Active,
         agent: None,
         model: None,
         backoff_until: None,
         created_at: now,
         updated_at: now,
         last_run_at: None,
+        last_run_status: None,
     }
 }
 
 #[test]
-fn render_frame_amie_tab_no_slots_draws_amie_body_not_execution_window() {
+fn render_frame_squad_tab_no_slots_draws_squad_body_not_execution_window() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     let buf = render_app(&mut app, 80, 24);
     let text = buffer_text(&buf);
-    assert!(text.contains("amie"), "the amie body must render: {text}");
+    assert!(text.contains("squad"), "the squad body must render: {text}");
     assert!(
         text.contains("enter detail"),
-        "the amie key-hint line must render: {text}"
+        "the squad key-hint line must render: {text}"
     );
     assert!(
         !text.contains("awman"),
-        "the ordinary execution window's idle title must not render for the amie tab: {text}"
+        "the ordinary execution window's idle title must not render for the squad tab: {text}"
     );
 }
 
 #[test]
-fn render_frame_amie_tab_with_slots_draws_normal_execution_rendering() {
+fn render_frame_squad_tab_with_slots_draws_normal_execution_rendering() {
     use crate::frontend::tui::tabs::ExecutionPhase;
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     app.active_tab_mut()
         .start_container("claude".into(), "awman-abc".into(), 80, 24);
     app.active_tab_mut().execution_phase = ExecutionPhase::Running {
-        command: "amie attach cond-a".into(),
+        command: "squad attach task-a".into(),
     };
     let buf = render_app(&mut app, 80, 24);
     let text = buffer_text(&buf);
     assert!(
         !text.contains("enter detail"),
-        "the amie body must not render while an attach session owns the tab's slots: {text}"
+        "the squad body must not render while an attach session owns the tab's slots: {text}"
     );
     assert!(
-        text.contains("running: amie attach cond-a"),
+        text.contains("running: squad attach task-a"),
         "the ordinary execution window must render instead: {text}"
     );
 }
 
 #[test]
-fn amie_condition_detail_modal_renders_over_the_body_and_stays_live() {
+fn squad_task_detail_modal_renders_over_the_body_and_stays_live() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     {
-        let state = app.active_tab().amie.as_ref().unwrap();
+        let state = app.active_tab().squad.as_ref().unwrap();
         let mut snap = state.snapshot.lock().unwrap();
-        snap.conditions = vec![fake_condition("cond-a")];
+        snap.tasks = vec![fake_task("task-a")];
         snap.loaded = true;
     }
-    let condition = app
+    let task = app
         .active_tab()
-        .amie
+        .squad
         .as_ref()
         .unwrap()
         .snapshot
         .lock()
         .unwrap()
-        .conditions[0]
+        .tasks[0]
         .clone();
-    app.active_dialog = Some(Dialog::AmieConditionDetail(
-        crate::frontend::tui::dialogs::AmieDetailState {
-            name: "cond-a".to_string(),
-            condition,
+    app.active_dialog = Some(Dialog::SquadTaskDetail(
+        crate::frontend::tui::dialogs::SquadDetailState {
+            name: "task-a".to_string(),
+            task,
             runs: Vec::new(),
             scroll: 0,
         },
@@ -278,16 +280,16 @@ fn amie_condition_detail_modal_renders_over_the_body_and_stays_live() {
 
     // Mutate the underlying snapshot as the poller would, then let
     // `tick_all_tabs` refresh the open modal from it (app.rs §"WI 0102: keep
-    // the amie condition-detail modal live").
+    // the squad task-detail modal live").
     {
-        let state = app.active_tab().amie.as_ref().unwrap();
+        let state = app.active_tab().squad.as_ref().unwrap();
         let mut snap = state.snapshot.lock().unwrap();
-        snap.conditions[0].description = "updated by the poller".to_string();
+        snap.tasks[0].description = "updated by the poller".to_string();
     }
     app.tick_all_tabs();
     match &app.active_dialog {
-        Some(Dialog::AmieConditionDetail(state)) => {
-            assert_eq!(state.condition.description, "updated by the poller")
+        Some(Dialog::SquadTaskDetail(state)) => {
+            assert_eq!(state.task.description, "updated by the poller")
         }
         _ => panic!("the modal must remain open across a tick"),
     }
@@ -295,8 +297,8 @@ fn amie_condition_detail_modal_renders_over_the_body_and_stays_live() {
     let buf = render_app(&mut app, 80, 24);
     let text = buffer_text(&buf);
     assert!(
-        text.contains("condition: cond-a"),
-        "the detail modal must render over the amie body: {text}"
+        text.contains("task: task-a"),
+        "the detail modal must render over the squad body: {text}"
     );
     assert!(
         text.contains("updated by the poller"),
@@ -305,30 +307,30 @@ fn amie_condition_detail_modal_renders_over_the_body_and_stays_live() {
 }
 
 #[test]
-fn tab_bar_shows_amie_label_at_minimum_and_wide_widths() {
+fn tab_bar_shows_squad_label_at_minimum_and_wide_widths() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     let narrow = buffer_text(&render_app(&mut app, 20, 24));
     assert!(
-        narrow.contains("amie"),
-        "the amie tab label must render even at the minimum tab width: {narrow}"
+        narrow.contains("squad"),
+        "the squad tab label must render even at the minimum tab width: {narrow}"
     );
     let wide = buffer_text(&render_app(&mut app, 100, 24));
     assert!(
-        wide.contains("amie"),
-        "the amie tab label must render in a wide terminal too: {wide}"
+        wide.contains("squad"),
+        "the squad tab label must render in a wide terminal too: {wide}"
     );
 }
 
 #[test]
-fn ctrl_g_on_amie_tab_renders_no_git_sidebar() {
+fn ctrl_g_on_squad_tab_renders_no_git_sidebar() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     press_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
     let buf = render_app(&mut app, 80, 24);
     assert!(
         has_green_sidebar_corner(&buf).is_none(),
-        "Ctrl-G must render no git sidebar for the amie tab (a non-project tab)"
+        "Ctrl-G must render no git sidebar for the squad tab (a non-project tab)"
     );
 }
 
@@ -663,4 +665,106 @@ fn maximized_overview_never_grows_past_the_space_between_tab_bar_and_command_box
             .any(|l| l.contains("\u{256d}") || l.contains("\u{2570}")),
         "the command box keeps its rows at the bottom of the frame: {text}"
     );
+}
+
+/// WI 0106 Part 5: the card carries the task name, a summary, the **last-run
+/// outcome** and time, and the next evaluation — the outcome being what
+/// actually happened on the last run, not whether the task is scheduled.
+#[test]
+fn squad_task_cards_render_rounded_borders_and_the_last_run_outcome() {
+    use crate::data::fs::task_store::{RunStatus, TaskStatus};
+    let mut app = make_app();
+    push_squad_tab(&mut app);
+    {
+        let state = app.active_tab().squad.as_ref().unwrap();
+        let mut snap = state.snapshot.lock().unwrap();
+        let mut triggered = fake_task("issue-triage");
+        triggered.description = "watch the issue tracker".into();
+        triggered.last_run_at = Some(chrono::Utc::now());
+        triggered.last_run_status = Some(RunStatus::WorkflowExecuted);
+
+        let mut quiet = fake_task("nightly-sweep");
+        quiet.last_run_at = Some(chrono::Utc::now());
+        quiet.last_run_status = Some(RunStatus::NotTriggered);
+        // Paused is scheduling state, reported separately from the outcome.
+        quiet.status = TaskStatus::Paused;
+
+        let never = fake_task("brand-new");
+
+        snap.tasks = vec![triggered, quiet, never];
+        snap.loaded = true;
+    }
+
+    let buf = render_app(&mut app, 100, 30);
+    let text = buffer_text(&buf);
+
+    assert!(
+        text.contains('\u{256d}') && text.contains('\u{256f}'),
+        "cards must use ratatui's rounded borders: {text}"
+    );
+    assert!(text.contains("issue-triage"), "{text}");
+    assert!(text.contains("watch the issue tracker"), "{text}");
+    assert!(
+        text.contains("workflow executed"),
+        "a card must show its last run's outcome, not its active/paused state: {text}"
+    );
+    assert!(
+        text.contains("not triggered"),
+        "an un-triggered last run must read as such: {text}"
+    );
+    assert!(
+        text.contains("never run"),
+        "a task that has never run must say so rather than showing a blank outcome: {text}"
+    );
+    assert!(
+        text.contains("paused"),
+        "paused remains visible, as scheduling state alongside the outcome: {text}"
+    );
+    assert!(text.contains("Next:"), "{text}");
+}
+
+#[test]
+fn a_squad_tab_with_no_tasks_renders_an_empty_state_instead_of_empty_cards() {
+    let mut app = make_app();
+    push_squad_tab(&mut app);
+    {
+        let state = app.active_tab().squad.as_ref().unwrap();
+        state.snapshot.lock().unwrap().loaded = true;
+    }
+    let text = buffer_text(&render_app(&mut app, 80, 24));
+    assert!(
+        text.contains("No squad tasks yet"),
+        "an empty grid must render its empty state: {text}"
+    );
+}
+
+/// The detail modal repeats the per-task action keys, so a user who opened it
+/// does not have to close it to remember or trigger them.
+#[test]
+fn the_squad_detail_modal_shows_the_task_scoped_action_tooltip() {
+    let mut app = make_app();
+    push_squad_tab(&mut app);
+    let task = fake_task("issue-triage");
+    {
+        let state = app.active_tab().squad.as_ref().unwrap();
+        let mut snap = state.snapshot.lock().unwrap();
+        snap.tasks = vec![task.clone()];
+        snap.loaded = true;
+    }
+    app.active_dialog = Some(Dialog::SquadTaskDetail(
+        crate::frontend::tui::dialogs::SquadDetailState {
+            name: "issue-triage".to_string(),
+            task,
+            runs: Vec::new(),
+            scroll: 0,
+        },
+    ));
+
+    let text = buffer_text(&render_app(&mut app, 100, 30));
+    for key in ["a attach", "p pause", "r resume", "d delete"] {
+        assert!(
+            text.contains(key),
+            "the modal's action tooltip must offer {key:?}: {text}"
+        );
+    }
 }

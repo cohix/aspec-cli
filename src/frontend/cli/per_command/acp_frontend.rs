@@ -44,7 +44,10 @@ impl AcpFrontend for CliFrontend {
         if self.non_interactive {
             return PermissionDecision::approve(&request.options);
         }
-        println!("{}", sanitize_terminal_text(&format_permission_request(&request)));
+        println!(
+            "{}",
+            sanitize_terminal_text(&format_permission_request(&request))
+        );
         loop {
             print!("choice: ");
             let _ = std::io::stdout().flush();
@@ -214,7 +217,12 @@ fn format_permission_request(request: &PermissionRequest) -> String {
         )
     );
     for (i, option) in request.options.iter().enumerate() {
-        out.push_str(&format!("\n  [{}] {} ({})", i + 1, option.name, option.kind));
+        out.push_str(&format!(
+            "\n  [{}] {} ({})",
+            i + 1,
+            option.name,
+            option.kind
+        ));
     }
     out
 }

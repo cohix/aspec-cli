@@ -336,7 +336,7 @@ pub(super) fn handle_dialog_scroll(app: &mut App, direction: i32) {
                 *selected = (*selected + step).min(len - 1);
             }
         }
-        Some(Dialog::AmieConditionDetail(state)) => {
+        Some(Dialog::SquadTaskDetail(state)) => {
             if direction < 0 {
                 state.scroll = state.scroll.saturating_sub(step);
             } else {
@@ -390,10 +390,10 @@ pub(super) fn handle_dialog_char(app: &mut App, c: char) {
             }
             _ => {}
         },
-        // WI 0102: `y` confirms removal by dispatching `amie remove <name>`
+        // WI 0102: `y` confirms removal by dispatching `squad remove <name>`
         // through the ordinary Layer-2 path; `n`/`Esc` dismisses. This dialog
         // decides nothing itself — it only collects the confirmation.
-        Some(Dialog::AmieRemoveConfirm { name }) => {
+        Some(Dialog::SquadRemoveConfirm { name }) => {
             let name = name.clone();
             match c {
                 'y' | 'Y' => {
@@ -411,9 +411,9 @@ pub(super) fn handle_dialog_char(app: &mut App, c: char) {
                         crate::command::dispatch::parsed_input::FlagValue::Bool(true),
                     );
                     app.spawn_command(
-                        &format!("amie remove {name} --yes"),
+                        &format!("squad remove {name} --yes"),
                         crate::command::dispatch::parsed_input::ParsedCommandBoxInput {
-                            path: vec!["amie".into(), "remove".into()],
+                            path: vec!["squad".into(), "remove".into()],
                             flags,
                             arguments,
                         },
@@ -531,11 +531,36 @@ pub(super) fn handle_dialog_char(app: &mut App, c: char) {
             }
         }
 
+        // WI 0106 Part 5: the detail modal's action tooltip — attach/pause/
+        // resume/remove, scoped to the specific task the modal is showing
+        // (`state.name`), never the list's current selection (which may have
+        // moved since the modal was opened). Esc still dismisses and the
+        // arrow/page keys still scroll the run history via
+        // `handle_dialog_scroll`; only these four chars are new.
+        Some(Dialog::SquadTaskDetail(state)) => {
+            let name = state.name.clone();
+            match c {
+                'a' => {
+                    app.active_dialog = None;
+                    crate::frontend::tui::squad_attach::start_squad_attach(app, &name);
+                }
+                'p' => {
+                    key_handler::squad_dispatch_by_name(app, "pause", &name);
+                    app.active_dialog = None;
+                }
+                'r' => {
+                    key_handler::squad_dispatch_by_name(app, "resume", &name);
+                    app.active_dialog = None;
+                }
+                'd' => {
+                    app.active_dialog = Some(Dialog::SquadRemoveConfirm { name });
+                }
+                _ => {}
+            }
+        }
+
         // ── Non-interactive / fallback dialogs ─────────────────────
-        // The amie detail modal ignores char keys — Esc dismisses and the
-        // arrow/page keys scroll via `handle_dialog_scroll`.
-        Some(Dialog::AmieConditionDetail(_))
-        | Some(Dialog::Loading { .. })
+        Some(Dialog::Loading { .. })
         | Some(Dialog::ListPicker { .. })
         | Some(Dialog::KindSelect { .. })
         | Some(Dialog::YesNo { .. })

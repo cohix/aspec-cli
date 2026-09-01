@@ -7,7 +7,6 @@
 mod acp_frontend;
 mod agent_auth;
 mod agent_setup;
-mod amie;
 mod api_server;
 mod auth;
 mod chat;
@@ -23,6 +22,7 @@ mod new;
 mod ready;
 pub(crate) mod remote;
 mod specs;
+mod squad;
 mod status;
 mod workflow_frontend;
 mod worktree_lifecycle;

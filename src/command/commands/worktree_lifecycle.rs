@@ -105,7 +105,7 @@ pub trait WorktreeLifecycleFrontend: UserMessageSink + Send + Sync {
     fn ask_merge_mode(&mut self, branch: &str) -> Result<WorktreeMergeMode, CommandError>;
 
     fn confirm_worktree_cleanup(&mut self, branch: &str, path: &Path)
-    -> Result<bool, CommandError>;
+        -> Result<bool, CommandError>;
 
     fn report_merge_conflict(&mut self, branch: &str, worktree_path: &Path, git_root: &Path);
 

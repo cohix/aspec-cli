@@ -1,7 +1,7 @@
 //! `DataPaths` — the shared (non-API-specific) data root.
 //!
 //! The sqlite database moves out of the API-mode directory (`~/.awman/api/`)
-//! into a shared `~/.awman/data/` once amie also owns tables in it. `DataPaths`
+//! into a shared `~/.awman/data/` once squad also owns tables in it. `DataPaths`
 //! resolves `<data_home>/data/awman.db` using the same precedence
 //! `GlobalConfig::data_home_with` implements (`AWMAN_CONFIG_HOME` →
 //! `XDG_DATA_HOME/awman` → `$HOME/.awman`). No new env var — the DB relocates
@@ -81,7 +81,7 @@ impl DataPaths {
         std::fs::create_dir_all(&self.root).map_err(|e| DataError::io(&self.root, e))
     }
 
-    /// Relocate the database from a pre-amie API root, preserving SQLite's WAL
+    /// Relocate the database from a pre-squad API root, preserving SQLite's WAL
     /// sidecars. The original is renamed only after all copies verify, making
     /// an interrupted migration safely resumable.
     pub fn migrate_legacy_db(&self, legacy_root: &Path) -> Result<MigrationOutcome, DataError> {

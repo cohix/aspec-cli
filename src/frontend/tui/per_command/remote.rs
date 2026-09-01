@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::command::commands::amie::gateway::RemoteConditionGateway;
 use crate::command::commands::remote::RemoteCommandFrontend;
 use crate::command::commands::remote_client::RemoteClient;
+use crate::command::commands::squad::gateway::RemoteTaskGateway;
 use crate::command::error::CommandError;
 use crate::data::workflow_state::WorkflowState;
 use crate::frontend::tui::command_frontend::TuiCommandFrontend;
@@ -25,7 +25,7 @@ pub type WorkflowStateCallback = Arc<dyn Fn(&WorkflowState) + Send + Sync>;
 
 /// Source of workflow snapshots for [`RemoteWorkflowPoller`].
 ///
-/// The API server and amie daemon expose different routes, but both return the
+/// The API server and squad daemon expose different routes, but both return the
 /// same Layer-0 [`WorkflowState`], so the polling and rendering path is shared.
 #[async_trait::async_trait]
 pub trait WorkflowStateSource: Send + Sync {
@@ -76,28 +76,28 @@ impl WorkflowStateSource for RemoteApiWorkflowSource {
     }
 }
 
-/// Workflow source backed by `GET /v1/conditions/{name}/workflow` on amie.
-pub struct AmieConditionWorkflowSource {
-    gateway: RemoteConditionGateway,
-    condition: String,
+/// Workflow source backed by `GET /v1/tasks/{name}/workflow` on squad.
+pub struct SquadTaskWorkflowSource {
+    gateway: RemoteTaskGateway,
+    task: String,
 }
 
-impl AmieConditionWorkflowSource {
-    pub fn new(gateway: RemoteConditionGateway, condition: impl Into<String>) -> Self {
+impl SquadTaskWorkflowSource {
+    pub fn new(gateway: RemoteTaskGateway, task: impl Into<String>) -> Self {
         Self {
             gateway,
-            condition: condition.into(),
+            task: task.into(),
         }
     }
 }
 
 #[async_trait::async_trait]
-impl WorkflowStateSource for AmieConditionWorkflowSource {
+impl WorkflowStateSource for SquadTaskWorkflowSource {
     async fn fetch_workflow_state(&self) -> Result<Option<WorkflowState>, CommandError> {
         let response = match self
             .gateway
             .core()
-            .get(&["conditions", &self.condition, "workflow"])
+            .get(&["tasks", &self.task, "workflow"])
             .await
         {
             Ok(response) => response,
@@ -108,8 +108,8 @@ impl WorkflowStateSource for AmieConditionWorkflowSource {
             .map(Some)
             .map_err(|error| {
                 CommandError::RemoteTransport(format!(
-                    "invalid amie workflow state for {:?}: {error}",
-                    self.condition
+                    "invalid squad workflow state for {:?}: {error}",
+                    self.task
                 ))
             })
     }
@@ -165,7 +165,7 @@ impl RemoteWorkflowPoller {
 
             if should_stop {
                 // Preserve the original poller's final refresh: terminal API
-                // jobs get their last state, while amie's disappearing route
+                // jobs get their last state, while squad's disappearing route
                 // leaves the last terminal snapshot frozen in the strip.
                 let _ = tokio::select! {
                     _ = cancel.cancelled() => None,

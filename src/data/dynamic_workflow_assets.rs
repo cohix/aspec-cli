@@ -28,23 +28,25 @@ pub const LEADER_PROMPT_MD: &str = include_str!("../assets/dynamic/leader-prompt
 /// The repair prompt template. Substituted with `{{validation_error}}`.
 pub const LEADER_REPAIR_PROMPT: &str = include_str!("../assets/dynamic/leader-repair-prompt.md");
 
-/// The condition-evaluation leader prompt. Unlike a dynamic work-item leader,
-/// this agent first reports whether the condition is met.
-pub const AMIE_LEADER_PROMPT_MD: &str = include_str!("../assets/dynamic/amie-leader-prompt.md");
+/// The task-evaluation leader prompt. Unlike a dynamic work-item leader,
+/// this agent first reports whether the task is met.
+pub const SQUAD_LEADER_PROMPT_MD: &str = include_str!("../assets/dynamic/squad-leader-prompt.md");
 
-/// Construct the amie evaluation-leader prompt.
-pub fn build_amie_leader_prompt(
-    condition_name: &str,
-    condition_description: &str,
+/// Construct the squad evaluation-leader prompt.
+pub fn build_squad_leader_prompt(
+    task_name: &str,
+    task_description: &str,
     repo_mount_path: &str,
     available_agents: &str,
+    verdict_path: &str,
     guidance: Option<&[String]>,
 ) -> String {
-    AMIE_LEADER_PROMPT_MD
-        .replace("{{condition_name}}", condition_name)
-        .replace("{{condition_description}}", condition_description)
+    SQUAD_LEADER_PROMPT_MD
+        .replace("{{task_name}}", task_name)
+        .replace("{{task_description}}", task_description)
         .replace("{{repo_mount_path}}", repo_mount_path)
         .replace("{{available_agents}}", available_agents)
+        .replace("{{verdict_path}}", verdict_path)
         .replace(
             "{{developer_guidance}}",
             &build_developer_guidance(guidance),

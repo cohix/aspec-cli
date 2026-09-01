@@ -27,7 +27,7 @@ This document is the authoritative specification of the `awman` CLI surface. It 
 | `awman config <subcommand>` | View and edit global/repo configuration. |
 | `awman status` | Show all running awman containers. |
 | `awman api <subcommand>` | Run awman as an API HTTP server. |
-| `awman amie <subcommand>` | Manage the amie condition daemon and scheduled conditions. |
+| `awman squad <subcommand>` | Manage the squad task daemon and scheduled tasks. |
 | `awman remote <subcommand>` | Connect to a remote API instance. |
 
 ### Top-level flags (apply before any subcommand)
@@ -122,30 +122,32 @@ Initialize the current Git repo for use with awman.
 | `logs` | — |
 | `status` | — |
 
-### `awman amie`
+### `awman squad`
 
-Manage the amie condition daemon and scheduled conditions. The parent flags
-belong to `awman amie` itself; pass them before a subcommand when using one:
+Manage the squad task daemon and scheduled tasks. The parent flags
+belong to `awman squad` itself; pass them before a subcommand when using one:
 
 | Flag | Kind | Default | Description |
 |---|---|---|---|
-| `-n, --non-interactive` | bool | false | Print the amie status summary instead of opening the TUI. |
+| `-n, --non-interactive` | bool | false | Print the squad status summary instead of opening the TUI. |
 | `--json` | bool | false | Emit JSON output. **Implies `--non-interactive`.** |
 
 | Subcommand | Arguments | Flags |
 |---|---|---|
-| _(bare)_ `awman amie` | — | Inherits the parent flags above. With a TTY and neither `-n` nor `--json`, opens the singleton amie TUI tab; with `-n`/`--non-interactive` or `--json`, prints the daemon status summary instead. |
-| `add` | — | `--name <string>` (required; no default), `--description <string>` (required; no default), `--repo <path>` (default `—`), `--interval <string>` (default `5m`), `--agent <string>` (default `—`), `--model <string>` (default `—`), `--mount-scope <cwd\|gitroot>` (default `gitroot`), `--interview` (bool, default `false`), `-n, --non-interactive` (bool, default `false`). |
+| _(bare)_ `awman squad` | — | Inherits the parent flags above. With a TTY and neither `-n` nor `--json`, opens the singleton squad TUI tab; with `-n`/`--non-interactive` or `--json`, prints the daemon status summary instead. |
+| `start` | — | `--port <n>` (u16, default `0`; `0` selects an OS-assigned port), `--background` (bool, default `false`), `--refresh-key` (bool, default `false`), `--dangerously-skip-auth` (bool, default `false`). On the first start — and with `--refresh-key` — a bearer key is minted and printed once as a shell-export snippet for `AWMAN_SQUAD_KEY`, tailored to the user's `SHELL`. `--dangerously-skip-auth` mints no key, writes no hash, warns that auth is off, and is acceptable only because the daemon binds `127.0.0.1` exclusively. |
+| `stop` (alias `kill`) | — | — |
+| `status` | — | `--json` (bool, default `false`). |
+| `logs` | — | `-f, --follow` (bool, default `false`). |
+| `add` | — | `--name <string>` (required; no default), `--description <string>` (required; no default), `--repo <path>` (default `—`; legacy synonym for `--workspace <path>`, ignored when `--workspace` is given), `--interval <string>` (default `6h`), `--agent <string>` (default `—`), `--model <string>` (default `—`), `--workspace <default\|path>` (no catalogue default; absent falls back to `--repo`, then to `default`), `--overlay <spec>` (repeatable, default empty; `dir()`/`ssh()`/`env()`/`skill()` syntax, syntax-validated at creation), `--mount-scope <cwd\|gitroot>` (default `gitroot`; only meaningful for a custom workspace that is a git repository), `--interview` (bool, default `false`), `-n, --non-interactive` (bool, default `false`; never prompt — refuses a confirmation instead of asking. Conflicts with `--interview`). |
 | `list` | — | `--json` (bool, default `false`). |
 | `show <name>` | `<name>` (required string) | `--json` (bool, default `false`). |
 | `remove <name>` | `<name>` (required string) | `-y, --yes` (bool, default `false`). |
 | `pause <name>` | `<name>` (required string) | — |
 | `resume <name>` | `<name>` (required string) | — |
-| `start` | — | `--port <n>` (u16, default `0`; `0` selects an OS-assigned port), `--background` (bool, default `false`), `--refresh-key` (bool, default `false`), `--dangerously-skip-auth` (bool, default `false`). On the first start — and with `--refresh-key` — a bearer key is minted and printed once as a shell-export snippet for `AWMAN_AMIE_KEY`, tailored to the user's `SHELL`. `--dangerously-skip-auth` mints no key, writes no hash, warns that auth is off, and is acceptable only because the daemon binds `127.0.0.1` exclusively. |
-| `stop` (alias `kill`) | — | — |
-| `status` | — | `--json` (bool, default `false`). |
-| `logs` | — | `-f, --follow` (bool, default `false`). |
 | `attach <name>` | `<name>` (required string) | `--container <string>` (default `—`; running container ID when multiple are active). |
+
+**Task workspaces.** `--workspace default` (the default) binds the task to a durable `~/.awman/squad/tasks/<name>/workspace/` directory that is created once and never deleted, emptied, or replaced until the task is removed. Any other value binds the task to that folder or repository: the path must already exist (it is never created), and if it is not the root of a git repository the interview warns and offers to keep it or choose another. Whether a task's runs are worktree-isolated is decided once, at creation, from whether its effective root **is** a git repository root — a root-bound task always uses a worktree, and every other workspace (the default one, a plain directory, or a subdirectory of a repository) never does and is mounted exactly as given, so a run is never widened to an enclosing repository. Either way the durable per-task workspace is created and mounted into the task's containers at the `context(workflow)` path. A custom path that is a parent of the caller's current directory goes through the same parent-directory mount confirmation every other awman mount-scope flow applies — from `--workspace` as well as from the interview, and refused outright under `-n`. A plain-directory workspace has no repository to resolve agent images from, so on first run squad writes `Dockerfile.dev` and `.awman/Dockerfile.<agent>` into it from the bundled `awman init` templates, create-if-missing only.
 
 ### `awman remote`
 
@@ -166,6 +168,6 @@ belong to `awman amie` itself; pass them before a subcommand when using one:
 
 - Per-repo config: `<git-root>/.awman/config.json`.
 - Global config: `$HOME/.awman/config.json`.
-- Environment overrides: `AWMAN_*` variables (notably `AWMAN_OVERLAYS`, `AWMAN_API_KEY`, `AWMAN_AMIE_KEY`, `AWMAN_API_ROOT`).
+- Environment overrides: `AWMAN_*` variables (notably `AWMAN_OVERLAYS`, `AWMAN_API_KEY`, `AWMAN_SQUAD_KEY`, `AWMAN_API_ROOT`).
 
 Precedence (highest to lowest): CLI flag → environment variable → repo config → global config → built-in default.

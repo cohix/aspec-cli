@@ -7,8 +7,8 @@ use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::MountScopeFrontend;
 use crate::command::commands::{
-    Command, collect_all_overlay_specs, parse_overlay_list, resolve_agent,
-    resolve_context_overlays, warn_legacy_config,
+    collect_all_overlay_specs, parse_overlay_list, resolve_agent, resolve_context_overlays,
+    warn_legacy_config, Command,
 };
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
@@ -204,7 +204,7 @@ impl Command for ExecPromptCommand {
             frontend.write_message(UserMessage {
                 level: MessageLevel::Warning,
                 text: "The 'gemini' agent is deprecated by Google. \
-                       Migrate to 'antigravity' — run 'awman chat antigravity' \
+                       Migrate to 'antigravity' — run 'awman chat --agent antigravity' \
                        (or 'awman config set agent antigravity' to change your default)."
                     .to_string(),
             });

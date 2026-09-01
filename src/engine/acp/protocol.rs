@@ -595,7 +595,10 @@ mod tests {
             .into_iter()
             .find_map(|f| f.ok())
             .expect("valid frame after realignment");
-        assert_eq!(serde_json::from_value::<SessionUpdate>(parsed).unwrap(), good);
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(parsed).unwrap(),
+            good
+        );
     }
 
     #[test]
@@ -605,7 +608,10 @@ mod tests {
         assert!(!clean.contains('\x1b'), "ESC must be stripped: {clean:?}");
         assert!(!clean.contains('\x07'), "BEL must be stripped: {clean:?}");
         assert!(!clean.contains('\x00'), "NUL must be stripped: {clean:?}");
-        assert!(clean.contains('\t') && clean.contains('\n'), "keep \\t and \\n");
+        assert!(
+            clean.contains('\t') && clean.contains('\n'),
+            "keep \\t and \\n"
+        );
     }
 
     #[test]

@@ -41,9 +41,9 @@ use crate::command::commands::worktree_lifecycle::{
     ExistingWorktreeDecision, PostWorkflowWorktreeAction, PreWorktreeDecision,
     WorktreeLifecycleFrontend, WorktreeMergeMode,
 };
-use crate::command::dispatch::CommandFrontend;
 use crate::command::dispatch::catalogue::{CommandCatalogue, FrontendKind};
 use crate::command::dispatch::projections::raw_args::ParsedArgs;
+use crate::command::dispatch::CommandFrontend;
 use crate::command::error::CommandError;
 use crate::data::config::repo::WorkItemsConfig;
 use crate::data::message::{UserMessage, UserMessageSink};
@@ -94,7 +94,7 @@ pub struct ApiDispatchFrontend {
 }
 
 #[async_trait::async_trait]
-impl crate::command::commands::amie::commands::AmieCommandFrontend for ApiDispatchFrontend {}
+impl crate::command::commands::squad::commands::SquadCommandFrontend for ApiDispatchFrontend {}
 
 impl ApiDispatchFrontend {
     /// Construct a new frontend from the HTTP request's subcommand + args.

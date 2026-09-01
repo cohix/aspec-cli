@@ -1,7 +1,7 @@
 //! The WI-0092 leader/repair budget, shared by every caller that asks an agent
 //! to design a `workflow.toml`.
 //!
-//! `exec workflow --dynamic` and the amie condition evaluator both launch a
+//! `exec workflow --dynamic` and the squad task evaluator both launch a
 //! leader agent, validate whatever it wrote, and — on a validation failure —
 //! relaunch it with a repair prompt carrying the verbatim error, up to three
 //! times. That decision core is what lives here: the attempt budget, the
@@ -9,7 +9,7 @@
 //!
 //! What deliberately does *not* live here is how a leader is launched or
 //! driven. `exec workflow --dynamic` drives an interactive container through
-//! the stuck → yolo-countdown → control-board pipeline; amie runs one
+//! the stuck → yolo-countdown → control-board pipeline; squad runs one
 //! unattended. Those are genuinely different, and folding them together would
 //! buy nothing. Keeping the budget in one place is what stops the two callers
 //! from disagreeing about what "3 repair attempts" means.

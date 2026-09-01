@@ -882,14 +882,6 @@ impl ExecutionBackend for DockerExecution {
 
 // ─── Attach (re-attach into a foreign, already-running container) ───────────
 
-/// Entrypoint an attach session execs into the target container: an
-/// interactive shell alongside the running agent. `docker exec` starts a new
-/// process, so this is a shell the operator drives — the agent itself keeps
-/// running as the container's main process.
-pub(super) fn default_attach_entrypoint() -> Vec<String> {
-    vec!["bash".to_string()]
-}
-
 /// `BridgeConfig` for an attach session. Identical to `bridge_config_for`
 /// except `cancel_on_grace_expired` is `None`: the grace-expiry cancel issues
 /// `docker stop <name>`, which would be wrong for a container this process
@@ -909,7 +901,7 @@ pub(super) fn attach_bridge_config(
     }
 }
 
-/// Kill only the local `docker exec`/`container exec` client process. Never
+/// Kill only the local runtime attach client process. Never
 /// touches the target container — attach must never stop a container another
 /// process owns.
 pub(super) fn kill_local_exec(pid: Option<u32>) {
@@ -929,9 +921,8 @@ pub(super) fn kill_local_exec(pid: Option<u32>) {
 }
 
 /// Configured-but-not-running attach handle. `run_with_frontend` opens a
-/// `docker exec -it` session (argv from `exec_args`) and bridges it through
-/// the same PTY/piped machinery a fresh `docker run` uses — so `CliFrontend`
-/// and `TuiContainerProxy` drive an attach session unchanged.
+/// `docker attach` session to PID 1's existing terminal and bridges it through
+/// the same PTY/piped machinery a fresh `docker run` uses.
 struct AttachInstance {
     handle: AgentHandle,
 }
@@ -963,29 +954,24 @@ impl AgentInstance for AttachInstance {
         let io = frontend.take_io();
         let bridge_cfg = attach_bridge_config(grace_timeout, stuck_timeout);
 
-        let entrypoint = default_attach_entrypoint();
-        let ep_refs: Vec<&str> = entrypoint.iter().map(String::as_str).collect();
-
-        // PTY path: pass the frontend's terminal size through as COLUMNS/LINES
-        // so the exec'd shell sees a real size. `exec_args` is the argv source.
-        if let Some((cols, rows)) = io.initial_size {
-            let cols_s = cols.to_string();
-            let rows_s = rows.to_string();
-            let argv = DockerBackend.exec_args(
-                &handle.id,
-                "/workspace",
-                &ep_refs,
-                &[("COLUMNS", &cols_s), ("LINES", &rows_s)],
-            );
+        // `docker attach` reconnects to the container's primary process (the
+        // agent launched by `docker run -it`), rather than creating a sibling
+        // shell with `docker exec`. The outer bridge PTY carries terminal size
+        // and resize signals to the attach client.
+        let argv = vec![
+            "attach".to_string(),
+            "--sig-proxy=false".to_string(),
+            handle.id.clone(),
+        ];
+        if io.initial_size.is_some() {
             return spawn_pty_bridged_attach(io, argv, started_at, handle, bridge_cfg);
         }
 
-        let argv = DockerBackend.exec_args(&handle.id, "/workspace", &ep_refs, &[]);
         spawn_piped_attach(io, argv, started_at, handle, bridge_cfg)
     }
 }
 
-/// Spawn `docker exec -it` via `portable-pty` and bridge the PTY master to the
+/// Spawn `docker attach` via `portable-pty` and bridge the PTY master to the
 /// frontend's `AgentIo`. Mirrors `spawn_pty_bridged_docker` but substitutes
 /// the exec argv and produces an `AttachExecution`.
 fn spawn_pty_bridged_attach(
@@ -1016,7 +1002,7 @@ fn spawn_pty_bridged_attach(
     let child = pair
         .slave
         .spawn_command(cmd)
-        .map_err(|e| EngineError::Container(format!("spawn docker exec via pty: {e}")))?;
+        .map_err(|e| EngineError::Container(format!("spawn docker attach via pty: {e}")))?;
     let child_pid = child.process_id();
 
     let (master_arc, bridge) =
@@ -1038,7 +1024,7 @@ fn spawn_pty_bridged_attach(
     ))
 }
 
-/// Spawn `docker exec` with piped stdio and bridge through `AgentIo`. Mirrors
+/// Spawn `docker attach` with piped stdio and bridge through `AgentIo`. Mirrors
 /// `spawn_piped_docker` but substitutes the exec argv and produces an
 /// `AttachExecution`.
 fn spawn_piped_attach(
@@ -1060,7 +1046,7 @@ fn spawn_piped_attach(
                 binary: "docker".into(),
             }
         } else {
-            EngineError::Container(format!("spawn docker exec: {e}"))
+            EngineError::Container(format!("spawn docker attach: {e}"))
         }
     })?;
     let child_pid = Some(child.id());
@@ -1087,7 +1073,7 @@ fn spawn_piped_attach(
 }
 
 /// Execution backend for an attach session. Identical to `DockerExecution`
-/// except cancellation kills only the local `docker exec` client — never
+/// except cancellation kills only the local `docker attach` client — never
 /// `docker stop <name>`, because the target container belongs to another
 /// process.
 struct AttachExecution {
@@ -1095,7 +1081,7 @@ struct AttachExecution {
     pty_child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     pty_master: Option<std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     stdin_injector: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
-    /// PID of the local `docker exec` client, captured at spawn.
+    /// PID of the local `docker attach` client, captured at spawn.
     child_pid: Option<u32>,
     started_at: chrono::DateTime<chrono::Utc>,
 }
@@ -1105,7 +1091,7 @@ impl ExecutionBackend for AttachExecution {
         if let Some(mut child) = self.pty_child.take() {
             let status = child
                 .wait()
-                .map_err(|e| EngineError::Container(format!("wait docker exec (pty): {e}")))?;
+                .map_err(|e| EngineError::Container(format!("wait docker attach (pty): {e}")))?;
             self.pty_master = None;
             let exit_code = status.exit_code().try_into().unwrap_or(-1);
             return Ok(AgentExitInfo {
@@ -1122,7 +1108,7 @@ impl ExecutionBackend for AttachExecution {
             .ok_or_else(|| EngineError::Container("execution already waited".into()))?;
         let status = child
             .wait()
-            .map_err(|e| EngineError::Container(format!("wait docker exec: {e}")))?;
+            .map_err(|e| EngineError::Container(format!("wait docker attach: {e}")))?;
 
         #[cfg(unix)]
         clear_stdio_nonblocking();
@@ -1210,8 +1196,8 @@ pub(super) fn build_run_argv(
     // Caller-supplied labels — emitted one `--label key=value` each, in the
     // order they were ingested, immediately after the hardcoded `awman=true`.
     // Lets `list_running` attribute containers to a specific awman session
-    // (`awman.session=<id>`) and amie mark its background agents
-    // (`awman.amie.condition=<name>`). These are for human `docker ps`
+    // (`awman.session=<id>`) and squad mark its background agents
+    // (`awman.squad.task=<name>`). These are for human `docker ps`
     // inspection only — awman never reads a label back.
     for (key, value) in &options.labels {
         args.push("--label".into());
@@ -1555,7 +1541,7 @@ mod tests {
                 value: "sid-1".into(),
             },
             ContainerOption::Label {
-                key: "awman.amie.condition".into(),
+                key: "awman.squad.task".into(),
                 value: "issue-triage".into(),
             },
         ]);
@@ -1575,7 +1561,7 @@ mod tests {
             vec![
                 &AWMAN_LABEL.to_string(),
                 &"awman.session=sid-1".to_string(),
-                &"awman.amie.condition=issue-triage".to_string(),
+                &"awman.squad.task=issue-triage".to_string(),
             ],
             "argv was: {argv:?}"
         );

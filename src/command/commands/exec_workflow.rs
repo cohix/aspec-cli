@@ -1,28 +1,28 @@
 //! `ExecWorkflowCommand` — run a workflow file.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::command::commands::Command;
 use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::{MountScope, MountScopeFrontend};
 use crate::command::commands::worktree_lifecycle::{WorktreeLifecycle, WorktreeLifecycleFrontend};
+use crate::command::commands::Command;
 use crate::command::commands::{
-    TypedOverlay, collect_all_overlay_specs, parse_overlay_list, resolve_context_overlays,
-    warn_legacy_config,
+    collect_all_overlay_specs, parse_overlay_list, resolve_context_overlays, warn_legacy_config,
+    TypedOverlay,
 };
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::data::session::Session;
 use crate::data::workflow_definition::{Workflow, WorkflowStep};
-use crate::data::workflow_prompt_template::{WorkItemContext, substitute_prompt};
+use crate::data::workflow_prompt_template::{substitute_prompt, WorkItemContext};
 use crate::engine::agent::AgentRunOptions;
 use crate::engine::agent_runtime::execution::AgentExitInfo;
 use crate::engine::agent_runtime::frontend::AgentFrontend;
@@ -140,11 +140,23 @@ pub struct ExecWorkflowCommand {
     flags: ExecWorkflowCommandFlags,
     engines: Engines,
     session: Session,
-    /// When set (only for amie-generated workflows), every container this
-    /// command launches is stamped with the condition's amie name + labels so
+    /// When set (only for squad-generated workflows), every container this
+    /// command launches is stamped with the task's squad name + labels so
     /// prefix discovery finds the workflow's step containers, not just the
     /// evaluation leader. `None` for an ordinary `awman exec workflow`.
-    amie_identity: Option<crate::engine::amie::launcher::AmieContainerIdentity>,
+    squad_identity: Option<crate::engine::squad::launcher::SquadContainerIdentity>,
+    /// When set (only for squad-generated workflows), the task's durable
+    /// workspace directory, mounted into every step container at the
+    /// `context(workflow)` path so a task's persistent data is reachable from
+    /// its workflow as well as from its evaluation leader. `None` for an
+    /// ordinary `awman exec workflow`, which keeps its own per-invocation
+    /// workflow context directory.
+    task_workspace: Option<PathBuf>,
+    /// When set (only for squad-generated workflows whose session root must
+    /// stay untouched between runs), the directory the engine's workflow-state
+    /// file lives under, instead of the session's git root. `None` for an
+    /// ordinary `awman exec workflow`.
+    workflow_state_root: Option<PathBuf>,
 }
 
 impl ExecWorkflowCommand {
@@ -153,18 +165,43 @@ impl ExecWorkflowCommand {
             flags,
             engines,
             session,
-            amie_identity: None,
+            squad_identity: None,
+            task_workspace: None,
+            workflow_state_root: None,
         }
     }
 
-    /// Carry an amie container identity so every generated-workflow step
-    /// container is stamped exactly as the evaluation leader is. A non-amie
+    /// Carry a squad container identity so every generated-workflow step
+    /// container is stamped exactly as the evaluation leader is. A non-squad
     /// `exec workflow` never calls this and is unaffected.
-    pub fn with_amie_identity(
+    pub fn with_squad_identity(
         mut self,
-        identity: crate::engine::amie::launcher::AmieContainerIdentity,
+        identity: crate::engine::squad::launcher::SquadContainerIdentity,
     ) -> Self {
-        self.amie_identity = Some(identity);
+        self.squad_identity = Some(identity);
+        self
+    }
+
+    /// Override the `context(workflow)` host directory for every step with the
+    /// squad task's durable workspace. This is a structural, always-on mount
+    /// for a squad run — not a user-specified overlay — so the same stable
+    /// container path serves the leader and every step.
+    pub fn with_task_workspace(mut self, workspace: PathBuf) -> Self {
+        self.task_workspace = Some(workspace);
+        self
+    }
+
+    /// Root the engine's workflow-state file outside the session's working
+    /// tree.
+    ///
+    /// A squad task bound to a plain directory (its durable workspace, or a
+    /// custom folder that is not a repository) has no worktree to absorb
+    /// awman's own bookkeeping, and that directory must survive every run
+    /// untouched (WI 0106 §6a). Pointing the state file at the run-scoped
+    /// `runs/<run-id>/` directory keeps the create/rewrite/delete cycle out of
+    /// it entirely. A non-squad `exec workflow` never calls this.
+    pub fn with_workflow_state_root(mut self, root: PathBuf) -> Self {
+        self.workflow_state_root = Some(root);
         self
     }
 
@@ -423,18 +460,32 @@ impl WorkflowFrontend for WorkflowProxy {
 
 // ─── AgentFrontendProxy ──────────────────────────────────────────────────
 //
-// Passed to `AgentInstance::run_with_frontend`. The current Docker backend
-// discards it; a future PTY-wiring backend will use it.
+// Passed to `AgentInstance::run_with_frontend`. It forwards lifecycle and I/O
+// to the command frontend while keeping each container's detached I/O pairing
+// private to this proxy.
 
 struct AgentFrontendProxy {
     frontend: Arc<Mutex<Box<dyn ExecWorkflowCommandFrontend>>>,
     acp: bool,
+    /// Each workflow container must receive the I/O sink paired with its own
+    /// `Running { container_name }` callback. Keeping the taken I/O on this
+    /// per-container proxy prevents parallel workflow steps from consuming a
+    /// different step's per-container log file.
+    io: Option<crate::engine::agent_runtime::frontend::AgentIo>,
 }
 
 #[async_trait]
 impl AgentFrontend for AgentFrontendProxy {
     fn report_status(&mut self, status: crate::engine::agent_runtime::frontend::AgentStatus) {
-        self.frontend.lock().unwrap().report_status(status);
+        let is_running = matches!(
+            &status,
+            crate::engine::agent_runtime::frontend::AgentStatus::Running { .. }
+        );
+        let mut frontend = self.frontend.lock().unwrap();
+        frontend.report_status(status);
+        if is_running {
+            self.io = Some(frontend.take_io());
+        }
     }
 
     fn report_progress(&mut self, progress: crate::engine::agent_runtime::frontend::AgentProgress) {
@@ -442,7 +493,10 @@ impl AgentFrontend for AgentFrontendProxy {
     }
 
     fn take_io(&mut self) -> crate::engine::agent_runtime::frontend::AgentIo {
-        let mut io = self.frontend.lock().unwrap().take_io();
+        let mut io = self
+            .io
+            .take()
+            .unwrap_or_else(|| self.frontend.lock().unwrap().take_io());
         if self.acp {
             // ACP framing is line-delimited JSON, never a PTY stream.
             io.initial_size = None;
@@ -487,9 +541,12 @@ struct CommandLayerFactory {
     image_git_root: PathBuf,
     /// Workflow-level overlays applied to every step.
     workflow_overlays: Option<Vec<String>>,
-    /// amie identity to stamp on every step container, when this is an
-    /// amie-generated workflow. `None` for an ordinary `exec workflow`.
-    amie_identity: Option<crate::engine::amie::launcher::AmieContainerIdentity>,
+    /// squad identity to stamp on every step container, when this is an
+    /// squad-generated workflow. `None` for an ordinary `exec workflow`.
+    squad_identity: Option<crate::engine::squad::launcher::SquadContainerIdentity>,
+    /// The squad task's durable workspace, overriding the `context(workflow)`
+    /// host directory for every step. `None` for an ordinary `exec workflow`.
+    task_workspace: Option<PathBuf>,
     /// Fixed by workflow pre-flight before any step can launch.
     launch_modes: Arc<HashMap<String, crate::data::config::repo::LaunchMode>>,
 }
@@ -515,7 +572,7 @@ impl AgentExecutionFactory for CommandLayerFactory {
         .map_err(|e| EngineError::Other(format!("overlay collection failed: {e}")))?;
 
         // Resolve context overlays.
-        let (context_overlays, system_prompt) = {
+        let (mut context_overlays, system_prompt) = {
             let mut guard = self.shared.lock().unwrap();
             resolve_context_overlays(
                 &collected.context_overlays,
@@ -528,6 +585,29 @@ impl AgentExecutionFactory for CommandLayerFactory {
             .map_err(|e| EngineError::Other(format!("context overlay resolution failed: {e}")))?
         };
 
+        // For a squad run, the workflow-scope context directory *is* the task's
+        // durable workspace: the same directory the evaluation leader saw, at
+        // the same container path, so a task's persistent files are reachable
+        // from its workflow too. Retarget the host side of the workflow-scope
+        // overlay rather than adding a second mount at the same container path,
+        // which is exactly the collision the overlay engine refuses.
+        if let Some(workspace) = &self.task_workspace {
+            match context_overlays
+                .iter_mut()
+                .find(|o| o.scope == crate::engine::overlay::ContextScope::Workflow)
+            {
+                Some(existing) => existing.host_path = workspace.clone(),
+                None => context_overlays.push(crate::engine::overlay::ContextOverlay {
+                    scope: crate::engine::overlay::ContextScope::Workflow,
+                    host_path: workspace.clone(),
+                    container_path: std::path::PathBuf::from(
+                        crate::command::commands::squad::evaluation::TASK_DIR_CONTAINER_PATH,
+                    ),
+                    permission: crate::engine::container::options::OverlayPermission::ReadWrite,
+                }),
+            }
+        }
+
         // Use the original repo root for image tag derivation so worktree-
         // based runs resolve the correct image for both the Image option AND
         // for image_home_dir inspection (which determines overlay mount paths).
@@ -539,11 +619,18 @@ impl AgentExecutionFactory for CommandLayerFactory {
             yolo: self.flags.yolo.then_some(YoloMode::Enabled),
             auto: self.flags.auto.then_some(AutoMode::Enabled),
             plan: self.flags.plan.then_some(PlanMode::Enabled),
-            launch_mode: self
-                .launch_modes
-                .get(&step.name)
-                .copied()
-                .unwrap_or_default(),
+            // Squad agents are always PTY-backed so a later attach reaches
+            // the real agent UI. ACP is inherently a piped JSON-RPC transport
+            // and therefore cannot satisfy that contract; ordinary `exec
+            // workflow` continues to honour its per-step ACP configuration.
+            launch_mode: if self.squad_identity.is_some() {
+                crate::data::config::repo::LaunchMode::Stdio
+            } else {
+                self.launch_modes
+                    .get(&step.name)
+                    .copied()
+                    .unwrap_or_default()
+            },
             allowed_tools: vec![],
             disallowed_tools: vec![],
             initial_prompt: Some(substitution.rendered),
@@ -580,10 +667,10 @@ impl AgentExecutionFactory for CommandLayerFactory {
             &credential_env_vars,
             self.engines.runtime.as_ref(),
         )?;
-        // For an amie-generated workflow, stamp the condition's amie name +
+        // For a squad-generated workflow, stamp the task's squad name +
         // labels so this step's container is discoverable by prefix, exactly as
-        // the evaluation leader is. A non-amie run leaves `resolved` untouched.
-        let resolved = match &self.amie_identity {
+        // the evaluation leader is. A non-squad run leaves `resolved` untouched.
+        let resolved = match &self.squad_identity {
             Some(identity) => identity.stamp(resolved)?,
             None => resolved,
         };
@@ -591,6 +678,7 @@ impl AgentExecutionFactory for CommandLayerFactory {
         let proxy = AgentFrontendProxy {
             frontend: Arc::clone(&self.shared),
             acp: run_opts.launch_mode == crate::data::config::repo::LaunchMode::Acp,
+            io: None,
         };
         instance.run_with_frontend(Box::new(proxy))
     }
@@ -1040,7 +1128,9 @@ impl Command for ExecWorkflowCommand {
             &self.engines,
             prepared,
             frontend,
-            self.amie_identity.as_ref(),
+            self.squad_identity.as_ref(),
+            self.task_workspace.as_deref(),
+            self.workflow_state_root.as_deref(),
         )
         .await
     }
@@ -1077,12 +1167,15 @@ struct PreparedRun {
 /// Execute a fully-prepared workflow: persisted-state resume check, engine
 /// setup/main/teardown phases, summary reporting, and worktree finalize.
 /// Shared by the non-dynamic and dynamic execution paths.
+#[allow(clippy::too_many_arguments)]
 async fn execute_prepared(
     flags: &ExecWorkflowCommandFlags,
     engines: &Engines,
     prepared: PreparedRun,
     frontend: Box<dyn ExecWorkflowCommandFrontend>,
-    amie_identity: Option<&crate::engine::amie::launcher::AmieContainerIdentity>,
+    squad_identity: Option<&crate::engine::squad::launcher::SquadContainerIdentity>,
+    task_workspace: Option<&Path>,
+    workflow_state_root: Option<&Path>,
 ) -> Result<ExecWorkflowOutcome, CommandError> {
     let PreparedRun {
         mut workflow,
@@ -1115,12 +1208,17 @@ async fn execute_prepared(
     //     when --worktree is active, otherwise cwd. Done before PTY
     //     activation so the dialog renders immediately, like the
     //     existing-worktree dialog does in the lifecycle step above.
+    //     A caller that supplied `workflow_state_root` keeps its state file
+    //     out of the session root entirely, so the resume check must look
+    //     where the engine will actually read and write it.
     let session_root_for_state = worktree_path.as_deref().unwrap_or(&cwd).to_path_buf();
-    let git_root_for_state =
-        match Arc::clone(&engines.git_engine).resolve_root(&session_root_for_state) {
+    let git_root_for_state = match workflow_state_root {
+        Some(root) => root.to_path_buf(),
+        None => match Arc::clone(&engines.git_engine).resolve_root(&session_root_for_state) {
             Ok(r) => r,
             Err(_) => session_root_for_state.clone(),
-        };
+        },
+    };
     let workflow_name_for_state = crate::engine::workflow::workflow_name_for(&workflow);
     let work_item_number_for_state = work_item_context.as_ref().map(|c| c.number);
     {
@@ -1279,10 +1377,11 @@ async fn execute_prepared(
             work_item_context,
             image_git_root: git_root_for_scope.clone(),
             workflow_overlays: workflow_overlays_for_factory,
-            amie_identity: amie_identity.cloned(),
+            squad_identity: squad_identity.cloned(),
+            task_workspace: task_workspace.map(Path::to_path_buf),
             launch_modes: Arc::new(launch_modes),
         };
-        let mut engine = match WorkflowEngine::resume(
+        let mut engine = match WorkflowEngine::resume_with_state_root(
             &session,
             workflow,
             engine_work_item_context,
@@ -1290,6 +1389,7 @@ async fn execute_prepared(
             Box::new(factory),
             Arc::clone(&engines.git_engine),
             Arc::clone(&engines.overlay_engine),
+            workflow_state_root.map(Path::to_path_buf),
         )
         .await
         {
@@ -2237,7 +2337,7 @@ impl ExecWorkflowCommand {
         // ── Leader + repair loop (WI-0092 §9). ──────────────────────────────
         //
         // The attempt budget, the repair-prompt substitution, and the
-        // exhaustion message live in the one shared `WorkflowRepairLoop`; amie's
+        // exhaustion message live in the one shared `WorkflowRepairLoop`; squad's
         // unattended evaluator drives the same object. Only the *driving* of the
         // leader container (stuck → yolo countdown → control board) is specific
         // to this interactive caller.
@@ -2394,7 +2494,9 @@ impl ExecWorkflowCommand {
             &self.engines,
             prepared,
             frontend,
-            self.amie_identity.as_ref(),
+            self.squad_identity.as_ref(),
+            self.task_workspace.as_deref(),
+            self.workflow_state_root.as_deref(),
         )
         .await
     }
@@ -2416,7 +2518,7 @@ impl ExecWorkflowCommand {
         label: &str,
         engine_rx: &mut tokio::sync::mpsc::UnboundedReceiver<EngineRequest>,
     ) -> Result<LeaderDriveOutcome, CommandError> {
-        use crate::engine::agent_runtime::execution::{KILLED_EXIT_CODE, StuckEvent};
+        use crate::engine::agent_runtime::execution::{StuckEvent, KILLED_EXIT_CODE};
 
         let run_opts = AgentRunOptions {
             yolo: Some(YoloMode::Enabled),
@@ -2445,10 +2547,10 @@ impl ExecWorkflowCommand {
             &creds,
             self.engines.runtime.as_ref(),
         )?;
-        // Stamp the amie identity on the dynamic leader too, when this is an
-        // amie-generated workflow, so its container carries the condition's
+        // Stamp the squad identity on the dynamic leader too, when this is an
+        // squad-generated workflow, so its container carries the task's
         // discoverable name and labels.
-        let resolved = match &self.amie_identity {
+        let resolved = match &self.squad_identity {
             Some(identity) => identity.stamp(resolved)?,
             None => resolved,
         };
@@ -2466,6 +2568,7 @@ impl ExecWorkflowCommand {
         let proxy = AgentFrontendProxy {
             frontend: Arc::clone(&shared),
             acp: false,
+            io: None,
         };
         let mut execution = match instance.run_with_frontend(Box::new(proxy)) {
             Ok(e) => e,
@@ -2808,7 +2911,7 @@ fn emit_gemini_deprecation_warning(sink: &mut dyn UserMessageSink) {
     sink.write_message(UserMessage {
         level: MessageLevel::Warning,
         text: "The 'gemini' agent is deprecated by Google. \
-               Migrate to 'antigravity' — run 'awman chat antigravity' \
+               Migrate to 'antigravity' — run 'awman chat --agent antigravity' \
                (or 'awman config set agent antigravity' to change your default)."
             .to_string(),
     });
@@ -3644,7 +3747,7 @@ prompt = "do something"
     /// calls, sibling steps would inherit each other's overlays.
     #[test]
     fn collect_single_entry_overlays_isolates_env_per_entry() {
-        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3701,7 +3804,7 @@ prompt = "do something"
     /// hard-coded `git_root.join("Dockerfile.dev")`.
     #[test]
     fn collect_single_entry_overlays_uses_repo_config_dockerfile_path() {
-        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3761,7 +3864,7 @@ prompt = "do something"
         tmp: &tempfile::TempDir,
         default_agent: Option<&str>,
     ) -> Session {
-        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         if let Some(agent) = default_agent {
@@ -4016,8 +4119,8 @@ prompt = "do something"
 
     // ── issue_source_overlay + IssueTempFile ─────────────────────────────────
 
-    use crate::data::issue::Issue;
     use crate::data::issue::github::GithubIssueSource;
+    use crate::data::issue::Issue;
 
     fn make_issue(source_id: &str, title: &str, body: &str) -> Issue {
         Issue {
@@ -4166,7 +4269,7 @@ prompt = "do something"
         tmp: &tempfile::TempDir,
         default_leader: &str,
     ) -> crate::data::session::Session {
-        use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+        use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
         use crate::data::session::{SessionOpenOptions, StaticGitRootResolver};
 
         let cfg_dir = tmp.path().join(".awman");

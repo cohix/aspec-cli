@@ -3,7 +3,7 @@
 //! `validate_under_root` generalizes the canonicalize-with-fallback +
 //! `starts_with` check that `context_dirs::validate_context_path` previously
 //! hardcoded to `~/.awman/context/`. Any accessor that resolves a
-//! user-influenced sub-path (a condition slug, a context slug) under a fixed
+//! user-influenced sub-path (a task slug, a context slug) under a fixed
 //! root uses this to guarantee the resolved path cannot escape the root via
 //! `..` or a crafted component.
 
@@ -37,14 +37,14 @@ mod tests {
 
     #[test]
     fn accepts_path_under_root() {
-        let root = PathBuf::from("/home/user/.awman/conditions");
+        let root = PathBuf::from("/home/user/.awman/tasks");
         let resolved = root.join("issue-triage");
         assert!(validate_under_root(&root, &resolved, "reason").is_ok());
     }
 
     #[test]
     fn rejects_path_escaping_root() {
-        let root = PathBuf::from("/home/user/.awman/conditions");
+        let root = PathBuf::from("/home/user/.awman/tasks");
         let resolved = PathBuf::from("/home/user/.awman/other");
         let err = validate_under_root(&root, &resolved, "must stay under root").unwrap_err();
         match err {
@@ -61,7 +61,7 @@ mod tests {
         // exists on disk (matching the original `validate_context_path`), so
         // materialize the escape target.
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().join("conditions");
+        let root = tmp.path().join("tasks");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(tmp.path().join("escaped")).unwrap();
         let resolved = root.join("..").join("escaped");

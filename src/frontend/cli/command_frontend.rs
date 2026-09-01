@@ -10,7 +10,7 @@
 //! handled by the TUI; the CLI uses safe non-interactive defaults for any
 //! interactive Q&A when stdin is not a TTY.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::ArgMatches;
 
@@ -71,35 +71,101 @@ pub struct CliFrontend {
 }
 
 #[async_trait::async_trait]
-impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFrontend {
-    async fn serve_amie_daemon(
+impl crate::command::commands::squad::commands::SquadCommandFrontend for CliFrontend {
+    /// The CLI runs in the user's own shell, so the process's current
+    /// directory is theirs and the mount-scope question can be put to them.
+    fn is_local_user_session(&self) -> bool {
+        true
+    }
+
+    async fn serve_squad_daemon(
         &mut self,
-        config: crate::command::commands::amie::commands::AmieServeConfig,
+        config: crate::command::commands::squad::commands::SquadServeConfig,
     ) -> Result<(), CommandError> {
-        crate::frontend::amie::serve(config).await
+        crate::frontend::squad::serve(config).await
     }
 
-    fn ask_condition_name(&mut self) -> Result<String, CommandError> {
-        require_named_input("condition name (slug)?")
+    fn ask_task_name(&mut self) -> Result<String, CommandError> {
+        require_named_input("task name (slug)?")
     }
 
-    fn ask_condition_description(&mut self) -> Result<String, CommandError> {
-        require_named_input("condition description?")
+    /// The same multi-line stdin read `new spec --interview` uses, so the CLI
+    /// interview collects the same freeform description the TUI's multiline
+    /// dialog does.
+    fn ask_task_description(&mut self) -> Result<String, CommandError> {
+        require_multiline_input(
+            "describe the new squad task including its triggering conditions and how squad \
+             should handle the task each time it is triggered?",
+        )
     }
 
-    fn ask_condition_interval(&mut self) -> Result<String, CommandError> {
+    fn ask_task_workspace_choice(
+        &mut self,
+    ) -> Result<crate::command::commands::squad::commands::TaskWorkspaceChoice, CommandError> {
+        use crate::command::commands::squad::commands::TaskWorkspaceChoice;
+        let choice = super::per_command::helpers::pick_numbered(
+            "task workspace?",
+            &["Default Task Workspace", "Custom Folder / Repo"],
+            1,
+        );
+        Ok(if choice == 2 {
+            TaskWorkspaceChoice::CustomFolderOrRepo
+        } else {
+            TaskWorkspaceChoice::DefaultTaskWorkspace
+        })
+    }
+
+    fn ask_task_overlay(&mut self, existing: &[String]) -> Result<Option<String>, CommandError> {
+        let prompt = format!(
+            "add an overlay ({} so far)? [dir()/ssh()/env()/skill() syntax, blank to finish]",
+            existing.len()
+        );
+        match super::per_command::helpers::read_line(&prompt) {
+            Some(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    fn confirm_non_git_workspace(&mut self, path: &Path) -> Result<bool, CommandError> {
+        Ok(super::per_command::helpers::yes_no(
+            &format!(
+                "{} is not the root of a Git repository. Keep this path? \
+                 (no = choose a different one)",
+                path.display()
+            ),
+            false,
+        ))
+    }
+
+    fn confirm_parent_directory_workspace(
+        &mut self,
+        path: &Path,
+        current_dir: &Path,
+    ) -> Result<bool, CommandError> {
+        Ok(super::per_command::helpers::yes_no(
+            &format!(
+                "{} is a parent directory of {}. Mount it anyway? \
+                 (no = choose a different one)",
+                path.display(),
+                current_dir.display()
+            ),
+            false,
+        ))
+    }
+
+    fn ask_task_interval(&mut self) -> Result<String, CommandError> {
         // Blank keeps the documented default; a value is parsed & validated in
         // Layer 1/2, never here.
-        match super::per_command::helpers::read_line("evaluation interval [5m]?") {
+        match super::per_command::helpers::read_line("evaluation interval [6h]?") {
             Some(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
-            Some(_) => Ok("5m".to_string()),
+            Some(_) => Ok("6h".to_string()),
             None => Err(CommandError::InteractiveInputUnavailable {
                 prompt: "evaluation interval".into(),
             }),
         }
     }
 
-    fn ask_condition_repo(&mut self) -> Result<PathBuf, CommandError> {
+    fn ask_task_repo(&mut self) -> Result<PathBuf, CommandError> {
         match super::per_command::helpers::read_line("repository directory [current dir]?") {
             Some(s) if !s.trim().is_empty() => Ok(PathBuf::from(s.trim())),
             Some(_) => std::env::current_dir().map_err(|error| {
@@ -111,24 +177,24 @@ impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFronte
         }
     }
 
-    fn ask_condition_agent(&mut self) -> Result<Option<String>, CommandError> {
+    fn ask_task_agent(&mut self) -> Result<Option<String>, CommandError> {
         match super::per_command::helpers::read_line("leader agent (optional, Enter to skip)?") {
             Some(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
             _ => Ok(None),
         }
     }
 
-    fn ask_condition_model(&mut self) -> Result<Option<String>, CommandError> {
+    fn ask_task_model(&mut self) -> Result<Option<String>, CommandError> {
         match super::per_command::helpers::read_line("leader model (optional, Enter to skip)?") {
             Some(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
             _ => Ok(None),
         }
     }
 
-    fn ask_condition_mount_scope(
+    fn ask_task_mount_scope(
         &mut self,
-    ) -> Result<crate::data::fs::condition_store::MountScope, CommandError> {
-        use crate::data::fs::condition_store::MountScope;
+    ) -> Result<crate::data::fs::task_store::MountScope, CommandError> {
+        use crate::data::fs::task_store::MountScope;
         match super::per_command::helpers::read_line("mount scope: [gitroot]/cwd?") {
             Some(s) if s.trim().eq_ignore_ascii_case("cwd") => Ok(MountScope::Cwd),
             Some(_) => Ok(MountScope::GitRoot),
@@ -138,7 +204,7 @@ impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFronte
         }
     }
 
-    fn ask_delete_condition_dir(
+    fn ask_delete_task_dir(
         &mut self,
         _name: &str,
         path: &std::path::Path,
@@ -149,7 +215,7 @@ impl crate::command::commands::amie::commands::AmieCommandFrontend for CliFronte
             return Ok(false);
         }
         eprintln!(
-            "awman: also delete the condition directory {}? [y/N]",
+            "awman: also delete the task directory {}? [y/N]",
             path.display()
         );
         match super::per_command::helpers::read_line("choice [y/N]:") {

@@ -8,7 +8,7 @@ This page is the mental model for awman: what runs where, what the moving pieces
 
 An agent running directly on your machine can touch your home directory, SSH keys, credentials, and anything else your user account can. awman never does that. Every agent session runs in an isolated environment — a Docker container, an Apple VM, or a Docker Sandbox microVM — that sees only your project directory plus whatever you explicitly add. Credentials are injected per-session, SSH keys stay out unless you opt in, and the environment is stopped or removed when the session ends.
 
-This is what makes autonomous operation ([Yolo Mode](06-yolo-mode.md)) reasonable: the blast radius of a bad agent decision is the container or VM and the mounted project, nothing else. See [Security & Isolation](04-security-and-isolation.md) for the full model, and [Runtimes](12-runtimes.md) for the difference between container-based and microVM-based isolation.
+This is what makes autonomous operation (the [`--yolo` permission mode](03-agent-sessions.md#--yolo)) reasonable: the blast radius of a bad agent decision is the container or VM and the mounted project, nothing else. See [Security & Isolation](04-security-and-isolation.md) for the full model, and [Runtimes](11-runtimes.md) for the difference between container-based and microVM-based isolation.
 
 ## The two-layer image system (Docker and Apple Containers)
 
@@ -21,7 +21,7 @@ For the Docker and Apple Containers runtimes, awman builds two images per projec
 
 The split means you can update project tooling without touching the agent setup, and switch agents without rebuilding your project environment. Both files come from templates: the **agent audit** (run during `awman init` or via `awman ready --refresh`) launches an agent to inspect your codebase and fill `Dockerfile.dev` with the tools your project actually needs; agent Dockerfiles are maintained by awman and rarely need editing. Commit both files.
 
-For the Docker Sandboxes runtime, agent environments are set up using **kit YAML specs** instead of Dockerfiles. awman generates per-agent kit files at `~/.awman/kits/<agent>/` when you run `awman ready`. No custom image build or registry push is required. See [Runtimes](12-runtimes.md#docker-sandboxes-experimental).
+For the Docker Sandboxes runtime, agent environments are set up using **kit YAML specs** instead of Dockerfiles. awman generates per-agent kit files at `~/.awman/kits/<agent>/` when you run `awman ready`. No custom image build or registry push is required. See [Runtimes](11-runtimes.md#docker-sandboxes-experimental).
 
 ## Agents
 
@@ -33,11 +33,11 @@ The same engine runs in several modes; pick whichever fits the task:
 
 - **TUI** (`awman`) — interactive multiplexer: tabs, live agent terminals, a command box with autocomplete. See [Using the TUI](02-using-the-tui.md).
 - **One-shot CLI** (`awman chat`, `awman exec prompt`, `awman exec workflow`) — single commands from your shell. See [Agent Sessions](03-agent-sessions.md).
-- **Headless** — non-interactive output for scripts and CI; awman detects the missing TTY or you force it with `-n`. See [Non-interactive operation](09-api-mode.md#non-interactive-headless-operation).
-- **API** (`awman api start`) — an HTTP server that queues and executes prompts and workflows. See [API Mode](09-api-mode.md).
-- **Remote** (`awman remote …`) — a thin client for an awman API server on another machine. See [Remote Mode](10-remote-mode.md).
+- **Headless** — non-interactive output for scripts and CI; awman detects the missing TTY or you force it with `-n`. See [Non-interactive operation](09-api-and-remote-mode.md#non-interactive-headless-operation).
+- **API** (`awman api start`) — an HTTP server that queues and executes prompts and workflows. See [API mode](09-api-and-remote-mode.md).
+- **Remote** (`awman remote …`) — a thin client for an awman API server on another machine. See [Remote mode](09-api-and-remote-mode.md).
 
-Permission levels apply across modes: default (agent asks), `--plan` (read-only), `--auto` (auto-approve edits), `--yolo` (fully autonomous, isolated in a Git worktree). See [Yolo Mode](06-yolo-mode.md).
+Permission levels apply across modes: default (agent asks), `--plan` (read-only), `--auto` (auto-approve edits), `--yolo` (fully autonomous, isolated in a Git worktree). See [Permission modes](03-agent-sessions.md#permission-modes).
 
 ## Specs and work items
 
@@ -81,13 +81,15 @@ Two JSON files: `<git root>/.awman/config.json` (per-repo, committed) and `~/.aw
 | `awman specs amend <N>` | Sync a spec with the implementation | [03](03-agent-sessions.md) |
 | `awman status` | Show running agent containers | [03](03-agent-sessions.md) |
 | `awman config show\|get\|set` | Inspect and edit config | [07](07-configuration.md) |
-| `awman api start\|status\|logs\|kill` | HTTP API server | [09](09-api-mode.md) |
-| `awman remote …` | Client for a remote awman server | [10](10-remote-mode.md) |
+| `awman api start\|status\|logs\|kill` | HTTP API server | [09](09-api-and-remote-mode.md) |
+| `awman remote …` | Client for a remote awman server | [09](09-api-and-remote-mode.md) |
+| `awman squad …` | Scheduled, unattended task automation | [12](12-squad.md) |
+| `awman clean` | Reclaim stopped containers, stale workflow data, dangling images | [13](13-cleaning-up.md) |
 
 `awman status` marks ordinary containers as `session`. Containers launched by
-the amie daemon carry an `amie:<condition>` source marker, such as
-`amie:issue-triage`, so background evaluations are identifiable even if you
-have never configured amie.
+the squad daemon carry a `squad:<task>` source marker, such as
+`squad:issue-triage`, so background evaluations are identifiable even if you
+have never configured squad.
 
 ### Key locations
 

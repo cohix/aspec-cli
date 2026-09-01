@@ -8,26 +8,31 @@ A guide to using awman, the containerized multi-agent terminal multiplexer.
 
 | # | File | What's covered |
 |---|------|----------------|
-| 00 | [Getting Started](00-getting-started.md) | Installation, first agent session |
+| 00 | [Getting Started](00-getting-started.md) | Installation, `init`, `ready`, your first agent session |
 | 01 | [Concepts](01-concepts.md) | Mental model: containers, agents, modes, overlays |
-| 02 | [Using the TUI](02-using-the-tui.md) | TUI layout, tabs, container window, keyboard reference |
-| 03 | [Agent Sessions](03-agent-sessions.md) | `chat`, work items, agent authentication |
-| 04 | [Security & Isolation](04-security-and-isolation.md) | Worktrees, overlays, Docker socket, container transparency |
-| 05 | [Workflows](05-workflows.md) | Multi-step workflows, control board, state persistence |
-| 06 | [Yolo Mode](06-yolo-mode.md) | Fully autonomous operation, disallowed tools, countdown |
-| 07 | [Configuration](07-configuration.md) | Config files, runtime selection, all fields |
-| 08 | [Overlays](08-overlays.md) | `dir()`, `env()`, `skill()`, `ssh()`, `context()` — sources, merge semantics, context overlays |
-| 09 | [API Mode](09-api-mode.md) | HTTP server, sessions, commands, non-interactive/headless operation, CI/automation |
-| 10 | [Remote Mode](10-remote-mode.md) | `remote exec`, `remote session`, live log streaming, TUI pickers |
-| 11 | [GitHub Integration](11-github-integration.md) | `--issue` flag, fetching issues, authentication |
-| 12 | [Runtimes](12-runtimes.md) | Docker, Apple Containers, Docker Sandboxes — platform support, setup, lifecycle |
-| 13 | [Dynamic Workflows](13-dynamic-workflows.md) | `--dynamic` mode — leader agent designs the workflow, repair loop, `--leader` flag |
-| 14 | [Cleaning Up](14-cleaning-up.md) | `awman clean` — remove containers, workflow files, and dangling images |
-| 15 | [Parallel Workflows](15-parallel-workflows.md) | Concurrent workflow steps, `maxConcurrentAgents`, engine scheduling, per-container stuck/yolo, control board scoping |
-| 16 | [amie](16-amie.md) | Conditions, the amie daemon, the amie TUI tab, attach, unattended-execution guardrails, `amie` config |
-| 17 | [ACP Mode](17-acp-mode.md) | Structured agent sessions (CLI today), launch-mode selection, workflow/TUI limits |
+| 02 | [Using the TUI](02-using-the-tui.md) | TUI layout, tabs, container window, Workflow Overview, keyboard reference |
+| 03 | [Agent Sessions](03-agent-sessions.md) | `chat`, permission modes (`--plan`/`--auto`/`--yolo`), ACP, work items, skills, agent authentication |
+| 04 | [Security & Isolation](04-security-and-isolation.md) | Worktrees, Docker socket, SSH keys, command transparency |
+| 05 | [Workflows](05-workflows.md) | Multi-step workflows, setup/teardown, control board, parallel groups, state persistence |
+| 06 | [Dynamic Workflows](06-dynamic-workflows.md) | `--dynamic` — leader agent designs the workflow, repair loop, `--leader` |
+| 07 | [Configuration](07-configuration.md) | Config files, precedence, runtime selection, every field |
+| 08 | [Overlays](08-overlays.md) | `dir()`, `env()`, `skill()`, `ssh()`, `context()` — sources, merge semantics |
+| 09 | [API & Remote Mode](09-api-and-remote-mode.md) | HTTP server, headless operation, CI/automation, and the `awman remote` client |
+| 10 | [GitHub Integration](10-github-integration.md) | `--issue` flag, fetching issues, authentication |
+| 11 | [Runtimes](11-runtimes.md) | Docker, Apple Containers, Docker Sandboxes — platform support, setup, lifecycle |
+| 12 | [squad](12-squad.md) | Scheduled tasks, durable workspaces, the squad daemon, TUI tab, attach, guardrails |
+| 13 | [Cleaning Up](13-cleaning-up.md) | `awman clean` — remove containers, workflow files, and dangling images |
 | — | [Architecture (Detailed)](architecture.md) | Source layout, in-depth design decisions |
 
 ---
 
 Start with [Getting Started](00-getting-started.md) if this is your first time.
+
+### Looking for something that moved?
+
+| Was | Now |
+|-----|-----|
+| Yolo Mode | [Permission modes](03-agent-sessions.md#permission-modes) (flags, disallowed tools) and [Auto-advance when stuck](05-workflows.md#auto-advance-when-stuck-yolo-mode) (the countdown) |
+| ACP Mode | [ACP launch mode](03-agent-sessions.md#acp-launch-mode) |
+| Parallel Workflows | [Parallel workflows](05-workflows.md#parallel-workflows) |
+| Remote Mode | [Remote mode](09-api-and-remote-mode.md#remote-mode) |

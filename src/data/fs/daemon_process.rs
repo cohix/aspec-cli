@@ -1,5 +1,5 @@
 //! `DaemonProcess` — PID-file lifecycle, background spawn, and server-meta
-//! persistence for a long-lived awman daemon (the API server or amie).
+//! persistence for a long-lived awman daemon (the API server or squad).
 //!
 //! Ported from the former `api_process.rs` module of free functions. The
 //! path-bearing operations become methods on a typed object owning a
@@ -20,9 +20,9 @@ use crate::data::fs::daemon_paths::DaemonPaths;
 pub const API_UNIT_NAME: &str = "awman-api";
 pub const API_PLIST_LABEL: &str = "io.awman.api";
 
-/// systemd unit name / launchd plist label for the amie daemon.
-pub const AMIE_UNIT_NAME: &str = "awman-amie";
-pub const AMIE_PLIST_LABEL: &str = "io.awman.amie";
+/// systemd unit name / launchd plist label for the squad daemon.
+pub const SQUAD_UNIT_NAME: &str = "awman-squad";
+pub const SQUAD_PLIST_LABEL: &str = "io.awman.squad";
 
 /// Sidecar metadata for a running daemon. Written next to the PID file when
 /// the server boots so other commands (status, kill) can locate the bound
@@ -101,6 +101,14 @@ impl DaemonProcess {
             self.unit_name,
             self.plist_label,
         )
+        .map_err(|error| {
+            let daemon = match self.unit_name {
+                SQUAD_UNIT_NAME => "squad",
+                API_UNIT_NAME => "API",
+                _ => "background",
+            };
+            DataError::Other(format!("failed to start the {daemon} daemon: {error}"))
+        })
     }
 
     /// Terminate the running daemon: read the PID, and if it is a live awman
@@ -472,6 +480,10 @@ fn try_launchd(
 
     let status = std::process::Command::new("launchctl")
         .args(["load", &plist_path.to_string_lossy()])
+        // launchctl's diagnostics are platform-level implementation details;
+        // never let them print into the invoking TUI/CLI.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| DataError::Other(format!("launchctl load failed: {e}")))?;
 
@@ -639,8 +651,8 @@ mod tests {
     }
 
     #[test]
-    fn distinct_unit_and_plist_for_api_and_amie() {
-        assert_ne!(API_UNIT_NAME, AMIE_UNIT_NAME);
-        assert_ne!(API_PLIST_LABEL, AMIE_PLIST_LABEL);
+    fn distinct_unit_and_plist_for_api_and_squad() {
+        assert_ne!(API_UNIT_NAME, SQUAD_UNIT_NAME);
+        assert_ne!(API_PLIST_LABEL, SQUAD_PLIST_LABEL);
     }
 }

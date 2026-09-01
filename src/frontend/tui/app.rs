@@ -50,12 +50,12 @@ pub struct StatusBar {
     pub text: String,
 }
 
-/// Everything [`App::build_amie_tab`] produces. `key_setup` is `Some` only on
-/// the run that minted the amie bearer key, and carries the shell snippet the
+/// Everything [`App::build_squad_tab`] produces. `key_setup` is `Some` only on
+/// the run that minted the squad bearer key, and carries the shell snippet the
 /// caller must show before it is lost — the plaintext key exists nowhere else.
-pub struct AmieTabBuild {
+pub struct SquadTabBuild {
     pub tab: Tab,
-    pub gateway: Arc<dyn crate::command::commands::amie::gateway::ConditionGateway>,
+    pub gateway: Arc<dyn crate::command::commands::squad::gateway::TaskGateway>,
     pub key_setup: Option<String>,
 }
 
@@ -76,11 +76,11 @@ pub struct App {
     pub needs_redraw: bool,
     pub command_dialog_active: bool,
     pub runtime_handle: tokio::runtime::Handle,
-    /// Gateway for the singleton amie tab, obtained from
-    /// `AmieSupervisor::ensure_running()` when the tab is opened. Injected into
-    /// `Dispatch` for `amie` in-tab actions so they reach the daemon. `None`
-    /// until the amie tab exists.
-    pub amie_gateway: Option<Arc<dyn crate::command::commands::amie::gateway::ConditionGateway>>,
+    /// Gateway for the singleton squad tab, obtained from
+    /// `SquadSupervisor::ensure_running()` when the tab is opened. Injected into
+    /// `Dispatch` for `squad` in-tab actions so they reach the daemon. `None`
+    /// until the squad tab exists.
+    pub squad_gateway: Option<Arc<dyn crate::command::commands::squad::gateway::TaskGateway>>,
     /// Receiver for asynchronous container stats results. The middle element
     /// is the step name of the slot the sample was polled for (empty for the
     /// single/backbone slot of a plain containerized command).
@@ -134,7 +134,7 @@ impl App {
             needs_redraw: true,
             command_dialog_active: false,
             runtime_handle,
-            amie_gateway: None,
+            squad_gateway: None,
             stats_rx: Some(stats_rx),
             stats_tx,
             last_stats_poll: std::time::Instant::now() - std::time::Duration::from_secs(10),
@@ -177,59 +177,84 @@ impl App {
         }
     }
 
-    /// Focus the existing amie tab, or create the singleton one.
+    /// Focus the existing squad tab, or create the singleton one.
     ///
     /// On failure nothing is created: the error text — which already names
     /// `awman api` (daemon conflict) or the sandbox runtime — is surfaced
     /// verbatim in the status bar, never a generic "could not connect".
     /// Idempotent: a second call focuses the tab created by the first.
-    pub fn open_or_focus_amie_tab(&mut self) {
-        if let Some(idx) = self.tabs.iter().position(|t| t.is_amie) {
+    pub fn open_or_focus_squad_tab(&mut self) {
+        let wrap_startup_error = |message: String| {
+            if message.starts_with("failed to start the squad daemon:")
+                || message.starts_with("failed to open squad tab:")
+                || message.starts_with("awman api")
+                || message.starts_with("squad ")
+            {
+                message
+            } else {
+                format!("failed to start the squad daemon: {message}")
+            }
+        };
+        if let Some(idx) = self.tabs.iter().position(|t| t.is_squad) {
             self.active_tab = idx;
             self.needs_redraw = true;
             return;
         }
-        match Self::build_amie_tab(&self.engines, &self.runtime_handle) {
+        match Self::build_squad_tab(&self.engines, &self.runtime_handle) {
             Ok(build) => {
-                self.amie_gateway = Some(build.gateway);
+                self.squad_gateway = Some(build.gateway);
                 self.tabs.push(build.tab);
                 self.active_tab = self.tabs.len() - 1;
                 if let Some(body) = build.key_setup {
                     self.active_dialog = Some(Dialog::Notice {
-                        title: "amie authentication".to_string(),
+                        title: "squad authentication".to_string(),
                         body,
                     });
                 }
                 self.needs_redraw = true;
             }
             Err(message) => {
-                // The error text already names `awman api` (daemon conflict) or
-                // the sandbox runtime; surface it verbatim and open nothing.
-                self.status_bar.text = message;
+                // Preserve known conflict/runtime guidance, while attributing
+                // any unexpected startup failure before showing it.
+                self.status_bar.text = wrap_startup_error(message);
             }
         }
     }
 
-    /// Build the singleton amie tab: ensure the daemon is running, obtain a
+    /// Build the singleton squad tab: ensure the daemon is running, obtain a
     /// gateway, construct the synthetic-session tab, and start its poller.
-    /// Shared by [`App::open_or_focus_amie_tab`] and `tui::run`'s
-    /// `InitialTab::Amie` path. On failure returns the specific error text
+    /// Shared by [`App::open_or_focus_squad_tab`] and `tui::run`'s
+    /// `InitialTab::Squad` path. On failure returns the specific error text
     /// (naming `awman api` or the sandbox runtime), never a generic message.
-    pub(crate) fn build_amie_tab(
+    pub(crate) fn build_squad_tab(
         engines: &crate::command::dispatch::Engines,
         runtime_handle: &tokio::runtime::Handle,
-    ) -> Result<AmieTabBuild, String> {
-        use crate::command::commands::amie::daemon::AmieSupervisor;
-        use crate::command::commands::amie::gateway::ConditionGateway;
-        use crate::command::commands::amie::runtime_guard::require_container_tier;
+    ) -> Result<SquadTabBuild, String> {
+        use crate::command::commands::squad::daemon::SquadSupervisor;
+        use crate::command::commands::squad::gateway::TaskGateway;
+        use crate::command::commands::squad::runtime_guard::require_container_tier;
         use crate::data::config::env::Env;
 
-        // A sandbox-class runtime cannot back amie: report the runtime error,
+        let wrap_startup_error = |message: String| {
+            if message.starts_with("failed to start the squad daemon:")
+                || message.starts_with("failed to open squad tab:")
+                || message.starts_with("awman api")
+                || message.starts_with("squad ")
+            {
+                message
+            } else {
+                format!("failed to start the squad daemon: {message}")
+            }
+        };
+
+        // A sandbox-class runtime cannot back squad: report the runtime error,
         // never a generic connection failure.
-        require_container_tier(engines).map_err(|e| e.to_string())?;
+        require_container_tier(engines).map_err(|e| wrap_startup_error(e.to_string()))?;
 
         let env = Env::from_process();
-        let supervisor = Arc::new(AmieSupervisor::from_env(&env).map_err(|e| e.to_string())?);
+        let supervisor = Arc::new(
+            SquadSupervisor::from_env(&env).map_err(|e| wrap_startup_error(e.to_string()))?,
+        );
 
         // `ensure_running` is async, but the caller may be on a tokio worker
         // thread where `Handle::block_on` would panic. Drive it on the runtime
@@ -244,59 +269,56 @@ impl App {
         }
         let gateway = match rx.recv() {
             Ok(Ok(gateway)) => gateway,
-            Ok(Err(error)) => return Err(error.to_string()),
-            Err(_) => return Err("amie daemon startup was interrupted".to_string()),
+            Ok(Err(error)) => return Err(wrap_startup_error(error.to_string())),
+            Err(_) => return Err("squad daemon startup was interrupted".to_string()),
         };
         // A first run mints the bearer key here. It has to be shown, or the
         // user is left with a daemon they cannot authenticate to from any
         // later process; the caller raises it as a dismissable modal.
         let key_setup = supervisor.take_generated_key_setup();
 
-        let session = Self::amie_synthetic_session()
-            .map_err(|error| format!("failed to open amie tab: {error}"))?;
+        let session = Self::squad_synthetic_session()
+            .map_err(|error| format!("failed to open squad tab: {error}"))?;
 
-        let gateway: Arc<dyn ConditionGateway> = Arc::new(gateway);
+        let gateway: Arc<dyn TaskGateway> = Arc::new(gateway);
 
-        let mut tab = Tab::new_amie(session);
+        let mut tab = Tab::new_squad(session);
         {
             // Ensure a runtime context so the poller's `tokio::spawn` works even
             // when this runs off a runtime thread.
             let _guard = runtime_handle.enter();
             let (poller, cancel) = {
                 let state = tab
-                    .amie
+                    .squad
                     .as_ref()
-                    .expect("new_amie always installs amie state");
+                    .expect("new_squad always installs squad state");
                 (
-                    crate::frontend::tui::amie_poll::AmieConditionPoller::new(
-                        gateway.clone(),
-                        state,
-                    ),
+                    crate::frontend::tui::squad_poll::SquadTaskPoller::new(gateway.clone(), state),
                     state.cancel.clone(),
                 )
             };
             let handle = poller.start(cancel);
-            tab.amie
+            tab.squad
                 .as_mut()
-                .expect("new_amie always installs amie state")
+                .expect("new_squad always installs squad state")
                 .set_poll_handle(handle);
         }
-        Ok(AmieTabBuild {
+        Ok(SquadTabBuild {
             tab,
             gateway,
             key_setup,
         })
     }
 
-    /// Build the amie tab's synthetic session, rooted at the amie storage root.
-    /// It exists solely to satisfy the `Tab` API; nothing rendered in the amie
+    /// Build the squad tab's synthetic session, rooted at the squad storage root.
+    /// It exists solely to satisfy the `Tab` API; nothing rendered in the squad
     /// tab derives from it.
-    fn amie_synthetic_session() -> Result<Session, crate::data::error::DataError> {
+    fn squad_synthetic_session() -> Result<Session, crate::data::error::DataError> {
         use crate::data::config::env::Env;
-        use crate::data::fs::amie_paths::AmiePaths;
+        use crate::data::fs::squad_paths::SquadPaths;
         use crate::data::session::SessionOpenOptions;
 
-        let root = AmiePaths::from_process_env()?.root().to_path_buf();
+        let root = SquadPaths::from_process_env()?.root().to_path_buf();
         std::fs::create_dir_all(&root).ok();
         Session::open_at_git_root(
             root.clone(),
@@ -311,16 +333,16 @@ impl App {
     /// Spawn a parsed command as an async tokio task, wiring up all channels
     /// between the event loop and the command thread.
     pub fn spawn_command(&mut self, _command_text: &str, parsed: ParsedCommandBoxInput) {
-        // WI 0102: `amie attach` has no Layer-2 command; intercept it before
+        // WI 0102: `squad attach` has no Layer-2 command; intercept it before
         // the ordinary Dispatch spawn, mirroring `cli::run`'s carve-out.
-        if parsed.path.as_slice() == ["amie", "attach"] {
+        if parsed.path.as_slice() == ["squad", "attach"] {
             let name = match parsed.arguments.get("name") {
                 Some(crate::command::dispatch::parsed_input::ArgValue::Single(name)) => {
                     name.clone()
                 }
                 _ => String::new(),
             };
-            crate::frontend::tui::amie_attach::start_amie_attach(self, &name);
+            crate::frontend::tui::squad_attach::start_squad_attach(self, &name);
             return;
         }
 
@@ -521,17 +543,17 @@ impl App {
         let session = Arc::new(RwLock::new(tab_session));
         let engines = self.engines.clone();
         let path_owned: Vec<String> = parsed.path.clone();
-        // WI 0102: in-tab `amie` actions reach the daemon through the same
+        // WI 0102: in-tab `squad` actions reach the daemon through the same
         // gateway the CLI subcommands use, injected into Dispatch. Without it
-        // they fail with 0101's "amie conditions are served by the amie daemon"
+        // they fail with 0101's "squad tasks are served by the squad daemon"
         // error.
-        let amie_gateway = self.amie_gateway.clone();
+        let squad_gateway = self.squad_gateway.clone();
 
         self.runtime_handle.spawn(async move {
             let mut dispatch = Dispatch::new(frontend, session, engines);
-            if path_owned.first().map(String::as_str) == Some("amie") {
-                if let Some(gateway) = amie_gateway {
-                    dispatch = dispatch.with_amie_gateway(gateway);
+            if path_owned.first().map(String::as_str) == Some("squad") {
+                if let Some(gateway) = squad_gateway {
+                    dispatch = dispatch.with_squad_gateway(gateway);
                 }
             }
             let path_refs: Vec<&str> = path_owned.iter().map(|s| s.as_str()).collect();
@@ -553,10 +575,10 @@ impl App {
     pub fn tick_all_tabs(&mut self) {
         let active = self.active_tab;
         for (idx, tab) in self.tabs.iter_mut().enumerate() {
-            // WI 0102: drive the amie tab's poll loop — it fetches only while
-            // focused — and publish the selected condition name for the poller
+            // WI 0102: drive the squad tab's poll loop — it fetches only while
+            // focused — and publish the selected task name for the poller
             // so it never reads UI state directly.
-            if let Some(state) = tab.amie.as_ref() {
+            if let Some(state) = tab.squad.as_ref() {
                 state
                     .focused
                     .store(idx == active, std::sync::atomic::Ordering::Relaxed);
@@ -819,35 +841,34 @@ impl App {
             self.active_dialog = None;
         }
 
-        // WI 0102: keep the amie condition-detail modal live from the active
-        // tab's snapshot, matching on the condition name it was opened for.
-        if matches!(self.active_dialog, Some(Dialog::AmieConditionDetail(_))) {
+        // WI 0102: keep the squad task-detail modal live from the active
+        // tab's snapshot, matching on the task name it was opened for.
+        if matches!(self.active_dialog, Some(Dialog::SquadTaskDetail(_))) {
             let snapshot = self.tabs[active]
-                .amie
+                .squad
                 .as_ref()
                 .and_then(|state| state.snapshot.lock().ok().map(|g| g.clone()));
-            if let (Some(Dialog::AmieConditionDetail(detail)), Some(snapshot)) =
+            if let (Some(Dialog::SquadTaskDetail(detail)), Some(snapshot)) =
                 (&mut self.active_dialog, snapshot)
             {
-                if let Some(condition) = snapshot.conditions.iter().find(|c| c.name == detail.name)
-                {
-                    detail.condition = condition.clone();
+                if let Some(task) = snapshot.tasks.iter().find(|c| c.name == detail.name) {
+                    detail.task = task.clone();
                 }
                 detail.runs = snapshot.runs.clone();
             }
         }
 
-        // WI 0102: while an attach session owns the amie tab and the daemon is
+        // WI 0102: while an attach session owns the squad tab and the daemon is
         // unreachable, surface the frozen-overview indicator (the attached
         // container slots keep streaming from their direct runtime connections).
-        if let Some(state) = self.tabs[active].amie.as_ref() {
-            if state.attached_condition.is_some()
+        if let Some(state) = self.tabs[active].squad.as_ref() {
+            if state.attached_task.is_some()
                 && !state
                     .daemon_reachable
                     .load(std::sync::atomic::Ordering::Relaxed)
             {
                 self.status_bar.text =
-                    "amie daemon not reachable — workflow overview frozen; attached containers still live"
+                    "squad daemon not reachable — workflow overview frozen; attached containers still live"
                         .to_string();
             }
         }

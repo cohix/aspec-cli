@@ -122,12 +122,12 @@ pub enum Dialog {
     CloseTabConfirm,
     WorkflowCancelConfirm,
     ConfigShow(ConfigShowState),
-    /// Condition detail + run history for the amie tab (WI 0102). Kept live by
-    /// `App::tick_all_tabs` from the active amie tab's snapshot.
-    AmieConditionDetail(AmieDetailState),
-    /// Confirmation before removing an amie condition (WI 0102). `y` dispatches
-    /// `amie remove <name>`; `n`/`Esc` dismisses.
-    AmieRemoveConfirm {
+    /// Task detail + run history for the squad tab (WI 0102). Kept live by
+    /// `App::tick_all_tabs` from the active squad tab's snapshot.
+    SquadTaskDetail(SquadDetailState),
+    /// Confirmation before removing a squad task (WI 0102). `y` dispatches
+    /// `squad remove <name>`; `n`/`Esc` dismisses.
+    SquadRemoveConfirm {
         name: String,
     },
     Loading {
@@ -146,7 +146,7 @@ pub enum Dialog {
         body: String,
     },
     /// One-shot informational modal with no command thread behind it: Enter and
-    /// Esc simply dismiss it. Used for the amie key-setup snippet, which must
+    /// Esc simply dismiss it. Used for the squad key-setup snippet, which must
     /// be readable long enough to copy and must not scroll away in a status bar.
     Notice {
         title: String,
@@ -232,14 +232,14 @@ pub struct AgentAuthState {
     pub env_vars: Vec<String>,
 }
 
-/// State for the amie condition-detail modal (WI 0102). `name` is the identity
-/// used by `tick_all_tabs` to refresh `condition` and `runs` from the tab
+/// State for the squad task-detail modal (WI 0102). `name` is the identity
+/// used by `tick_all_tabs` to refresh `task` and `runs` from the tab
 /// snapshot each tick; `scroll` offsets the run-history table.
 #[derive(Debug, Clone)]
-pub struct AmieDetailState {
+pub struct SquadDetailState {
     pub name: String,
-    pub condition: crate::data::fs::condition_store::Condition,
-    pub runs: Vec<crate::data::fs::condition_store::Run>,
+    pub task: crate::data::fs::task_store::Task,
+    pub runs: Vec<crate::data::fs::task_store::Run>,
     pub scroll: usize,
 }
 

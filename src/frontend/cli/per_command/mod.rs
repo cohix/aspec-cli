@@ -13,8 +13,8 @@
 pub(crate) mod helpers;
 pub(crate) mod render;
 
-pub(crate) mod amie;
-pub(crate) mod amie_attach;
+pub(crate) mod squad;
+pub(crate) mod squad_attach;
 
 mod api_server;
 mod chat;

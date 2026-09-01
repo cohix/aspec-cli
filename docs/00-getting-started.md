@@ -66,10 +66,10 @@ That's it — you have an isolated agent working in your repo.
 - [Using the TUI](02-using-the-tui.md) — tabs, keybindings, the container window
 - [Agent Sessions](03-agent-sessions.md) — all `chat` flags and session management
 - [Workflows](05-workflows.md) — multi-step agent runs with setup and teardown
-- [Dynamic Workflows](13-dynamic-workflows.md) — let a leader agent design and run a workflow for you, no file to write
-- [Yolo Mode](06-yolo-mode.md) — fully autonomous operation
-- [GitHub Integration](11-github-integration.md) — drive `new spec`, `exec workflow`, and `exec prompt` from GitHub issues with `--issue`
-- [Runtimes](12-runtimes.md) — Docker, Apple Containers, and Docker Sandboxes (microVM) isolation
+- [Dynamic Workflows](06-dynamic-workflows.md) — let a leader agent design and run a workflow for you, no file to write
+- [Permission modes](03-agent-sessions.md#permission-modes) — `--plan`, `--auto`, and fully autonomous `--yolo`
+- [GitHub Integration](10-github-integration.md) — drive `new spec`, `exec workflow`, and `exec prompt` from GitHub issues with `--issue`
+- [Runtimes](11-runtimes.md) — Docker, Apple Containers, and Docker Sandboxes (microVM) isolation
 
 ---
 
@@ -80,7 +80,7 @@ That's it — you have an isolated agent working in your repo.
 | Method | Command |
 |--------|---------|
 | Installer script | `curl -s https://prettysmart.dev/install/awman.sh \| sh` |
-| mise | `mise use -g github:prettysmartdev/awman` (pin: `@0.11.0`) |
+| mise | `mise use -g github:prettysmartdev/awman` (pin: `@0.11.1`) |
 | GitHub Releases | Download the asset for your platform, `chmod +x`, move onto `PATH` |
 | From source | `git clone https://github.com/prettysmartdev/awman.git && cd awman && make install` (Rust 1.94+) |
 

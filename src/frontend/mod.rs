@@ -11,10 +11,10 @@
 //! Frontends contain NO business logic; every behavioral decision lives in
 //! Layer 2.
 
-pub mod amie;
 pub mod api;
 pub mod attach;
 pub mod cli;
+pub mod squad;
 pub mod tui;
 
 use std::io::IsTerminal;

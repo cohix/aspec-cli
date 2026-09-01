@@ -21,8 +21,6 @@ use crate::data::session_manager::SessionManager;
 use crate::frontend::cli::RuntimeContext;
 
 pub mod acp_view;
-pub mod amie_attach;
-pub mod amie_poll;
 pub mod app;
 pub mod command_box;
 pub mod command_frontend;
@@ -40,13 +38,15 @@ pub mod per_command;
 pub mod pty;
 mod region_scroll;
 pub mod render;
+pub mod squad_attach;
+pub mod squad_poll;
 pub mod tabs;
 pub mod text_edit;
 pub mod user_message;
 pub mod workflow_view;
 
 pub use per_command::remote::{
-    AmieConditionWorkflowSource, RemoteApiWorkflowSource, RemoteWorkflowPoller, WorkflowStateSource,
+    RemoteApiWorkflowSource, RemoteWorkflowPoller, SquadTaskWorkflowSource, WorkflowStateSource,
 };
 
 #[cfg(test)]
@@ -57,7 +57,7 @@ use dialogs::Dialog;
 use tabs::Tab;
 
 /// What the TUI opens with. `Normal` carries the session `main.rs` already
-/// resolved from the working directory; `Amie` opens the singleton amie tab and
+/// resolved from the working directory; `Squad` opens the singleton squad tab and
 /// no directory-bound tab at all.
 ///
 /// The shape is pinned by the WI 0102 contract (§1). `Normal(Session)` is
@@ -67,11 +67,11 @@ use tabs::Tab;
 #[allow(clippy::large_enum_variant)]
 pub enum InitialTab {
     Normal(crate::data::session::Session),
-    Amie,
+    Squad,
 }
 
 /// Entry point invoked by `main.rs` for bare (no-subcommand) launches and for
-/// bare `awman amie` in a TTY.
+/// bare `awman squad` in a TTY.
 ///
 /// `fatal_runtime_error` carries the invalid-runtime config message when the
 /// global config names a runtime awman doesn't recognize. In that case the
@@ -79,7 +79,7 @@ pub enum InitialTab {
 ///
 /// `initial_tab` selects the opening tab: `Normal(session)` is today's
 /// behaviour, including the `ready` / `status --watch` startup auto-spawn;
-/// `Amie` opens the singleton amie tab (§2.2) with no auto-spawn.
+/// `Squad` opens the singleton squad tab (§2.2) with no auto-spawn.
 pub async fn run(
     _matches: clap::ArgMatches,
     ctx: RuntimeContext,
@@ -91,14 +91,14 @@ pub async fn run(
     let runtime_handle = tokio::runtime::Handle::current();
 
     // Build the App and decide whether the normal startup auto-spawn runs — it
-    // does only for a directory-bound tab, never for the amie tab.
+    // does only for a directory-bound tab, never for the squad tab.
     let (mut app, run_startup_spawn) = match initial_tab {
         InitialTab::Normal(session) => {
             let tab = Tab::new(session);
             let app = App::new(catalogue, ctx.engines, session_manager, tab, runtime_handle);
             (app, true)
         }
-        InitialTab::Amie => match App::build_amie_tab(&ctx.engines, &runtime_handle) {
+        InitialTab::Squad => match App::build_squad_tab(&ctx.engines, &runtime_handle) {
             Ok(build) => {
                 let key_setup = build.key_setup;
                 let mut app = App::new(
@@ -108,12 +108,12 @@ pub async fn run(
                     build.tab,
                     runtime_handle,
                 );
-                app.amie_gateway = Some(build.gateway);
+                app.squad_gateway = Some(build.gateway);
                 // First run: the bearer key was minted a moment ago and lives
                 // only in memory. Show it before the event loop starts.
                 if let Some(body) = key_setup {
                     app.active_dialog = Some(Dialog::Notice {
-                        title: "amie authentication".to_string(),
+                        title: "squad authentication".to_string(),
                         body,
                     });
                 }
@@ -151,7 +151,7 @@ pub async fn run(
     }
 
     // Auto-spawn startup command: `ready` for git repos, `status --watch`
-    // for non-git directories. Skipped entirely for the amie tab.
+    // for non-git directories. Skipped entirely for the squad tab.
     if run_startup_spawn {
         let is_git = app.active_tab().session.git_root().join(".git").exists();
         if is_git {

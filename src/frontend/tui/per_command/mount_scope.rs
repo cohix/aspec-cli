@@ -26,11 +26,11 @@ impl MountScopeFrontend for TuiCommandFrontend {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::frontend::tui::dialogs::DialogResponse;
 
-    fn make_frontend() -> (
+    pub(crate) fn make_frontend() -> (
         TuiCommandFrontend,
         std::sync::mpsc::Receiver<DialogRequest>,
         std::sync::mpsc::Sender<DialogResponse>,

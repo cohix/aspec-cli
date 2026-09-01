@@ -36,10 +36,10 @@ impl Tab {
     /// The effective root is the active worktree path when set, otherwise the
     /// session git root. Called each tick from `tick_all_tabs`.
     pub fn refresh_git_poll(&mut self) {
-        // The amie tab's synthetic session has no meaningful git diff and
-        // `new_amie` starts no poll; returning early keeps `tick_all_tabs`
-        // from restarting one against the amie storage root.
-        if self.is_amie {
+        // The squad tab's synthetic session has no meaningful git diff and
+        // `new_squad` starts no poll; returning early keeps `tick_all_tabs`
+        // from restarting one against the squad storage root.
+        if self.is_squad {
             return;
         }
         let desired = self

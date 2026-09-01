@@ -38,7 +38,7 @@ awman exec workflow aspec/workflows/dependency-upgrade.toml
 awman exec workflow --dynamic --work-item 42
 ```
 
-Use `exec workflow` to run any workflow file. If you don't want to write a workflow file yourself, see [Dynamic Workflows](13-dynamic-workflows.md) — `--dynamic` launches a leader agent that designs a purpose-built workflow for your work item and then executes it automatically. The work item is optional — associate one with `--work-item` if you want template variable substitution, or with `--issue` to use a GitHub issue directly. See [API Mode](09-api-mode.md) for usage in CI and scripting contexts. For more on GitHub integration, see [GitHub Integration](11-github-integration.md).
+Use `exec workflow` to run any workflow file. If you don't want to write a workflow file yourself, see [Dynamic Workflows](06-dynamic-workflows.md) — `--dynamic` launches a leader agent that designs a purpose-built workflow for your work item and then executes it automatically. The work item is optional — associate one with `--work-item` if you want template variable substitution, or with `--issue` to use a GitHub issue directly. See [API mode](09-api-and-remote-mode.md) for usage in CI and scripting contexts. For more on GitHub integration, see [GitHub Integration](10-github-integration.md).
 
 The TUI shows the **Workflow Overview** between the execution window and the command box, with one coloured box per step. After each step completes, a confirmation dialog appears — press **Enter** to advance, **q** to pause. State is saved to disk so you can resume later.
 
@@ -132,7 +132,7 @@ Writes to `~/.awman/workflows/<name>.<ext>` instead of the current repo. Use thi
 
 ## Workflow file formats
 
-awman supports two workflow file formats: **TOML** (`.toml`) and **YAML** (`.yml` / `.yaml`). The format is detected automatically from the file extension. Both formats produce identical execution behaviour — you can pass either to `--workflow` interchangeably.
+awman supports two workflow file formats: **TOML** (`.toml`) and **YAML** (`.yml` / `.yaml`). The format is detected automatically from the file extension. Both formats produce identical execution behaviour — you can pass either to `exec workflow` interchangeably.
 
 | Extension | Format |
 |-----------|--------|
@@ -154,10 +154,12 @@ All steps support the same fields:
 | `name` | string | yes | Unique step identifier within the workflow |
 | `prompt` | string | yes | Prompt template sent to the agent |
 | `depends_on` | array of strings | no | Names of steps that must complete before this one runs |
-| `agent` | string | no | Run this step with a specific agent instead of the default. Valid values: `claude`, `codex`, `opencode`, `maki`, `gemini` |
+| `agent` | string | no | Run this step with a specific agent instead of the default. Valid values: `claude`, `codex`, `opencode`, `maki`, `gemini`, `antigravity`, `copilot`, `crush`, `cline` |
 | `model` | string | no | Run this step with a specific model. Overrides any `--model` flag |
+| `overlays` | array of strings | no | Overlays applied to this step only — see [Workflow step overlays](08-overlays.md#workflow-step-overlays) |
+| `abort_on_failure` | bool | no | When `true`, a failure here stops the whole workflow (and kills any running parallel peers) instead of prompting. Defaults to `false` |
 
-Field names are **lowercase only** (`name`, `depends_on`, `agent`, `model`, `prompt`). Uppercase variants are not accepted. Unknown fields (e.g. `dependson`, `Prompt`) are rejected as errors so that typos do not silently take effect.
+Field names are **lowercase only** (`name`, `depends_on`, `agent`, `model`, `prompt`, `overlays`, `abort_on_failure`). Uppercase variants are not accepted. Unknown fields (e.g. `dependson`, `Prompt`) are rejected as errors so that typos do not silently take effect.
 
 ### TOML (`.toml`)
 
@@ -975,9 +977,9 @@ Press [r] to retry, or any other key to abort:
 | `--worktree` | Run all steps in an isolated Git worktree |
 | `--overlay=<SPEC>` | Apply overlay(s) to every step; see [Overlays](08-overlays.md) |
 | `--yolo` | Fully autonomous mode; implies `--worktree`; auto-advances stuck steps |
-| `--dynamic` | Let a leader agent design the workflow file from your work item; see [Dynamic Workflows](13-dynamic-workflows.md) |
+| `--dynamic` | Let a leader agent design the workflow file from your work item; see [Dynamic Workflows](06-dynamic-workflows.md) |
 | `--leader=<agent::model>` | Override the agent and model used as the leader when `--dynamic` is set; format: `agent::model` |
-| `--max-concurrent=<N>` | Cap on concurrently-running steps for this invocation (must be ≥ 1); overrides `maxConcurrentAgents` in config — see [Parallel Workflows](15-parallel-workflows.md) |
+| `--max-concurrent=<N>` | Cap on concurrently-running steps for this invocation (must be ≥ 1); overrides `maxConcurrentAgents` in config — see [Parallel workflows](05-workflows.md#parallel-workflows) |
 
 ---
 
@@ -1120,7 +1122,7 @@ The maximized overview grows to fill the vertical space between the tab bar and 
 
 In the TUI, running steps beyond the concurrency cap wait their turn with a `·` prefix on their name until a slot frees up.
 
-See [Parallel Workflows](15-parallel-workflows.md) for the full scheduling model, and [Using the TUI](02-using-the-tui.md#parallel-containers) for how multiple running containers are displayed and switched between.
+See [Parallel workflows](05-workflows.md#parallel-workflows) for the full scheduling model, and [Using the TUI](02-using-the-tui.md#parallel-containers) for how multiple running containers are displayed and switched between.
 
 ### Viewing the full control board
 
@@ -1130,14 +1132,62 @@ When a step completes, awman shows the lightweight confirmation dialog. To see a
 
 ## Auto-advance when stuck (yolo mode)
 
-When a running workflow step produces no output for **30 seconds**, the engine is notified that the step is stuck:
+When a running workflow step produces **no output for 30 seconds**, the engine marks that step stuck. What happens next depends on the permission mode:
 
-- In **yolo mode**: the engine starts a 60-second countdown. If the countdown expires, the step is automatically advanced. Pressing Esc cancels the countdown; if the step re-stucks, the countdown restarts from 60 seconds with no backoff.
-- In **non-yolo mode**: the workflow control board opens automatically so you can decide what to do.
+- **In [yolo mode](03-agent-sessions.md#--yolo):** a **60-second countdown** starts, and the workflow auto-advances when it expires.
+- **In every other mode:** the [workflow control board](#workflow-control-board-tui-only) opens automatically so you can decide what to do.
 
-Stuck detection fires independently per tab — background tabs detect and report stuck state to their own engine. In yolo mode, background tabs show a live countdown in the tab bar. See [Yolo Mode — Background yolo countdown](06-yolo-mode.md#background-yolo-countdown).
+Stuck detection is unified across all frontends (TUI, CLI, and API) and runs continuously inside the container engine, which tracks output activity on stdout and stderr. Any new output — even a single byte — immediately clears the stuck state. Each container is tracked independently, so one noisy agent never masks detection on its siblings.
 
-**Active-tab suppression:** If you are actively pressing keys or scrolling on the currently active tab, the stuck timer is held back even if the container is silent. The timer starts only once both the container and the user have been idle for 30 seconds. Background tabs are always checked using output time alone.
+**Active-tab suppression:** if you are actively pressing keys or scrolling on the currently active tab, the stuck timer is held back even while the container is silent — the timer starts only once both the container and you have been idle for 30 seconds. Background tabs are always judged on output time alone.
+
+### How the countdown appears
+
+**TUI — Active tab (yolo countdown dialog):**
+
+When the stuck tab is currently active in the TUI, the countdown dialog opens:
+
+```
+╭─────── Yolo: Auto-Advance ──────────────╮
+│ Step: implement                          │
+│                                          │
+│  No activity detected.                   │
+│  Advancing to next step in  47s...       │
+│                                          │
+│                    [Esc] cancel          │
+╰──────────────────────────────────────────╯
+```
+
+The dialog updates every ~100 ms to show the remaining time.
+
+**TUI — Background tab (tab bar countdown):**
+
+When the stuck tab is in the background, no dialog opens. Instead, the tab bar shows a live countdown: the tab alternates between yellow and purple every second, with the label cycling between `⚠️ yolo in N` and `🤘 yolo in N` (where `N` is the remaining seconds):
+
+```
+┌─ Tab 1: myproject ─────────┬─ Tab 2 ⚠️  yolo in 38 ─────┐
+│  chat                        │                              │
+└──────────────────────────────┴──────────────────────────────┘
+```
+
+This lets you monitor all tabs' countdown state without leaving your current work.
+
+**CLI and API:** countdown status messages go to the message sink (stderr for the CLI, the event stream for the API) and are **throttled to one every 10 seconds**, even though the countdown updates internally every ~100 ms. The TUI receives every tick and renders the countdown at full granularity.
+
+### Interacting with a countdown
+
+- **Switching to a tab that is counting down** opens the yolo dialog immediately at the remaining time — the timer is never restarted from 60 seconds.
+- **Switching away** with **Ctrl+A** / **Ctrl+D** while the dialog is open closes the dialog and lets the countdown continue in the background. You are never forced to resolve it first.
+- **Esc** dismisses the active-tab dialog manually. If the container goes silent again, a fresh 60-second countdown begins — there is no backoff.
+- **Output resuming mid-countdown** clears the stuck state, cancels the countdown, and returns the tab to its normal colour.
+
+**When the countdown expires:**
+
+- If this is not the last step — awman kills the stuck step's container and advances to the next step in a new container
+- If this is the last step — the workflow transitions to complete
+- In the TUI, the killed container's window closes immediately, leaving the [summary bar](02-using-the-tui.md#when-the-container-exits) behind — the window only closes on actual container death, never while the container is merely stuck or while the countdown is still running
+
+In the background this happens without you switching to the tab; the tab returns to its normal colour and label as soon as it moves on to the next step.
 
 ---
 
@@ -1211,9 +1261,92 @@ Start it over (s) or skip to next step (n)? [s/n]:
 
 ---
 
-## Parallel groups
+## Parallel workflows
 
-Steps that share the same `Depends-on` set form a **parallel group** and run concurrently, each in its own container, up to the configured [`maxConcurrentAgents`](07-configuration.md#reference) cap. In the TUI the group reads as a single `N steps…` box until you press **Ctrl-O**, which maximizes the Workflow Overview into one box per step stacked vertically at the same indent. See [Parallel Workflows](15-parallel-workflows.md) for details.
+A workflow's steps don't have to run one at a time. Any steps that share the same [`depends_on`](#step-fields) set — meaning neither depends on the other — form a **parallel group**, and awman runs them concurrently, each in its own container. This section covers how many agents run at once, how the engine schedules them, and how stuck detection, yolo mode, and the control board behave when more than one agent is active.
+
+For how parallel containers appear on screen, see [Using the TUI](02-using-the-tui.md#parallel-containers) and [Parallel agents in interactive CLI mode](09-api-and-remote-mode.md#parallel-agents-in-interactive-cli-mode).
+
+### What parallelism means here
+
+Consider a workflow where `tests` and `docs` both depend only on `implement`, and nothing depends on either of them:
+
+```
+implement → tests
+          → docs
+       → review (depends on tests, docs)
+```
+
+`tests` and `docs` form a parallel group: once `implement` finishes, both become eligible to run, and awman launches both at once instead of waiting for one to finish before starting the other. `review` still waits for both to complete, since it depends on them.
+
+This is entirely driven by your workflow file's `depends_on` graph — you don't opt into parallelism explicitly. Any steps whose dependencies are satisfied at the same time run together, up to the concurrency cap described below.
+
+---
+
+### Configuring `maxConcurrentAgents`
+
+`maxConcurrentAgents` caps how many containers can run at once, machine-wide or per-repo. It's a plain [config field](07-configuration.md#reference), so it follows the same precedence as everything else:
+
+```
+--max-concurrent  >  AWMAN_MAX_CONCURRENT_AGENTS  >  repo config  >  global config  >  unlimited
+```
+
+```sh
+awman config set maxConcurrentAgents 3              # this repo
+awman config set --global maxConcurrentAgents 2     # every project on this machine
+awman exec workflow workflow.toml --max-concurrent 4   # this run only
+```
+
+Left unset at every level, there is **no cap** — every step whose dependencies are satisfied launches immediately. In practice you'll usually want a cap that matches your machine's CPU/memory headroom and your Docker daemon's capacity, since each parallel step is a full container running its own agent.
+
+A `maxConcurrentAgents` of `1` disables parallelism entirely: steps run one at a time, in the same order they would without any concurrency at all. `0` is rejected — if you want to pause parallelism, unset the field or set it to `1`.
+
+> `dynamicWorkflows.maxConcurrentSteps` is a different, unrelated setting: it's an advisory hint passed to the leader agent that *designs* a `--dynamic` workflow. `maxConcurrentAgents` is what the engine actually enforces at run time, for any workflow, dynamic or not.
+
+---
+
+### How the engine schedules steps
+
+When a parallel group becomes ready, awman launches as many of its steps as the concurrency cap allows, in the order they appear in the workflow file. Any remaining steps in the group wait in a queue.
+
+- **A slot frees up** whenever a running step finishes successfully. The next queued step (in file order) starts immediately into that slot.
+- **A step that fails** without `abort_on_failure` stops new steps from being queued into the group, but lets its already-running siblings keep going until they finish; you're then prompted the same way you would be for a sequential failure.
+- **A step with `abort_on_failure = true` that fails** kills every other active step in the group immediately and cancels anything still queued — the same all-stop behavior `abort_on_failure` has always had, just applied to every running peer at once instead of a single step.
+
+If a workflow resumes from a saved state mid-group, any steps that were interrupted are replayed; steps that had already succeeded stay succeeded.
+
+---
+
+### Stuck and yolo behavior, per container
+
+Every running container is tracked independently — one noisy or slow agent never masks or delays detection on its siblings.
+
+- **Stuck detection (yolo off):** if a container produces no output for 30 seconds, that container alone is marked stuck. Its siblings keep running unaffected. The stuck container's slot stays occupied — no new step launches into it — until you switch to it and send Ctrl-C to kill it, at which point its slot frees up like any other completion.
+- **Yolo mode:** each container gets its own independent 60-second auto-advance countdown. When one container's countdown expires, only that container is killed and its step marked advanced; the rest of the group is untouched, and the next queued step (if any) starts into the freed slot. If the group has nothing left queued, the remaining containers simply keep running until they finish.
+
+**Where the countdown appears in the TUI:** a yoloing container that is *not* the focused one shows its countdown in its minimized status bar (`Yolo in Ns`, flashing purple/yellow — see [Using the TUI: Parallel containers](02-using-the-tui.md#parallel-containers)). If it's the focused container, the countdown instead opens the same modal dialog a single container shows. Pressing **Ctrl-S** to rotate focus away closes that modal — the countdown itself keeps running in the background regardless — and rotating back onto a container still counting down reopens the modal automatically.
+
+See [Permission modes](03-agent-sessions.md#permission-modes) for the general countdown behavior this builds on.
+
+---
+
+### The workflow control board with multiple agents running
+
+Opening the control board (**Ctrl-W** in the TUI) while more than one agent is running scopes its actions to whichever container is currently **focused** — the one you'd switch to with Ctrl-S. The board makes this explicit: it names the focused step and shows how many peers are still running.
+
+Some actions only make sense once the whole group has settled and are unavailable while any peer is still active:
+
+| Action | Behavior with active peers |
+|---|---|
+| Restart current step | Disabled while any other agent in the group is still running, with a reason pointing you at Ctrl-S — restarting always targets the focused container, but only once its siblings have finished. |
+| Cancel to previous step | Disabled while any peer is still running: rewinding a step in a group that's still mid-flight isn't well-defined until the group finishes. |
+| Finish workflow | Disabled while any peer is still running, for the same reason. |
+| Pause | Always available — suspends the whole workflow, killing every active container in the group. |
+| Abort | Always available — same, but marks the workflow aborted rather than paused. |
+
+When an action is unavailable, the reason is shown alongside it rather than just being greyed out silently.
+
+Each parallel step gets its own control board when it completes or gets stuck; you're never blocked from acting on one step because another is still busy — you just can't ask the workflow as a whole to move backward or forward (cancel to a previous step, or finish) until the whole group has drained.
 
 ---
 
@@ -1297,10 +1430,10 @@ Steps that share the same `Depends-on` set form a **parallel group** and run con
 | User actively scrolling on active tab | Stuck timer suppressed; control board does not open while user is engaged |
 | User becomes idle after scrolling | Timer starts from idle moment; control board opens after another 10 s of silence |
 
-### Limitations (v0.3)
+### Known limitations
 
 - **TUI resume dialogs**: hash-mismatch and resume prompts use auto-restart behaviour rather than a full dialog.
 
 ---
 
-[← Security & Isolation](04-security-and-isolation.md) · [Next: Yolo Mode →](06-yolo-mode.md)
+[← Security & Isolation](04-security-and-isolation.md) · [Next: Dynamic Workflows →](06-dynamic-workflows.md)

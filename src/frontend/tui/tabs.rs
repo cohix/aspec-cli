@@ -18,15 +18,15 @@ use crate::frontend::tui::git_sidebar::{
 };
 use crate::frontend::tui::user_message::SharedStatusLog;
 
-pub mod amie_state;
 mod container_slots;
 mod git_poll;
 mod labels;
 mod overlay_lifecycle;
+pub mod squad_state;
 #[cfg(test)]
 mod tests;
 
-use amie_state::AmieTabState;
+use squad_state::SquadTabState;
 
 /// Per-tab execution lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,13 +537,13 @@ pub struct Tab {
     pub mouse_selection: Option<TextSelection>,
     pub workflow_agent_fallbacks: HashMap<String, String>,
     pub is_remote: bool,
-    /// Fixed tab kind, following the `is_remote` precedent. An amie tab is not
-    /// bound to a project directory and renders amie content in place of the
+    /// Fixed tab kind, following the `is_remote` precedent. A squad tab is not
+    /// bound to a project directory and renders squad content in place of the
     /// execution window. Never toggled after construction.
-    pub is_amie: bool,
-    /// Amie sub-view state (selection, polled conditions, daemon reachability).
-    /// `Some` exactly when `is_amie`.
-    pub amie: Option<AmieTabState>,
+    pub is_squad: bool,
+    /// Squad sub-view state (selection, polled tasks, daemon reachability).
+    /// `Some` exactly when `is_squad`.
+    pub squad: Option<SquadTabState>,
     pub output_lines: Vec<String>,
     pub stuck: bool,
     pub yolo_mode: bool,
@@ -649,20 +649,20 @@ impl Tab {
         tab
     }
 
-    /// Construct the singleton amie tab. Unlike [`Tab::new`] this starts **no**
-    /// git poll: the synthetic session is rooted at the amie storage root,
+    /// Construct the singleton squad tab. Unlike [`Tab::new`] this starts **no**
+    /// git poll: the synthetic session is rooted at the squad storage root,
     /// which has no meaningful diff. The caller must not auto-spawn a startup
     /// command into this tab.
-    pub fn new_amie(session: Session) -> Self {
+    pub fn new_squad(session: Session) -> Self {
         let mut tab = Self::new_inner(session);
-        tab.is_amie = true;
-        tab.amie = Some(AmieTabState::new());
+        tab.is_squad = true;
+        tab.squad = Some(SquadTabState::new());
         tab
     }
 
-    /// Shared field initialisation for [`Tab::new`] and [`Tab::new_amie`].
+    /// Shared field initialisation for [`Tab::new`] and [`Tab::new_squad`].
     /// Starts **no** poll and spawns nothing; the caller decides whether a git
-    /// poll runs (normal tab) or not (amie tab).
+    /// poll runs (normal tab) or not (squad tab).
     fn new_inner(session: Session) -> Self {
         Self {
             session,
@@ -687,8 +687,8 @@ impl Tab {
             mouse_selection: None,
             workflow_agent_fallbacks: HashMap::new(),
             is_remote: false,
-            is_amie: false,
-            amie: None,
+            is_squad: false,
+            squad: None,
             output_lines: Vec::new(),
             stuck: false,
             yolo_mode: false,
@@ -765,7 +765,7 @@ pub fn tab_color(tab: &Tab) -> ratatui::style::Color {
     }
     // Fixed tab kinds. Both win over execution-phase colouring and both yield
     // to the stuck / yolo indicators above, which are transient run signals.
-    if tab.is_amie {
+    if tab.is_squad {
         return Color::Cyan;
     }
     if tab.is_remote {

@@ -55,7 +55,7 @@ const REMOVED_CONFIG_FIELDS: &[(&str, &str)] = &[(
     "envPassthrough",
     "the 'envPassthrough' field was removed; express env passthrough as overlay entries \
      instead (e.g. `awman config set overlays \"env(VAR_NAME)\"` or add `\"env(VAR_NAME)\"` \
-     to the `overlays` array in `.awman/config.json`). See `docs/09-overlays.md`.",
+     to the `overlays` array in `.awman/config.json`). See `docs/08-overlays.md`.",
 )];
 
 fn removed_field_message(name: &str) -> Option<&'static str> {
@@ -348,7 +348,11 @@ fn levenshtein_suggestions<'a>(input: &str, candidates: &[&'a str]) -> Vec<&'a s
         .iter()
         .filter_map(|c| {
             let dist = levenshtein(input, c);
-            if dist <= 3 { Some((dist, *c)) } else { None }
+            if dist <= 3 {
+                Some((dist, *c))
+            } else {
+                None
+            }
         })
         .collect();
     scored.sort_by_key(|(d, _)| *d);

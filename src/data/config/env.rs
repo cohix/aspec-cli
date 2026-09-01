@@ -12,8 +12,8 @@ pub const AWMAN_CONFIG_HOME: &str = "AWMAN_CONFIG_HOME";
 /// `AWMAN_API_ROOT` — overrides the API storage root directory.
 pub const AWMAN_API_ROOT: &str = "AWMAN_API_ROOT";
 
-/// `AWMAN_AMIE_ROOT` — overrides the amie storage root directory.
-pub const AWMAN_AMIE_ROOT: &str = "AWMAN_AMIE_ROOT";
+/// `AWMAN_SQUAD_ROOT` — overrides the squad storage root directory.
+pub const AWMAN_SQUAD_ROOT: &str = "AWMAN_SQUAD_ROOT";
 
 /// `AWMAN_OVERLAYS` — comma-separated list of overlay specs.
 pub const AWMAN_OVERLAYS: &str = "AWMAN_OVERLAYS";
@@ -27,10 +27,10 @@ pub const AWMAN_REMOTE_SESSION: &str = "AWMAN_REMOTE_SESSION";
 /// `AWMAN_API_KEY` — API key for the remote API server.
 pub const AWMAN_API_KEY: &str = "AWMAN_API_KEY";
 
-/// `AWMAN_AMIE_KEY` — bearer key the CLI and TUI authenticate to the amie
+/// `AWMAN_SQUAD_KEY` — bearer key the CLI and TUI authenticate to the squad
 /// daemon with. Minted on the daemon's first start and printed once as a
-/// shell-export snippet; see `awman amie start`.
-pub const AWMAN_AMIE_KEY: &str = "AWMAN_AMIE_KEY";
+/// shell-export snippet; see `awman squad start`.
+pub const AWMAN_SQUAD_KEY: &str = "AWMAN_SQUAD_KEY";
 
 /// `AWMAN_MAX_CONCURRENT_AGENTS` — overrides the max-concurrent-agents cap
 /// for workflow execution.
@@ -46,7 +46,7 @@ pub const XDG_CONFIG_HOME: &str = "XDG_CONFIG_HOME";
 pub const XDG_DATA_HOME: &str = "XDG_DATA_HOME";
 
 /// `SHELL` — the user's login shell. Read only to tailor the shell snippet
-/// printed alongside a freshly minted amie key; never to execute anything.
+/// printed alongside a freshly minted squad key; never to execute anything.
 pub const SHELL: &str = "SHELL";
 
 /// Frozen snapshot of every env var awman reads.
@@ -96,9 +96,9 @@ impl EnvSnapshot {
         self.get(AWMAN_API_ROOT).map(PathBuf::from)
     }
 
-    /// `AWMAN_AMIE_ROOT` as a `PathBuf` if set.
-    pub fn amie_root(&self) -> Option<PathBuf> {
-        self.get(AWMAN_AMIE_ROOT).map(PathBuf::from)
+    /// `AWMAN_SQUAD_ROOT` as a `PathBuf` if set.
+    pub fn squad_root(&self) -> Option<PathBuf> {
+        self.get(AWMAN_SQUAD_ROOT).map(PathBuf::from)
     }
 
     /// `AWMAN_OVERLAYS` raw string if set.
@@ -121,9 +121,9 @@ impl EnvSnapshot {
         self.get(AWMAN_API_KEY)
     }
 
-    /// `AWMAN_AMIE_KEY` if set and non-empty.
-    pub fn amie_key(&self) -> Option<&str> {
-        self.get(AWMAN_AMIE_KEY).filter(|v| !v.is_empty())
+    /// `AWMAN_SQUAD_KEY` if set and non-empty.
+    pub fn squad_key(&self) -> Option<&str> {
+        self.get(AWMAN_SQUAD_KEY).filter(|v| !v.is_empty())
     }
 
     /// `AWMAN_MAX_CONCURRENT_AGENTS` parsed as a `usize`, if set and valid.
@@ -174,12 +174,12 @@ impl Env {
         let keys = [
             AWMAN_CONFIG_HOME,
             AWMAN_API_ROOT,
-            AWMAN_AMIE_ROOT,
+            AWMAN_SQUAD_ROOT,
             AWMAN_OVERLAYS,
             AWMAN_REMOTE_ADDR,
             AWMAN_REMOTE_SESSION,
             AWMAN_API_KEY,
-            AWMAN_AMIE_KEY,
+            AWMAN_SQUAD_KEY,
             AWMAN_MAX_CONCURRENT_AGENTS,
             AWMAN_LAUNCH_MODE,
             XDG_CONFIG_HOME,

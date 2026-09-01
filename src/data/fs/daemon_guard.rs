@@ -1,8 +1,8 @@
 //! `DaemonGuard` — cross-daemon mutual exclusion.
 //!
-//! `awman api` and the amie daemon both open the shared sqlite database. Only
+//! `awman api` and the squad daemon both open the shared sqlite database. Only
 //! one long-lived process may hold it at a time, which removes multi-process
-//! SQLite contention on amie data by construction. `DaemonGuard` enforces that:
+//! SQLite contention on squad data by construction. `DaemonGuard` enforces that:
 //! before opening the database, a starting daemon checks that the *other*
 //! daemon is not alive, claims its own pidfile, then checks again to close the
 //! window where both pass an initial check before either commits.
@@ -12,12 +12,12 @@ use std::time::{Duration, SystemTime};
 
 use crate::data::config::env::EnvSnapshot;
 use crate::data::error::DataError;
-use crate::data::fs::amie_paths::AmiePaths;
 use crate::data::fs::api_paths::ApiPaths;
 use crate::data::fs::daemon_process::{
-    DaemonProcess, AMIE_PLIST_LABEL, AMIE_UNIT_NAME, API_PLIST_LABEL, API_UNIT_NAME,
+    DaemonProcess, API_PLIST_LABEL, API_UNIT_NAME, SQUAD_PLIST_LABEL, SQUAD_UNIT_NAME,
 };
 use crate::data::fs::data_paths::DataPaths;
+use crate::data::fs::squad_paths::SquadPaths;
 
 /// Name of the shared startup-arbitration lock. It lives beside the shared
 /// database because that is the one directory both daemons already agree on.
@@ -137,7 +137,7 @@ fn is_stale(path: &Path) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonKind {
     Api,
-    Amie,
+    Squad,
 }
 
 impl DaemonKind {
@@ -145,7 +145,7 @@ impl DaemonKind {
     pub fn display_name(&self) -> &'static str {
         match self {
             DaemonKind::Api => "awman api",
-            DaemonKind::Amie => "the amie daemon",
+            DaemonKind::Squad => "the squad daemon",
         }
     }
 
@@ -153,7 +153,7 @@ impl DaemonKind {
     pub fn stop_hint(&self) -> &'static str {
         match self {
             DaemonKind::Api => "awman api kill",
-            DaemonKind::Amie => "awman amie stop",
+            DaemonKind::Squad => "awman squad stop",
         }
     }
 }
@@ -162,7 +162,7 @@ impl DaemonKind {
 pub struct DaemonGuard {
     this: DaemonKind,
     api: DaemonProcess,
-    amie: DaemonProcess,
+    squad: DaemonProcess,
     /// Directory holding the shared startup-arbitration lock.
     arbiter_root: PathBuf,
 }
@@ -171,8 +171,8 @@ impl DaemonGuard {
     /// Build both daemon processes from the environment.
     pub fn for_daemon(this: DaemonKind, env: &EnvSnapshot) -> Result<Self, DataError> {
         let api_paths = ApiPaths::from_env(env)?;
-        let amie_paths = AmiePaths::from_env(env)?;
-        Ok(Self::with_paths(this, &api_paths, &amie_paths))
+        let squad_paths = SquadPaths::from_env(env)?;
+        Ok(Self::with_paths(this, &api_paths, &squad_paths))
     }
 
     /// Build from explicitly-resolved paths.
@@ -181,14 +181,14 @@ impl DaemonGuard {
     /// must use this, so the pidfile the guard claims is the same one the rest
     /// of the command reads. The shared arbitration lock is scoped to those
     /// paths' data root for the same reason.
-    pub fn with_paths(this: DaemonKind, api_paths: &ApiPaths, amie_paths: &AmiePaths) -> Self {
+    pub fn with_paths(this: DaemonKind, api_paths: &ApiPaths, squad_paths: &SquadPaths) -> Self {
         let api = DaemonProcess::new(api_paths.daemon(), API_UNIT_NAME, API_PLIST_LABEL);
-        let amie = DaemonProcess::new(amie_paths.daemon(), AMIE_UNIT_NAME, AMIE_PLIST_LABEL);
+        let squad = DaemonProcess::new(squad_paths.daemon(), SQUAD_UNIT_NAME, SQUAD_PLIST_LABEL);
         let arbiter_root = api_paths.data_paths().root().to_path_buf();
         Self {
             this,
             api,
-            amie,
+            squad,
             arbiter_root,
         }
     }
@@ -196,14 +196,14 @@ impl DaemonGuard {
     fn this_process(&self) -> &DaemonProcess {
         match self.this {
             DaemonKind::Api => &self.api,
-            DaemonKind::Amie => &self.amie,
+            DaemonKind::Squad => &self.squad,
         }
     }
 
     fn other(&self) -> (&DaemonProcess, DaemonKind) {
         match self.this {
-            DaemonKind::Api => (&self.amie, DaemonKind::Amie),
-            DaemonKind::Amie => (&self.api, DaemonKind::Api),
+            DaemonKind::Api => (&self.squad, DaemonKind::Squad),
+            DaemonKind::Squad => (&self.api, DaemonKind::Api),
         }
     }
 
@@ -214,7 +214,7 @@ impl DaemonGuard {
         if let Some(pid) = other.running_pid()? {
             return Err(DataError::Other(format!(
                 "{} is already running (PID {pid}). Run `{}` first; \
-                 awman api and the amie daemon cannot run at the same time.",
+                 awman api and the squad daemon cannot run at the same time.",
                 other_kind.display_name(),
                 other_kind.stop_hint(),
             )));
@@ -262,15 +262,15 @@ impl DaemonGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::config::env::{AWMAN_AMIE_ROOT, AWMAN_API_ROOT, AWMAN_CONFIG_HOME};
+    use crate::data::config::env::{AWMAN_API_ROOT, AWMAN_CONFIG_HOME, AWMAN_SQUAD_ROOT};
 
     /// `AWMAN_CONFIG_HOME` is set as well so the shared startup-arbitration
     /// lock (which lives beside the shared database) also lands in the
     /// fixture, never in the developer's real `~/.awman`.
-    fn env_for(api_root: &std::path::Path, amie_root: &std::path::Path) -> EnvSnapshot {
+    fn env_for(api_root: &std::path::Path, squad_root: &std::path::Path) -> EnvSnapshot {
         EnvSnapshot::with_overrides([
             (AWMAN_API_ROOT, api_root.to_str().unwrap()),
-            (AWMAN_AMIE_ROOT, amie_root.to_str().unwrap()),
+            (AWMAN_SQUAD_ROOT, squad_root.to_str().unwrap()),
             (
                 AWMAN_CONFIG_HOME,
                 api_root.parent().unwrap_or(api_root).to_str().unwrap(),
@@ -282,16 +282,16 @@ mod tests {
     fn kind_names_and_hints_differ() {
         assert_ne!(
             DaemonKind::Api.display_name(),
-            DaemonKind::Amie.display_name()
+            DaemonKind::Squad.display_name()
         );
-        assert_ne!(DaemonKind::Api.stop_hint(), DaemonKind::Amie.stop_hint());
+        assert_ne!(DaemonKind::Api.stop_hint(), DaemonKind::Squad.stop_hint());
     }
 
     #[test]
     fn acquire_then_release_round_trip() {
         let api = tempfile::tempdir().unwrap();
-        let amie = tempfile::tempdir().unwrap();
-        let env = env_for(api.path(), amie.path());
+        let squad = tempfile::tempdir().unwrap();
+        let env = env_for(api.path(), squad.path());
         let guard = DaemonGuard::for_daemon(DaemonKind::Api, &env).unwrap();
         guard.acquire(std::process::id()).unwrap();
         // Our pidfile now exists.
@@ -303,20 +303,20 @@ mod tests {
     #[test]
     fn check_errors_when_other_daemon_alive() {
         let api = tempfile::tempdir().unwrap();
-        let amie = tempfile::tempdir().unwrap();
-        let env = env_for(api.path(), amie.path());
+        let squad = tempfile::tempdir().unwrap();
+        let env = env_for(api.path(), squad.path());
 
-        // Amie daemon "runs" — claim its pidfile with our own (live, awman) PID.
-        let amie_guard = DaemonGuard::for_daemon(DaemonKind::Amie, &env).unwrap();
-        amie_guard.acquire(std::process::id()).unwrap();
+        // Squad daemon "runs" — claim its pidfile with our own (live, awman) PID.
+        let squad_guard = DaemonGuard::for_daemon(DaemonKind::Squad, &env).unwrap();
+        squad_guard.acquire(std::process::id()).unwrap();
 
-        // The API guard's cross-check must now fail, naming the amie daemon.
+        // The API guard's cross-check must now fail, naming the squad daemon.
         let api_guard = DaemonGuard::for_daemon(DaemonKind::Api, &env).unwrap();
         match api_guard.check() {
             Err(DataError::Other(msg)) => {
                 assert!(
-                    msg.contains("amie"),
-                    "message must name the amie daemon: {msg}"
+                    msg.contains("squad"),
+                    "message must name the squad daemon: {msg}"
                 );
                 assert!(
                     msg.contains(&std::process::id().to_string()),
@@ -325,14 +325,14 @@ mod tests {
             }
             other => panic!("expected cross-daemon error, got {other:?}"),
         }
-        amie_guard.release().unwrap();
+        squad_guard.release().unwrap();
     }
 
     #[test]
     fn absent_other_pidfile_is_ok() {
         let api = tempfile::tempdir().unwrap();
-        let amie = tempfile::tempdir().unwrap();
-        let env = env_for(api.path(), amie.path());
+        let squad = tempfile::tempdir().unwrap();
+        let env = env_for(api.path(), squad.path());
         let guard = DaemonGuard::for_daemon(DaemonKind::Api, &env).unwrap();
         assert!(guard.check().is_ok());
     }

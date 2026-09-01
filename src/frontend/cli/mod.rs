@@ -16,8 +16,8 @@ use std::sync::Arc;
 use clap::ArgMatches;
 use tokio::sync::RwLock;
 
-use crate::command::commands::amie::daemon::AmieSupervisor;
-use crate::command::commands::amie::gateway::ConditionGateway;
+use crate::command::commands::squad::daemon::SquadSupervisor;
+use crate::command::commands::squad::gateway::TaskGateway;
 use crate::command::commands::Command;
 use crate::command::dispatch::{BuiltCommand, Dispatch, Engines};
 use crate::command::error::CommandError;
@@ -65,16 +65,16 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
         return ExitCode::from(2);
     }
     let path_strs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-    // ── amie ────────────────────────────────────────────────────────────────
+    // ── squad ────────────────────────────────────────────────────────────────
     // The interactive bare form is routed to the TUI by main.rs. Piped and
     // explicitly non-interactive invocations report the daemon summary here.
-    if path_strs == ["amie"] {
-        return per_command::amie::run_bare(&matches, &ctx.engines).await;
+    if path_strs == ["squad"] {
+        return per_command::squad::run_bare(&matches, &ctx.engines).await;
     }
     // Attach is intentionally not a Layer-2 command: it opens a local runtime
     // session against an existing agent, just like the exec-workflow carve-out.
-    if path_strs == ["amie", "attach"] {
-        return per_command::amie_attach::run_attach(&matches, &ctx).await;
+    if path_strs == ["squad", "attach"] {
+        return per_command::squad_attach::run_attach(&matches, &ctx).await;
     }
     if path_strs == ["exec", "workflow"] {
         let build_frontend = CliFrontend::new(matches.clone());
@@ -93,23 +93,23 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
         };
     }
 
-    // Under a non-container runtime, every amie entry point must fail fast with
+    // Under a non-container runtime, every squad entry point must fail fast with
     // the shared sandbox refusal — the same text attach and Ctrl-A already use
     // — instead of provisioning a key and hanging ~10s on a daemon child that
     // will refuse to start (edge-case #1). attach ran its own check above.
     if matches!(
         path_strs.as_slice(),
         [
-            "amie",
+            "squad",
             "add" | "list" | "show" | "remove" | "pause" | "resume" | "status"
         ]
     ) {
         if let Err(error) =
-            crate::command::commands::amie::runtime_guard::require_container_tier(&ctx.engines)
+            crate::command::commands::squad::runtime_guard::require_container_tier(&ctx.engines)
         {
-            return per_command::amie::render_failure(
+            return per_command::squad::render_failure(
                 &error,
-                per_command::amie::amie_flag(&matches, "json"),
+                per_command::squad::squad_flag(&matches, "json"),
             );
         }
     }
@@ -120,17 +120,17 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
     if matches!(
         path_strs.as_slice(),
         [
-            "amie",
+            "squad",
             "add" | "list" | "show" | "remove" | "pause" | "resume"
         ]
     ) {
-        let supervisor = match AmieSupervisor::from_env(&Env::from_process()) {
+        let supervisor = match SquadSupervisor::from_env(&Env::from_process()) {
             Ok(supervisor) => supervisor,
-            Err(error) => return per_command::amie::render_failure(&error, json),
+            Err(error) => return per_command::squad::render_failure(&error, json),
         };
         let gateway = match supervisor.ensure_running().await {
             Ok(gateway) => gateway,
-            Err(error) => return per_command::amie::render_failure(&error, json),
+            Err(error) => return per_command::squad::render_failure(&error, json),
         };
         // A first run mints the bearer key. Disclose it on stderr — stdout
         // belongs to `--json` consumers, and this is the only moment the
@@ -138,36 +138,36 @@ pub async fn run(matches: ArgMatches, ctx: RuntimeContext) -> ExitCode {
         if let Some(setup) = supervisor.take_generated_key_setup() {
             eprintln!("{setup}");
         }
-        dispatch = dispatch.with_amie_gateway(Arc::new(gateway) as Arc<dyn ConditionGateway>);
-    } else if path_strs == ["amie", "status"] {
-        let supervisor = match AmieSupervisor::from_env(&Env::from_process()) {
+        dispatch = dispatch.with_squad_gateway(Arc::new(gateway) as Arc<dyn TaskGateway>);
+    } else if path_strs == ["squad", "status"] {
+        let supervisor = match SquadSupervisor::from_env(&Env::from_process()) {
             Ok(supervisor) => supervisor,
-            Err(error) => return per_command::amie::render_failure(&error, json),
+            Err(error) => return per_command::squad::render_failure(&error, json),
         };
         let gateway = match supervisor.gateway_from_meta() {
             Ok(gateway) => gateway,
-            Err(error) => return per_command::amie::render_failure(&error, json),
+            Err(error) => return per_command::squad::render_failure(&error, json),
         };
         if let Some(gateway) = gateway {
-            dispatch = dispatch.with_amie_gateway(Arc::new(gateway) as Arc<dyn ConditionGateway>);
+            dispatch = dispatch.with_squad_gateway(Arc::new(gateway) as Arc<dyn TaskGateway>);
         }
     }
     match dispatch.run_command(&path_strs).await {
         Ok(outcome) => render_outcome(&outcome, json),
-        Err(err) if path_strs.first() == Some(&"amie") => {
-            per_command::amie::render_failure(&err, json)
+        Err(err) if path_strs.first() == Some(&"squad") => {
+            per_command::squad::render_failure(&err, json)
         }
         Err(err) => render_error(&err),
     }
 }
 
-/// True exactly for the TTY form of bare `awman amie`, which main.rs opens in
+/// True exactly for the TTY form of bare `awman squad`, which main.rs opens in
 /// the TUI. JSON implies non-interactive and therefore never takes this path.
-pub fn is_bare_amie_tui_invocation(matches: &ArgMatches) -> bool {
-    command_path_from_matches(matches) == ["amie"]
+pub fn is_bare_squad_tui_invocation(matches: &ArgMatches) -> bool {
+    command_path_from_matches(matches) == ["squad"]
         && output::stdin_is_tty()
-        && !per_command::amie::amie_flag(matches, "non-interactive")
-        && !per_command::amie::amie_flag(matches, "json")
+        && !per_command::squad::squad_flag(matches, "non-interactive")
+        && !per_command::squad::squad_flag(matches, "json")
 }
 
 /// Format a successful [`CommandOutcome`] to user-facing stdout text.

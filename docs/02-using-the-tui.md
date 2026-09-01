@@ -364,7 +364,7 @@ The container window closes and a summary bar appears:
 
 This summary persists until a new container is launched.
 
-The window closes the moment the container actually terminates, for any reason: the agent process exits or you quit it manually, awman kills it (for example when a [yolo countdown](06-yolo-mode.md) expires and auto-advances a workflow), or a workflow action replaces it. During a workflow this happens immediately — the dead container's window never lingers over the execution window between steps; you see the summary bar and the execution window behind it until the next step's container opens a fresh window.
+The window closes the moment the container actually terminates, for any reason: the agent process exits or you quit it manually, awman kills it (for example when a [yolo countdown](03-agent-sessions.md#permission-modes) expires and auto-advances a workflow), or a workflow action replaces it. During a workflow this happens immediately — the dead container's window never lingers over the execution window between steps; you see the summary bar and the execution window behind it until the next step's container opens a fresh window.
 
 The window does **not** close while the container is still alive: a stuck agent (no output) keeps its window open, and so does an agent with a yolo countdown running — only actual container death closes it.
 
@@ -372,7 +372,7 @@ The window does **not** close while the container is still alive: a stuck agent 
 
 ## Parallel containers
 
-Workflow steps that don't depend on each other can run at the same time, each in its own container — see [Parallel Workflows](15-parallel-workflows.md) for how the engine decides what runs concurrently. When more than one container is running, the container window changes shape: one container is **focused** and shown maximized as usual, while each of the others renders as a **minimized status bar** underneath it — the same rounded strip a single container shows when minimized, stacked one per background container. The maximized window's title also names the workflow step its container is running.
+Workflow steps that don't depend on each other can run at the same time, each in its own container — see [Parallel workflows](05-workflows.md#parallel-workflows) for how the engine decides what runs concurrently. When more than one container is running, the container window changes shape: one container is **focused** and shown maximized as usual, while each of the others renders as a **minimized status bar** underneath it — the same rounded strip a single container shows when minimized, stacked one per background container. The maximized window's title also names the workflow step its container is running.
 
 ```
 ╭─ 🔒 claude (containerized) — implement ─ awman-impl-1 | 5.0% | 200MiB | 2m ─╮
@@ -395,9 +395,9 @@ Each minimized bar reads `🔒 agent [step_name] | container | cpu | mem | durat
 |---|---|
 | Green border and text | Container running normally |
 | Yellow, `⚠` prefix | No output for more than 30 seconds — [stuck](05-workflows.md#stuck-steps) |
-| Flashing purple / yellow, `Yolo in Ns` | A [yolo](06-yolo-mode.md) auto-advance countdown is running for that container; the color alternates every second and the bar shows the seconds remaining |
+| Flashing purple / yellow, `Yolo in Ns` | A [yolo](03-agent-sessions.md#permission-modes) auto-advance countdown is running for that container; the color alternates every second and the bar shows the seconds remaining |
 
-The focused container never shows a bar of its own — its step name, container name, and live stats are already in the maximized window's title line. If the *focused* container is the one counting down, its countdown appears as the same modal dialog a single container shows (see [Yolo Mode](06-yolo-mode.md#4-auto-advances-stuck-workflow-steps)) instead of a minimized bar, since there's no bar for the focused container to show it in.
+The focused container never shows a bar of its own — its step name, container name, and live stats are already in the maximized window's title line. If the *focused* container is the one counting down, its countdown appears as the same modal dialog a single container shows (see [Auto-advance when stuck](05-workflows.md#auto-advance-when-stuck-yolo-mode)) instead of a minimized bar, since there's no bar for the focused container to show it in.
 
 Only the focused container receives keyboard input; the others keep running in the background regardless of which one is focused.
 
@@ -407,7 +407,7 @@ Press **Ctrl-S** to move focus to the next running container. The newly-focused 
 
 Ctrl-S only cycles focus when more than one container is currently running. With a single container, Ctrl-S has no special effect and is passed through to the container's PTY as usual (some programs use it for flow control).
 
-**With a yolo countdown modal open:** Ctrl-S still rotates focus, exactly as it does otherwise — a modal on one container never blocks you from checking on its siblings. The modal closes when you rotate away; if the container you rotate back to is still counting down, its modal reopens automatically (the countdown itself is never paused or restarted by rotating focus, since each container's timer runs independently in the background — see [Stuck and yolo behavior, per container](15-parallel-workflows.md#stuck-and-yolo-behavior-per-container)).
+**With a yolo countdown modal open:** Ctrl-S still rotates focus, exactly as it does otherwise — a modal on one container never blocks you from checking on its siblings. The modal closes when you rotate away; if the container you rotate back to is still counting down, its modal reopens automatically (the countdown itself is never paused or restarted by rotating focus, since each container's timer runs independently in the background — see [Stuck and yolo behavior, per container](05-workflows.md#stuck-and-yolo-behavior-per-container)).
 
 ### Ctrl-M with multiple containers
 
@@ -521,7 +521,7 @@ There are more fields than fit at once — the table scrolls automatically to ke
 
 ### Agent→model mappings (`dynamicWorkflows.agentsToModels`)
 
-The agent→model map for [dynamic workflows](13-dynamic-workflows.md) is fully manageable from the dialog:
+The agent→model map for [dynamic workflows](06-dynamic-workflows.md) is fully manageable from the dialog:
 
 - A summary row (`dynamicWorkflows.agentsToModels`) always appears, showing how many agents are mapped (or `(none)`), so the mapping is discoverable even before it's configured.
 - Each configured agent gets its own row (`dynamicWorkflows.agentsToModels.<agentName>`) whose comma-separated model list is edited inline like any other field.
@@ -532,7 +532,7 @@ The same per-agent entries work on the command line: `awman config set dynamicWo
 
 ### Developer guidance list (`dynamicWorkflows.guidance`)
 
-The [leader guidance list](13-dynamic-workflows.md#guidance) — project-specific instructions the leader agent must follow whenever it designs a dynamic workflow — is also fully manageable from the dialog:
+The [leader guidance list](06-dynamic-workflows.md#guidance) — project-specific instructions the leader agent must follow whenever it designs a dynamic workflow — is also fully manageable from the dialog:
 
 - A summary row (`dynamicWorkflows.guidance`) always appears, showing how many entries are configured (or `(none)`).
 - Each entry gets its own row (`dynamicWorkflows.guidance.<index>`) whose text is edited inline like any other field.
@@ -572,13 +572,13 @@ Tab names are truncated with `…` only when they don't fit their tab: at the mi
 | Grey | Idle or completed |
 | Blue | Running (no container) |
 | Green | Running with active container |
-| Cyan | The [amie tab](#the-amie-tab) |
+| Cyan | The [squad tab](#the-squad-tab) |
 | Purple / Magenta | Permanently bound to a remote API session |
 | Red | Exited with error |
 | Yellow | Container silent for >30 seconds (stuck warning) |
-| Alternating Yellow / Purple | Background yolo countdown in progress: tab label alternates between `⚠️ yolo in Ns` and `🤘 yolo in Ns` every 2 seconds (see [Yolo Mode](06-yolo-mode.md#background-yolo-countdown)) |
+| Alternating Yellow / Purple | Background yolo countdown in progress: tab label alternates between `⚠️ yolo in Ns` and `🤘 yolo in Ns` every 2 seconds (see [Auto-advance when stuck](05-workflows.md#auto-advance-when-stuck-yolo-mode)) |
 
-The amie tab's cyan and a remote-bound tab's purple/magenta are both fixed,
+The squad tab's cyan and a remote-bound tab's purple/magenta are both fixed,
 kind-based colours: they take priority over the execution-phase colours
 above (grey/blue/green/red) but still yield to the yellow stuck warning and
 the yolo countdown, since those are live signals about a run in progress.
@@ -589,43 +589,75 @@ When `remote.defaultAddr` is set in `~/.awman/config.json`, opening a new tab wi
 
 Remote-bound tabs are **purple** in the tab bar. The tab label shows `host:port` of the remote host instead of the local directory name. When a workflow runs on the remote session, the Workflow Overview appears automatically and updates every 5 seconds.
 
-For full details on creating remote-bound tabs, the create-session sub-modal, and Workflow Overview behavior, see [Remote Mode: Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs).
+For full details on creating remote-bound tabs, the create-session sub-modal, and Workflow Overview behavior, see [Remote-bound TUI tabs](09-api-and-remote-mode.md#remote-bound-tui-tabs).
 
-### The amie tab
+### The squad tab
 
-amie — awman's always-on condition-watching daemon — gets its own singleton
+squad — awman's always-on task-watching daemon — gets its own singleton
 tab inside this same multi-tab TUI rather than a separate program. Open it
 either of two ways:
 
 - Press **Ctrl+T** to open the New Tab dialog, then press **Ctrl-A** while
   it's focused. The dialog's prompt shows a hint — "Press Ctrl-A to open
-  amie" — as a reminder. This doesn't add a second global `Ctrl-A` binding:
+  squad" — as a reminder. This doesn't add a second global `Ctrl-A` binding:
   outside the New Tab dialog, `Ctrl-A` still switches to the previous tab as
   usual.
-- Run `awman amie` with no subcommand from a terminal (with a TTY attached
-  and no `-n`/`--json`); awman opens the TUI pre-focused on the amie tab.
+- Run `awman squad` with no subcommand from a terminal (with a TTY attached
+  and no `-n`/`--json`); awman opens the TUI pre-focused on the squad tab.
 
-There is at most one amie tab at a time — opening it again just focuses the
+There is at most one squad tab at a time — opening it again just focuses the
 existing one. It's **cyan** in the tab bar, distinct from every other tab
-colour, and its label is always the fixed word `amie` rather than a
+colour, and its label is always the fixed word `squad` rather than a
 directory name, since it isn't bound to a project directory.
 
 Otherwise it's an ordinary tab: it takes part in **Ctrl-A**/**Ctrl-D** tab
 cycling, closes through the normal close-tab flow, and keeps its state
 while you're on a different tab. The command box below it still works
-exactly as it does on any other tab — you can type `amie <subcommand> ...`
+exactly as it does on any other tab — you can type `squad <subcommand> ...`
 directly into it. The one difference is what fills the execution window
-above the command box: amie's condition list instead of plain command
-output, and, once you attach to a running condition, the same
+above the command box: squad's task list instead of plain command
+output, and, once you attach to a running task, the same
 container / Workflow Overview view a regular workflow tab shows. **Ctrl-G** (the
 git sidebar) is a no-op here, since the tab has no repository to show.
 
-See [amie](16-amie.md) for what conditions are, the amie tab's key
-bindings, and attaching to a running condition.
+The task list is a grid of generously sized rounded cards rather than a
+table. Each card shows the task name, a short description summary, the
+outcome and time of its last run (`workflow executed`, `not triggered`,
+`failed`, `interrupted`, `running`, or `never run`), and its next scheduled
+evaluation — which reads `paused` for a paused task. The grid reflows
+when the terminal is resized. Use **↑**, **↓**, **←**, and **→** to move among
+cards; selection remains on the same task when the number of columns changes.
+
+Press **Enter** to open a task's details. The modal includes the task's
+workspace, mount scope, interval, overlays, agent/model, timestamps, and run
+history. Its footer repeats the available actions: **a** attach, **p** pause,
+**r** resume, **d** delete, and **Esc** close. These actions apply to the task
+shown by the modal.
+
+Press **n** to create a task. The description step opens the same large,
+multiline editor used by the specification interview and asks:
+
+> Describe the new squad task including its triggering conditions and how
+> squad should handle the task each time it is triggered
+
+The interview then asks for the evaluation interval, a workspace choice, and
+any overlays. **Default Task Workspace** creates and preserves
+`~/.awman/squad/tasks/<name>/workspace/` across runs. **Custom Folder / Repo**
+asks for an existing path; if it is not a Git repository root, awman warns and
+offers to keep it or choose another path. Finally, add overlays one at a time
+using the usual `dir()`, `ssh()`, `env()`, or `skill()` syntax and submit a
+blank entry when finished. Submitting an empty box is an answer — it keeps
+the documented default, or ends the overlay list — while **Esc** dismisses the
+interview outright. Nothing is saved if the interview is dismissed before it
+is complete. See [squad](12-squad.md) and [Overlays](08-overlays.md)
+for the full behavior and overlay reference.
+
+See [squad](12-squad.md) for what tasks are, the squad tab's key
+bindings, and attaching to a running task.
 
 ---
 
-### Stuck detection
+## Stuck detection
 
 If a running container produces no output for more than 30 seconds, the tab turns yellow and the subcommand label gains a `⚠️` prefix (e.g. `⚠️ chat`). The warning clears automatically when you:
 
@@ -635,7 +667,7 @@ If a running container produces no output for more than 30 seconds, the tab turn
 
 **Active-tab suppression:** On the currently active tab, any keypress or mouse scroll also resets the stuck timer directly. If you are actively reading or scrolling through output, the tab will not turn yellow or show any stuck indicator — the timer only starts when both the container and the user have been idle for 30 seconds. Background tabs are not affected by this; they use output time alone to determine stuck state.
 
-For workflow tabs, awman goes further: the [workflow control board](05-workflows.md#workflow-control-board) opens automatically so you can act without having to notice the yellow indicator. In yolo mode, background tabs show a live countdown directly in the tab bar instead of a dialog. See [Workflows](05-workflows.md) and [Yolo Mode](06-yolo-mode.md) for details.
+For workflow tabs, awman goes further: the [workflow control board](05-workflows.md#workflow-control-board-tui-only) opens automatically so you can act without having to notice the yellow indicator. In yolo mode, background tabs show a live countdown directly in the tab bar instead of a dialog. See [Workflows](05-workflows.md) and [Permission modes](03-agent-sessions.md#permission-modes) for details.
 
 ---
 
@@ -722,11 +754,12 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 | Key | Action |
 |-----|--------|
 | **↑ / ↓** | Navigate between config field rows |
-| **← / →** | Navigate between columns (Global, Repo, Effective) |
-| **e** | Enter edit mode for the selected field |
-| **Enter** | Confirm the new value and exit edit mode |
+| **PgUp / PgDn** | Jump ten rows at a time |
+| **← / →** | Move between the two editable columns (Global, Repo) |
+| **Enter** or **e** | Enter edit mode for the selected field |
+| **Enter** (while editing) | Validate and write the value immediately to that scope's config file |
+| **Ctrl+N** | Add an `agentsToModels` mapping or a `guidance` entry |
 | **Esc** | Cancel edit without saving (edit mode) or close dialog (navigation mode) |
-| **Ctrl+Enter** | Save all pending changes to config files |
 | **Ctrl+,** | Close the dialog (same as Esc in navigation mode) |
 
 ### Dialogs
@@ -744,4 +777,4 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 
 ---
 
-[← Getting Started](00-getting-started.md) · [Next: Agent Sessions →](03-agent-sessions.md)
+[← Concepts](01-concepts.md) · [Next: Agent Sessions →](03-agent-sessions.md)

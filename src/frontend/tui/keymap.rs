@@ -42,19 +42,23 @@ pub enum Action {
     /// Ctrl+N in the config dialog: start the add-model-mapping flow.
     NewMapEntry,
 
-    // ── amie list (WI 0102) ─────────────────────────────────────────────
-    /// Enter — open the condition detail modal for the selected row.
-    AmieShowDetail,
-    /// a — attach to the selected condition's running container(s).
-    AmieAttach,
-    /// n — create a condition (drives the Layer-2 interview dialog chain).
-    AmieNew,
-    /// p — pause the selected condition.
-    AmiePause,
-    /// r — resume the selected condition.
-    AmieResume,
-    /// d — remove the selected condition (opens a confirmation first).
-    AmieDelete,
+    // ── squad list (WI 0102) ─────────────────────────────────────────────
+    /// Enter — open the task detail modal for the selected row.
+    SquadShowDetail,
+    /// a — attach to the selected task's running container(s).
+    SquadAttach,
+    /// n — create a task (drives the Layer-2 interview dialog chain).
+    SquadNew,
+    /// p — pause the selected task.
+    SquadPause,
+    /// r — resume the selected task.
+    SquadResume,
+    /// d — remove the selected task (opens a confirmation first).
+    SquadDelete,
+    /// Left — move the card grid selection one column left.
+    SquadMoveLeft,
+    /// Right — move the card grid selection one column right.
+    SquadMoveRight,
 
     // ── Text input ──────────────────────────────────────────────────────
     Char(char),
@@ -83,10 +87,10 @@ pub enum FocusContext {
     ExecutionWindow,
     Dialog,
     ContainerMaximized,
-    /// The amie tab's condition list has focus (WI 0102). Only reachable when
-    /// the active tab is the amie tab, focus is on the body, and no attach
+    /// The squad tab's task list has focus (WI 0102). Only reachable when
+    /// the active tab is the squad tab, focus is on the body, and no attach
     /// session owns the tab's container slots.
-    AmieList,
+    SquadList,
 }
 
 /// Map a key event + focus context to an [`Action`].
@@ -145,27 +149,29 @@ pub fn map_key(key: KeyEvent, ctx: FocusContext) -> Action {
                 Action::ForwardToPty(key)
             }
         }
-        FocusContext::AmieList => map_amie_list_key(key, ctrl),
+        FocusContext::SquadList => map_squad_list_key(key, ctrl),
     }
 }
 
-/// Key bindings for the amie condition list (WI 0102). Reached only through
-/// `FocusContext::AmieList`; the global `ctrl` block in `map_key` runs first,
+/// Key bindings for the squad task list (WI 0102). Reached only through
+/// `FocusContext::SquadList`; the global `ctrl` block in `map_key` runs first,
 /// so `Ctrl-T`/`Ctrl-A`/`Ctrl-D`/`Ctrl-M`/`Ctrl-O`/`Ctrl-W`/`Ctrl-G`/`Ctrl-C`/
 /// `Ctrl-,` keep their global meaning here.
-fn map_amie_list_key(key: KeyEvent, ctrl: bool) -> Action {
+fn map_squad_list_key(key: KeyEvent, ctrl: bool) -> Action {
     match key.code {
         KeyCode::Esc => Action::FocusCommandBox,
         KeyCode::Up => Action::ScrollUp,
         KeyCode::Down => Action::ScrollDown,
+        KeyCode::Left if !ctrl => Action::SquadMoveLeft,
+        KeyCode::Right if !ctrl => Action::SquadMoveRight,
         KeyCode::PageUp => Action::ScrollPageUp,
         KeyCode::PageDown => Action::ScrollPageDown,
-        KeyCode::Enter => Action::AmieShowDetail,
-        KeyCode::Char('a') if !ctrl => Action::AmieAttach,
-        KeyCode::Char('n') if !ctrl => Action::AmieNew,
-        KeyCode::Char('p') if !ctrl => Action::AmiePause,
-        KeyCode::Char('r') if !ctrl => Action::AmieResume,
-        KeyCode::Char('d') if !ctrl => Action::AmieDelete,
+        KeyCode::Enter => Action::SquadShowDetail,
+        KeyCode::Char('a') if !ctrl => Action::SquadAttach,
+        KeyCode::Char('n') if !ctrl => Action::SquadNew,
+        KeyCode::Char('p') if !ctrl => Action::SquadPause,
+        KeyCode::Char('r') if !ctrl => Action::SquadResume,
+        KeyCode::Char('d') if !ctrl => Action::SquadDelete,
         KeyCode::Char('y') if ctrl => Action::CopySelection,
         _ => Action::None,
     }
@@ -437,7 +443,7 @@ mod tests {
             FocusContext::CommandBox,
             FocusContext::ExecutionWindow,
             FocusContext::ContainerMaximized,
-            FocusContext::AmieList,
+            FocusContext::SquadList,
         ] {
             let action = map_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL), ctx);
             assert_eq!(

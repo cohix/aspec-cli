@@ -173,8 +173,8 @@ pub enum ContainerOption {
     DockerfileUser(String),
     /// A container label — emitted as `--label <key>=<value>`. Used to
     /// attribute containers (e.g. `awman.session=<id>` so `list_running` can
-    /// map a container to an awman session, or `awman.amie.condition=<name>`
-    /// for amie's background agents). Multiple labels accumulate.
+    /// map a container to an awman session, or `awman.squad.task=<name>`
+    /// for squad's background agents). Multiple labels accumulate.
     Label {
         key: String,
         value: String,

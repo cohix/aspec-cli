@@ -11,13 +11,13 @@
 
 ---
 
-`awman` (Agent Workflow Manager) is a developer tool that adds structure and automation to the entire agentic software development lifecycle: from issue to merged PR. 
+`awman` (Agent Workflow Manager) is a developer tool that adds structure and automation to the whole agentic software development lifecycle: from issue to merged PR.
 
 **4 stages of improved agentic software development with awman**
 1. Isolate your code agents with containers and worktrees 🛑
-2. Run multiple agents in parallel with the TUI. 🔄
-3. Create structured workflows for your project's software development lifecycle. 📈
-4. Fan out multiple workflows to your homelab or cluster with API mode. 🤝
+2. Run multiple agents in parallel with the TUI 🔄
+3. Turn your team's development lifecycle into repeatable workflows 📈
+4. Automate the rest — schedule recurring work with squad, fan out to your homelab or cluster with API mode 🤝
 
 ![awman workflows](./docs/blog/images/tui-workflow.png)
 
@@ -40,7 +40,7 @@ The installer detects your platform and puts `awman` on your `PATH`.
 mise use -g github:prettysmartdev/awman
 ```
 
-To pin to a specific version: `mise use -g github:prettysmartdev/awman@0.11.0`
+To pin to a specific version: `mise use -g github:prettysmartdev/awman@0.11.1`
 
 **From GitHub Releases** — download the binary for your platform from [GitHub Releases](https://github.com/prettysmartdev/awman/releases):
 
@@ -89,20 +89,33 @@ See the [Getting Started Guide](docs/00-getting-started.md) for a full walkthrou
 
 ### Run multiple agents at once
 
-From the `awman` TUI, Open new tabs with **Ctrl+T**. Each tab is independent — its own working directory, its own container, running in the background while you work in another tab. Switch between tabs with **Ctrl+A** / **Ctrl+D**.
+Open new tabs in the TUI with **Ctrl+T**. Each tab is independent — its own working directory, its own container — and keeps running in the background while you work in another tab. Switch with **Ctrl+A** / **Ctrl+D**.
 
-If a running agent gets stuck or completes its task, its tab turns yellow so you know to check in.
+When an agent goes quiet for 30 seconds, whether it's stuck or just finished and waiting on you, its tab turns yellow so you know where to look.
 
 ![awman TUI](./docs/blog/images/tui-screenshot.png)
 
 ### Run structured workflows
 
-A workflow breaks complex work into phases — for example, plan → implement → review → docs. Each phase is a separate agent session. You review the output between phases and decide whether to continue, retry, or redirect.
+A workflow breaks complex work into phases — plan → implement → review → docs. Each phase is a separate agent session in its own container, so you review the output between phases and decide whether to continue, retry, or redirect.
 
-Workflows are TOML or YAML files in your repo. They can include setup and teardown phases to prepare the environment and handle post-workflow actions like committing, pushing, and opening PRs.
+Workflows are TOML or YAML files in your repo. Steps declare their dependencies with `depends_on`, and independent steps run in parallel. Around them, setup and teardown phases prepare the branch and handle the finish: run tests, commit, push, open the PR, and block on CI until it goes green. Any of those can carry an `on_failure` block that launches an agent to fix the problem and retries.
+
+Two things make this more than a prompt runner:
+
+- **Per-step agents.** Any step can name the `agent` and `model` it runs with, so you can have Codex implement and Claude review in the same pipeline. Steps that don't specify one use your project's default.
+- **Per-step overlays.** Each step declares exactly what it needs from the host — `ssh()` to push, `env(GITHUB_TOKEN)` to open a PR, `skill(review)` for a review checklist. Nothing gets host access it didn't ask for.
 
 ![workflows screenshot](./docs/blog/images/dynamic-workflows.png)
 
+```sh
+awman exec workflow ./aspec/workflows/implement-pr.toml --work-item 0027
+```
+
+The `--work-item` is optional: pass one to substitute a spec you've written into the prompts, or leave it off. See [Workflows](docs/05-workflows.md) for the full file format, template variables, and the control board.
+
+<details>
+<summary>A complete workflow file</summary>
 
 ```toml
 title = "Implement Feature"
@@ -119,12 +132,15 @@ prompt = "Read work item {{work_item_content}} and produce an implementation pla
 [[step]]
 name = "implement"
 depends_on = ["plan"]
+agent = "codex"
 prompt = "Implement work item {{work_item_number}} according to the plan."
 
 [[step]]
 name = "review"
 depends_on = ["implement"]
+agent = "claude"
 prompt = "Review the implementation for correctness and style."
+overlays = ["skill(review)"]
 
 [[teardown]]
 type = "run_shell"
@@ -145,122 +161,84 @@ title = "Implement {{work_item_number}}"
 overlays = ["env(GITHUB_TOKEN)"]
 ```
 
-```sh
-awman exec workflow ./aspec/workflows/implement-pr.toml --work-item 0027
-```
-Workflows can optionally be passed a specific work item — a spec you've written — to work on new features, fix bugs, etc.
+Supported agents: `claude`, `codex`, `opencode`, `maki`, `gemini`, `antigravity`, `copilot`, `crush`, `cline`.
 
+</details>
 
-### Combine multiple agents in a single workflow
+Don't want to write the file at all? `awman exec workflow --dynamic --work-item 0027` puts a leader agent in a container, has it design a workflow for that work item, validates the result, and runs it. See [Dynamic Workflows](docs/06-dynamic-workflows.md).
 
-Each workflow step can specify which agent runs it, and each step can have its own overlays for SSH access, environment variables, or skills:
+### Automate recurring work with squad
 
-```toml
-[[step]]
-name = "implement"
-depends_on = ["plan"]
-agent = "codex"
-prompt = "Implement the plan."
-
-[[step]]
-name = "review"
-depends_on = ["implement"]
-agent = "claude"
-prompt = "Review for correctness and style."
-overlays = ["skill(review)"]
-```
-
-Supported agents: `claude`, `codex`, `opencode`, `maki`, `antigravity`, `copilot`, `crush`, `cline`. Steps without an `agent` field use your project's default.
-
-
-### Drive work directly from GitHub issues
-
-Point any of `new spec`, `exec workflow`, or `exec prompt` at a GitHub issue with `--issue` — no local work item file needed. awman fetches the issue (via the `gh` CLI, a `GITHUB_TOKEN`, or unauthenticated for public repos) and feeds it in as the input:
+Workflows still need you to start them. **squad** is a background daemon that watches for the conditions you describe and runs a workflow when one fires — "when a new issue is opened, triage it and post a plan", "if any open PR has failing tests, fix them".
 
 ```sh
-# Generate a work item spec from an issue
-awman new spec --issue 84
-
-# Run a workflow against an issue (resolves {{work_item_content}} from the issue body)
-awman exec workflow ./aspec/workflows/implement-pr.toml --issue 84 --worktree
-
-# Send an issue straight to the agent as a prompt
-awman exec prompt "Security review this" --issue 84
+awman squad start --background
+awman squad add --name issue-triage \
+  --description "When a new issue is opened, analyze it and post a plan as a comment." \
+  --interval 30m --overlay "env(GITHUB_TOKEN)"
 ```
 
-A bare number resolves against the current repo's GitHub remote; `owner/repo#84` and full issue URLs also work. See [GitHub Integration](docs/11-github-integration.md).
+On each interval an evaluation agent decides whether the condition is actually met. If it is, squad designs and runs a workflow for it unattended. Each task gets a durable workspace that persists across runs, so state carries between them.
 
-Workflow setup/teardown phases can also wait on CI: a `poll_ci` step blocks until GitHub Actions goes green, and any step can declare an `on_failure` block that launches an agent to fix the problem and retries.
+Run `awman squad` for a TUI tab showing every task as a card with its last and next run — press **Enter** for details, **a** to attach to a live run. See [squad](docs/12-squad.md).
 
-### Hand off to the agent workflow completely (yolo mode)
+### Hand off completely (yolo mode)
 
 ![awman yolo mode](./docs/blog/images/tui-yolo-mode.png)
 
-`--yolo` disables your agent's permission prompts and auto-advances completed workflow steps. Use it when you have a well-specified task and want to return to a finished result.
+`--yolo` configures an agent to use its built-in "no permission checks" mode and keeps a workflow moving without you. Use it when the task is well specified and you want to come back to a finished result.
 
 ```sh
-# Implement fully autonomously, changes isolated to a git worktree
 awman exec workflow ./aspec/workflows/implement-pr.toml --yolo --work-item 0042
 ```
 
-When a workflow step completes, a 60-second yolo countdown starts. If the agent doesn't resume, the workflow advances automatically. The countdown is visible in the tab bar across all tabs — you can monitor multiple autonomous sessions without switching to each one.
+When a workflow step agent completes its work, a 60-second countdown starts and then advances the workflow automatically; any output from the agent cancels it. The countdown shows in the tab bar, so you can watch several autonomous runs at once without switching between them.
 
-`--yolo` with `exec workflow` automatically runs in an isolated Git worktree, so you can review and discard the result if it isn't right.
+With `exec workflow`, `--yolo` automatically runs in an isolated Git worktree — review the whole diff as a unit and merge or discard it. For lighter autonomy, `--auto` approves file edits but still asks before shell commands.
 
-For lighter autonomy, `--auto` approves file edits automatically but still requires permission for other commands.
+### Run agents on other machines
 
-### Manage agents across remote machines
-
-`awman api start` runs an HTTP server that allows remote control of awman. This is useful when you want to run heavy agent workflows on a remote machine or manage a fleet of agent-runner boxes.
+`awman api start` exposes awman over HTTP, so heavy workflows can run on a build server or a fleet of agent-runner boxes instead of your laptop.
 
 ```sh
-# On the remote machine, start the API server (prints an API key on first run)
+# On the remote machine (prints an API key on first run)
 awman api start --port 9090
 ```
 
-From your local machine, use `awman remote` or cURL:
-
 ```sh
-awman config set remote.defaultAPIKey <key>
-awman config set remote.defaultAddr <host>
-awman remote session start /workspace/myproject
+# From your laptop
+awman config set --global remote.defaultAddr <host>
+awman config set --global remote.defaultAPIKey <key>
+awman remote session start --workdir /workspace/myproject
 awman remote exec workflow aspec/workflows/implement-pr.toml --work-item 0027 --session <id> --follow
 ```
 
+Remote commands run in containers with the same isolation as local ones, and every input, output, and log is kept on the server under `~/.awman/api/` for auditing. The HTTP API is available directly to any client too. See [API & Remote Mode](docs/09-api-and-remote-mode.md).
+
+### Start from a GitHub issue
+
+Point `new spec`, `exec workflow`, or `exec prompt` at an issue with `--issue` — no local work item file needed:
+
 ```sh
-# Create a session bound to a directory
-curl -s -X POST http://localhost:9090/v1/sessions \
-  -H "Authorization: Bearer <key>" \
-  -H "Content-Type: application/json" \
-  -d '{"workdir": "/workspace/myproject"}'
-
-# Submit a command to that session
-curl -s -X POST http://localhost:9090/v1/commands \
-  -H "Authorization: Bearer <key>" \
-  -H "x-awman-session: <session-id>" \
-  -H "Content-Type: application/json" \
-  -d '{"subcommand": "exec", "args": ["workflow", "aspec/workflows/implement-pr.toml", "--work-item", "0027"]}'
-
-# Poll for completion, then fetch the log
-curl -s http://localhost:9090/v1/commands/<command-id>
-curl -s http://localhost:9090/v1/commands/<command-id>/logs
+awman new spec --issue 84                    # turn an issue into a work item spec
+awman exec workflow ./implement-pr.toml --issue 84 --worktree
+awman exec prompt "Security review this" --issue 84
 ```
-API commands run inside containers with the same isolation as running awman locally. All inputs and outputs and logs are stored in `~/.awman/api/` on the server for later review or auditing. The API server is authenticated using an API key generated the first time it is run, and can be refreshed (invalidating the old key) using `awman api start --refresh-key`.
 
-See [API Mode](docs/09-api-mode.md) and [Remote Mode](docs/10-remote-mode.md) for details.
+A bare number resolves against the repo's GitHub remote; `owner/repo#84` and full URLs work too. Issues are fetched via the `gh` CLI, a `GITHUB_TOKEN`, or unauthenticated for public repos. See [GitHub Integration](docs/10-github-integration.md).
 
 ---
 
 ## Security and Isolation
 
-Every agent runs inside a container built from `Dockerfile.dev` — agents can never directly access your host machine.
+Every agent runs inside a container built from `Dockerfile.dev` — agents never touch your host machine directly.
 
 - Only the current Git repository is mounted into the container by default
-- Credentials are passed as environment variables and masked in all displayed commands — never written to files inside containers
-- Overlays allow optionally providing access to ssh keys, env vars, additional directories, and your personal skills library
-- awman itself is a statically compiled Rust binary — it cannot be modified by anything running inside a container
+- Credentials are passed as environment variables and masked in displayed commands — never written to files inside containers
+- Overlays are the only way in: opt a session into SSH keys, env vars, extra directories, or your skills library, one at a time
+- awman itself is a statically compiled Rust binary — nothing running in a container can modify it
 
-Docker, Apple Containers (macOS 26+), and Docker Sandboxes (`docker-sbx-experimental`, microVM isolation) are supported runtimes. See [Runtimes](docs/12-runtimes.md).
+Docker, Apple Containers (macOS 26+), and Docker Sandboxes (`docker-sbx-experimental`, microVM isolation) are supported runtimes. See [Runtimes](docs/11-runtimes.md) and [Security & Isolation](docs/04-security-and-isolation.md).
 
 ![awman TUI status](./docs/blog/images/tui-status.png)
 
@@ -283,16 +261,18 @@ awman specs amend <nnnn>               # update a spec to match what was built
 awman status [--watch]                 # dashboard of all running agent containers
 awman clean [--dry-run] [--yes]        # remove stopped containers, stale images, and completed workflow data
 awman config show                      # view all config values
+awman squad                            # open the squad TUI tab
+awman squad start [--background]       # start the squad daemon
+awman squad add --name <name> --description <text> [--interval <dur>]   # create a scheduled task
+awman squad list | show <name> | pause <name> | resume <name> | remove <name>
 awman api start [--port <n>]           # start the HTTP API server (generates API key on first run)
-awman api status                       # check if the API server is running
-awman api kill                         # stop the API server
+awman api status | kill                # check or stop the API server
+awman remote session start --workdir <dir>     # create a session on a remote server
 awman remote exec workflow <path> [--follow]   # run a workflow on a remote API server
 awman remote exec prompt "<text>" [--follow]   # run a one-shot prompt on a remote API server
-awman remote session start <dir>       # create a session on a remote server
-awman remote session kill <id>         # close a session on a remote server
 ```
 
-All commands work in both TUI mode (without the `awman` prefix) and CLI mode. API mode supports `exec prompt` and `exec workflow`.
+Every subcommand works in CLI mode and in the TUI command box (without the `awman` prefix). API mode accepts `exec prompt` and `exec workflow`.
 
 ---
 
@@ -304,17 +284,14 @@ All commands work in both TUI mode (without the `awman` prefix) and CLI mode. AP
 - [Agent Sessions](docs/03-agent-sessions.md)
 - [Security & Isolation](docs/04-security-and-isolation.md)
 - [Workflows](docs/05-workflows.md)
-- [Yolo Mode](docs/06-yolo-mode.md)
+- [Dynamic Workflows](docs/06-dynamic-workflows.md)
 - [Configuration](docs/07-configuration.md)
 - [Overlays](docs/08-overlays.md)
-- [API Mode](docs/09-api-mode.md)
-- [Remote Mode](docs/10-remote-mode.md)
-- [GitHub Integration](docs/11-github-integration.md)
-- [Runtimes](docs/12-runtimes.md)
-- [Dynamic Workflows](docs/13-dynamic-workflows.md)
-- [Cleaning Up](docs/14-cleaning-up.md)
-- [Parallel Workflows](docs/15-parallel-workflows.md)
-- [amie](docs/16-amie.md)
+- [API & Remote Mode](docs/09-api-and-remote-mode.md)
+- [GitHub Integration](docs/10-github-integration.md)
+- [Runtimes](docs/11-runtimes.md)
+- [squad](docs/12-squad.md)
+- [Cleaning Up](docs/13-cleaning-up.md)
 - [Architecture](docs/architecture.md)
 
 ---

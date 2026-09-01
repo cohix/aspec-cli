@@ -8,7 +8,6 @@
 
 pub mod agent_auth;
 pub mod agent_setup;
-pub mod amie;
 pub mod api_server;
 pub mod auth;
 pub mod chat;
@@ -19,13 +18,14 @@ pub mod download;
 pub mod exec_prompt;
 pub mod exec_workflow;
 pub(crate) mod http_core;
+pub mod squad;
 // HttpCore is the shared transport seam used by daemon-facing clients and
 // must be reachable by integration consumers without exposing its module's
 // implementation registry.
 pub use http_core::HttpCore;
 pub(crate) mod dynamic_repair;
 // The WI-0092 leader/repair budget is the one decision core `exec workflow
-// --dynamic` and the amie evaluator share; both callers — and the tests that
+// --dynamic` and the squad evaluator share; both callers — and the tests that
 // prove they behave identically — reach it through this re-export.
 pub use dynamic_repair::{RepairDecision, WorkflowRepairLoop};
 pub mod init;
@@ -617,7 +617,7 @@ pub fn resolve_context_overlays(
 > {
     use crate::data::fs::ContextDirResolver;
     use crate::data::message::{MessageLevel, UserMessage};
-    use crate::engine::agent::agent_matrix::{SystemPromptMode, matrix_for};
+    use crate::engine::agent::agent_matrix::{matrix_for, SystemPromptMode};
     use crate::engine::context_prompt::ContextPromptBuilder;
     use crate::engine::overlay::ContextOverlay;
 
@@ -1016,7 +1016,7 @@ mod skill_parser_tests {
 #[cfg(test)]
 mod collect_overlay_specs_tests {
     use super::*;
-    use crate::data::config::env::{AWMAN_CONFIG_HOME, AWMAN_OVERLAYS, EnvSnapshot};
+    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME, AWMAN_OVERLAYS};
     use crate::data::config::global::GlobalConfig;
     use crate::data::config::repo::RepoConfig;
     use crate::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
@@ -1370,7 +1370,7 @@ mod collect_overlay_specs_tests {
 #[cfg(test)]
 mod warn_legacy_config_tests {
     use super::*;
-    use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
     use crate::data::message::{MessageLevel, RecordingMessageSink};
     use crate::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
 
@@ -1637,7 +1637,7 @@ mod context_parser_tests {
 #[cfg(test)]
 mod context_collect_0087_tests {
     use super::*;
-    use crate::data::config::env::{AWMAN_CONFIG_HOME, EnvSnapshot};
+    use crate::data::config::env::{EnvSnapshot, AWMAN_CONFIG_HOME};
     use crate::data::config::global::GlobalConfig;
     use crate::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
     use crate::engine::overlay::ContextScope;

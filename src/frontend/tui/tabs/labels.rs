@@ -11,10 +11,10 @@ impl Tab {
     /// more of a long project name instead of clipping at a fixed length;
     /// pass `u16::MAX` to measure the untruncated name.
     pub fn project_name(&self, tab_width: u16) -> String {
-        let name = if self.is_amie {
-            // Fixed label: `AWMAN_AMIE_ROOT` may point at a directory whose
-            // basename has nothing to do with amie.
-            "amie".to_string()
+        let name = if self.is_squad {
+            // Fixed label: `AWMAN_SQUAD_ROOT` may point at a directory whose
+            // basename has nothing to do with squad.
+            "squad".to_string()
         } else {
             self.session
                 .working_dir()

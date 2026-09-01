@@ -1,10 +1,10 @@
 //! `DaemonPaths` — the daemon-identity path accessors shared by the API server
-//! and the amie daemon.
+//! and the squad daemon.
 //!
 //! `ApiPaths` previously hardcoded the four daemon-identity filenames
 //! (`awman.pid`, `awman.log`, `server.json`, `api_key.hash`) inside its own
 //! accessors. Those filenames are identical for every daemon except the key
-//! stem (`api_key` vs `amie_key`), so they factor into this value object over a
+//! stem (`api_key` vs `squad_key`), so they factor into this value object over a
 //! `root` plus a `key_stem`. A second daemon rooted elsewhere is isolated by
 //! construction: every accessor keys off `root`.
 
@@ -21,7 +21,7 @@ pub struct DaemonPaths {
 
 impl DaemonPaths {
     /// Construct over a root and the API-key filename stem (`"api_key"` /
-    /// `"amie_key"`).
+    /// `"squad_key"`).
     pub fn new(root: impl Into<PathBuf>, key_stem: &'static str) -> Self {
         Self {
             root: root.into(),
@@ -34,7 +34,7 @@ impl DaemonPaths {
         &self.root
     }
 
-    /// The key-hash filename stem (`"api_key"` / `"amie_key"`).
+    /// The key-hash filename stem (`"api_key"` / `"squad_key"`).
     pub fn key_stem(&self) -> &'static str {
         self.key_stem
     }
@@ -127,8 +127,8 @@ mod tests {
     #[test]
     fn key_stem_varies_the_hash_filename() {
         assert_eq!(
-            DaemonPaths::new("/r", "amie_key").key_hash_file(),
-            PathBuf::from("/r/amie_key.hash")
+            DaemonPaths::new("/r", "squad_key").key_hash_file(),
+            PathBuf::from("/r/squad_key.hash")
         );
     }
 

@@ -43,13 +43,13 @@ pub struct ApiConfig {
     pub always_non_interactive: Option<bool>,
 }
 
-/// Amie daemon configuration nested inside [`GlobalConfig`](crate::data::config::GlobalConfig).
+/// Squad daemon configuration nested inside [`GlobalConfig`](crate::data::config::GlobalConfig).
 ///
 /// It lives beside the other shared configuration structs even though it is
 /// global rather than repository-scoped.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct AmieConfig {
+pub struct SquadConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agents_to_models: Option<HashMap<String, Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,23 +60,23 @@ pub struct AmieConfig {
     pub guidance: Option<Vec<String>>,
 }
 
-impl AmieConfig {
+impl SquadConfig {
     pub fn validate(&self) -> Result<(), DataError> {
         if let Some(n) = self.max_concurrent_evaluations {
             if n < 1 {
                 return Err(DataError::Other(
-                    "amie.maxConcurrentEvaluations must be >= 1".to_string(),
+                    "squad.maxConcurrentEvaluations must be >= 1".to_string(),
                 ));
             }
         }
         if let Some(leader) = &self.default_leader {
-            validate_leader_spec("amie", leader)?;
+            validate_leader_spec("squad", leader)?;
         }
         if let Some(map) = &self.agents_to_models {
-            validate_agents_to_models("amie", map)?;
+            validate_agents_to_models("squad", map)?;
         }
         if let Some(entries) = &self.guidance {
-            validate_guidance("amie", entries)?;
+            validate_guidance("squad", entries)?;
         }
         Ok(())
     }
@@ -1032,8 +1032,8 @@ mod tests {
     }
 
     #[test]
-    fn amie_config_uses_camel_case_and_validates_shared_agent_rules() {
-        let config = AmieConfig {
+    fn squad_config_uses_camel_case_and_validates_shared_agent_rules() {
+        let config = SquadConfig {
             agents_to_models: Some(HashMap::from([(
                 "claude".to_string(),
                 vec!["claude-opus-4-8".to_string()],
@@ -1049,8 +1049,8 @@ mod tests {
     }
 
     #[test]
-    fn amie_config_rejects_zero_and_malformed_leader() {
-        let zero = AmieConfig {
+    fn squad_config_rejects_zero_and_malformed_leader() {
+        let zero = SquadConfig {
             max_concurrent_evaluations: Some(0),
             ..Default::default()
         };
@@ -1058,9 +1058,9 @@ mod tests {
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("amie.maxConcurrentEvaluations must be >= 1"));
+            .contains("squad.maxConcurrentEvaluations must be >= 1"));
 
-        let malformed = AmieConfig {
+        let malformed = SquadConfig {
             default_leader: Some(" claude::model".to_string()),
             ..Default::default()
         };
@@ -1068,6 +1068,6 @@ mod tests {
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("amie.defaultLeader"));
+            .contains("squad.defaultLeader"));
     }
 }

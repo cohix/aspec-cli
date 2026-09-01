@@ -325,10 +325,7 @@ fn push_update_lines(lines: &mut Vec<Line<'static>>, update: &SessionUpdate) {
             }
         }
         SessionUpdate::AvailableCommandsUpdate { available_commands } => {
-            let names: Vec<&str> = available_commands
-                .iter()
-                .map(|c| c.name.as_str())
-                .collect();
+            let names: Vec<&str> = available_commands.iter().map(|c| c.name.as_str()).collect();
             lines.push(Line::from(Span::styled(
                 format!("\u{2318} commands: {}", names.join(", ")),
                 Style::default().fg(Color::DarkGray),
