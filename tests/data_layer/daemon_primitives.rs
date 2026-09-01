@@ -299,19 +299,38 @@ fn awman_named_test_process() -> Child {
     let tmp = tempfile::tempdir().unwrap();
     let helper = tmp.path().join("awman");
     std::fs::copy(source, &helper).unwrap();
-    let mut child = Command::new(&helper)
-        .args([
-            "--exact",
-            "daemon_guard_helper_process_stays_alive",
-            "--nocapture",
-        ])
-        .env("AWMAN_GUARD_HELPER", "1")
-        .spawn()
-        .unwrap();
-    for _ in 0..100 {
-        if awman::data::fs::daemon_process::is_process_alive(child.id()) {
-            // Once exec has completed, the child no longer needs the copied
-            // file. Dropping the TempDir avoids leaking a test binary.
+    // A concurrent test function forking anywhere in this process can inherit
+    // the still-open write descriptor on `helper`, which makes `execve` report
+    // the file as busy (`ETXTBSY`) until that fork execs and drops it. The
+    // window is short, so retry rather than force `--test-threads=1`.
+    let mut attempt = 0;
+    let mut child = loop {
+        let spawned = Command::new(&helper)
+            .args([
+                "--exact",
+                "daemon_guard_helper_process_stays_alive",
+                "--nocapture",
+            ])
+            .env("AWMAN_GUARD_HELPER", "1")
+            .spawn();
+        match spawned {
+            Ok(child) => break child,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("spawn awman-named helper process: {e}"),
+        }
+    };
+    // Wait on the *identity*, not merely on liveness. `spawn` returns once the
+    // child exists, and a forked-but-not-yet-exec'd child is already alive
+    // while still reporting the command name it inherited from this thread —
+    // so `is_process_alive` can pass a whole tick before the child looks like
+    // an awman process to the guard under test.
+    for _ in 0..500 {
+        if awman::data::fs::daemon_process::pid_is_awman(child.id()) {
+            // Exec has landed, so the child no longer needs the copied file.
+            // Dropping the TempDir avoids leaking a test binary.
             drop(tmp);
             return child;
         }
@@ -319,7 +338,7 @@ fn awman_named_test_process() -> Child {
     }
     let _ = child.kill();
     let _ = child.wait();
-    panic!("awman-named helper process did not stay alive");
+    panic!("awman-named helper process never presented an awman command name");
 }
 
 #[cfg(unix)]
