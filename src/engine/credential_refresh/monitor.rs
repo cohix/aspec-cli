@@ -631,6 +631,14 @@ mod tests {
     /// HIGH-7 / INV-7 defense 3: the monitor never RECREATES a staged file that
     /// a live lease's container has deleted — a missing target is a skip, not a
     /// write. Only present-but-drifted files are repaired.
+    ///
+    /// Not run on macOS. `claude_source` branches on `cfg!(target_os =
+    /// "macos")`, so the host credential there is the Keychain and the resolver
+    /// is ignored entirely — a credential planted under a temp HOME is never
+    /// read, and the fixture cannot be built (the setup read returns
+    /// `NotFound`). The reconciliation logic under test is platform
+    /// independent; only the source of the host credential is not.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn reconcile_skips_missing_target_instead_of_recreating() {
         let home = tempfile::tempdir().unwrap();
@@ -687,6 +695,11 @@ mod tests {
     /// repaired on the next reconciliation even when the HOST token is
     /// unchanged (same fingerprint). The monitor no longer skips the write just
     /// because the host fingerprint matches `last_materialized`.
+    ///
+    /// Not run on macOS, for the same reason as
+    /// [`reconcile_skips_missing_target_instead_of_recreating`]: the host
+    /// credential there comes from the Keychain, not from the resolver's HOME.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn reconcile_repairs_drifted_staged_file_when_host_unchanged() {
         let home = tempfile::tempdir().unwrap();

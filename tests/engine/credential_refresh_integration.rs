@@ -578,11 +578,19 @@ fn docker_e2e_live_container_observes_rotated_fingerprint_and_exited_stage_is_un
     }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     std::fs::create_dir_all(home.join(".claude")).unwrap();
+    // Start FAR from expiry. `register` starts the monitor thread, and
+    // `run_monitor_loop` ticks before it sleeps, so the first tick lands
+    // immediately no matter how long `tick_interval` is. Planting a
+    // near-expiry credential here would let that first tick perform the whole
+    // rotation before the container below is even running: the explicit
+    // `refresh_now` would then find every staged file already current and
+    // report `NotNeeded`, and the container would only ever observe one
+    // fingerprint. Arm the rotation further down, once the container is live.
     std::fs::write(
         host_file(&home),
         payload(
-            "fixture-e2e-expiring",
-            SystemTime::now() + Duration::from_secs(10),
+            "fixture-e2e-initial",
+            SystemTime::now() + Duration::from_secs(7200),
         ),
     )
     .unwrap();
@@ -594,6 +602,22 @@ fn docker_e2e_live_container_observes_rotated_fingerprint_and_exited_stage_is_un
     let monitor = monitor();
     let live_lease = monitor.register(&live_delivery, "awman-e2e-live");
     let exited_lease = monitor.register(&exited_delivery, "awman-e2e-exited");
+    // Barrier on that first tick rather than assuming it is quick: it must be
+    // done reconciling the far-expiry credential before the rotation is armed,
+    // or it could be the one that rotates. A recorded outcome is the signal
+    // that `refresh_agent` ran to completion.
+    let first_tick = std::time::Instant::now();
+    while !monitor
+        .status()
+        .iter()
+        .any(|s| s.agent.as_str() == "claude" && s.last_outcome.is_some())
+    {
+        assert!(
+            first_tick.elapsed() < Duration::from_secs(30),
+            "the monitor's first tick never recorded an outcome"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let exited_mount = format!("{}:/root/.claude:ro", exited.path().display());
     assert!(Command::new("docker")
         .args(["run", "--rm", "-v", &exited_mount, "busybox:latest", "true"])
@@ -634,6 +658,19 @@ fn docker_e2e_live_container_observes_rotated_fingerprint_and_exited_stage_is_un
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(250));
+    // The container has now read the pre-rotation staged file at least once.
+    // Arm the rotation: a near-expiry host credential is what drives
+    // `refresh_agent` to run the fixture `claude` binary, which copies the
+    // refreshed token over the host file. The next tick is 60s away, so this
+    // `refresh_now` is unambiguously the call that performs it.
+    std::fs::write(
+        host_file(&home),
+        payload(
+            "fixture-e2e-expiring",
+            SystemTime::now() + Duration::from_secs(10),
+        ),
+    )
+    .unwrap();
     let outcome = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(monitor.refresh_now(&AgentName::new("claude").unwrap(), Duration::from_secs(2)));
