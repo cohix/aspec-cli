@@ -79,6 +79,32 @@ impl ReadyFrontend for CliFrontend {
             rows.push((label.as_str(), status));
         }
 
+        let credential_rows: Vec<(String, StepStatus)> = summary
+            .agent_credentials
+            .iter()
+            .map(|health| {
+                let status = if let Some(error) = &health.read_error {
+                    StepStatus::Warn(format!("credential unreadable: {error}"))
+                } else if health.expired {
+                    StepStatus::Warn("credential expired".to_string())
+                } else if health.expires_in_secs.is_some() {
+                    StepStatus::Done
+                } else {
+                    StepStatus::Warn("credential expiry unknown".to_string())
+                };
+                let label = match health.expires_in_secs {
+                    Some(secs) if !health.expired && health.read_error.is_none() => {
+                        format!("Credential {} ({secs}s remaining)", health.agent)
+                    }
+                    _ => format!("Credential {}", health.agent),
+                };
+                (label, status)
+            })
+            .collect();
+        for (label, status) in &credential_rows {
+            rows.push((label.as_str(), status));
+        }
+
         let box_str =
             render_summary_box(&format!("Ready Summary ({})", summary.runtime_name), &rows);
         // Write the summary box directly to stderr without the per-line

@@ -298,6 +298,28 @@ credentials through other means:
 
 Set `auth` in `.awman/config.json` directly (it is not settable via `config set`). The field is per-repo only — cloud harnesses that do not declare an anthropic env var remain on the default `keychain` path and continue to receive keychain OAuth unaffected.
 
+### Control credential refresh (`authRefresh`)
+
+Under `keychain` auth mode, awman keeps Claude's containerized OAuth credential fresh for the life of a session: it periodically pings your host's Claude Code installation to rotate the token, then rewrites the staged credential file — see [Live credential refresh](04-security-and-isolation.md#live-credential-refresh). This is on by default. Tune it, or turn it off, with the optional `authRefresh` block:
+
+```json
+{
+  "authRefresh": {
+    "enabled": true,
+    "thresholdMinutes": 20,
+    "tickSeconds": 60
+  }
+}
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | bool | `true` | `false` is the kill switch: it restores the legacy behavior of injecting Claude's OAuth token once as an env var at container start, with no live refresh |
+| `thresholdMinutes` | integer (≥ 1) | `20` | Trigger a host-side refresh once the token has fewer than this many minutes left |
+| `tickSeconds` | integer (≥ 1) | `60` | How often the refresh monitor checks token expiry while a credentialed session is live |
+
+All three keys are optional, and `authRefresh` may appear in either config file. Precedence is per field, not per block: a repository value overrides the matching global value, which overrides the built-in default — so a repository `authRefresh` object that sets only `enabled` still inherits `thresholdMinutes`/`tickSeconds` from the global block (or the built-in defaults) if the global block doesn't set them either. Like `auth`, `authRefresh` is file-edit-only; it is not available through `awman config set`.
+
 ---
 
 ## Runtimes
@@ -358,6 +380,7 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `dynamicWorkflows.defaultLeader` | string (`agent::model`) | (unset) | Default leader agent/model for `exec workflow --dynamic`; overridden by `--leader` | yes, as `dynamicWorkflows.defaultLeader` |
 | `dynamicWorkflows.guidance` | string array | (unset → no guidance block) | Project-specific instructions injected into the leader prompt as a bullet list — see [Dynamic Workflows](06-dynamic-workflows.md#configuring-dynamic-workflows) | yes, per entry as `dynamicWorkflows.guidance.<index>` (empty value removes) |
 | `auth` | `"keychain"` \| `"passthrough"` \| `"none"` | `"keychain"` | Credential injection mode — see [Control credential injection](#control-credential-injection-auth-mode) | no (edit file) |
+| `authRefresh` | object | (unset) | Live credential-refresh settings for Claude — see [Control credential refresh](#control-credential-refresh-authrefresh) | no (edit file) |
 
 ### Global config fields (`$HOME/.awman/config.json`)
 
@@ -379,6 +402,7 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `remote.savedDirs` | string array | `[]` | Remote-host paths shown in the `remote session start` picker — see [Remote mode](09-api-and-remote-mode.md) | no (edit file) |
 | `squad` | object | (unset) | Global squad daemon settings; see [Squad daemon configuration](#squad-daemon-configuration) | no (edit file) |
 | `launchModeFallback` | `"stdio"` \| `"error"` | `"error"` | What to do when a requested ACP launch uses an agent without ACP support | no (edit file) |
+| `authRefresh` | object | (unset) | Machine-wide default live credential-refresh settings for Claude (unless a repo overrides a field) — see [Control credential refresh](#control-credential-refresh-authrefresh) | no (edit file) |
 
 ### `awman config` subcommands
 

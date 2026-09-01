@@ -8,7 +8,7 @@ use std::process::Command;
 use tempfile::TempDir;
 
 fn awman_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"))
+    crate::awman_bin()
 }
 
 #[allow(dead_code)]

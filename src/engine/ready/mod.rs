@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::data::session::{AgentName, Session};
 use crate::engine::agent::AgentEngine;
+use crate::engine::auth::credential::{HostRefreshAction, RefreshableCredentialSpec};
 use crate::engine::container::ContainerRuntime;
 use crate::engine::error::EngineError;
 use crate::engine::git::GitEngine;
@@ -71,6 +72,175 @@ pub fn select_random_greeting() -> &'static str {
     GREETINGS[(secs % GREETINGS.len() as u64) as usize]
 }
 
+/// Result of the sanctioned host-side agent ping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalAgentPingResult {
+    /// The agent replied. The greeting and response are the two lines that
+    /// the ready phase reports to its frontend.
+    Ok {
+        greeting: String,
+        response: String,
+    },
+    /// The agent ran but exited unsuccessfully, usually because it is not
+    /// authenticated.
+    Error,
+    NotInstalled,
+    CouldNotRun,
+}
+
+/// Build the fixed `(command, argv)` for the sanctioned host ping. Pure and
+/// side-effect free so it can be asserted in tests (INV-8). The prompt is drawn
+/// only from the hardcoded [`GREETINGS`] table and, for agents where a
+/// cheapest-model flag is known, the cheapest model is pinned so the ready-check
+/// refresh never bills a premium model (security.md §Guidance).
+pub(crate) fn ping_command(agent: &AgentName, greeting: &str) -> (String, Vec<String>) {
+    let owned = |parts: &[&str]| parts.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let (cmd, args): (&str, Vec<String>) = match agent.as_str() {
+        // Pin the cheapest Claude model so the refresh ping never uses the
+        // account/user default (which may be a premium model).
+        "claude" => ("claude", owned(&["--model", "haiku", "--print", greeting])),
+        "codex" => ("codex", owned(&["exec", greeting])),
+        "opencode" => ("opencode", owned(&["run", greeting])),
+        "maki" => ("maki", owned(&["--print", greeting])),
+        "gemini" => ("gemini", owned(&["-p", greeting])),
+        "copilot" => ("copilot", owned(&["-p", "-i", greeting])),
+        "crush" => ("crush", owned(&["run", greeting])),
+        "cline" => ("cline", owned(&["task", greeting])),
+        _ => (agent.as_str(), owned(&["--print", greeting])),
+    };
+    (cmd.to_string(), args)
+}
+
+/// The one host-side agent execution permitted to awman.
+///
+/// Keep this invocation deliberately narrow: the prompt comes only from the
+/// hardcoded [`GREETINGS`] table, the command arguments are fixed per agent,
+/// and — crucially — the process runs in a dedicated empty directory OUTSIDE
+/// the repository (never the repo cwd), so a real code assistant launched this
+/// way cannot discover repository instructions or content, and a repo-planted
+/// `./claude` cannot be picked up via a relative lookup (INV-8, BLOCKING-2).
+/// Both `awman ready` and the credential refresh monitor use this function.
+pub async fn ping_local_agent(agent: &AgentName) -> LocalAgentPingResult {
+    let greeting = select_random_greeting();
+    let (cmd, args) = ping_command(agent, greeting);
+
+    // Run in a fresh empty 0700 directory so the host agent inherits no
+    // repository as its working directory. A dedicated TempDir is preferred; if
+    // it cannot be created, fall back to the system temp dir — anything but the
+    // repo cwd awman was started from.
+    let scratch = tempfile::Builder::new()
+        .prefix("awman-ready-ping-")
+        .tempdir()
+        .ok();
+    let work_dir = scratch
+        .as_ref()
+        .map(|d| d.path().to_path_buf())
+        .unwrap_or_else(std::env::temp_dir);
+
+    let mut command = tokio::process::Command::new(&cmd);
+    command.args(&args).current_dir(&work_dir);
+    match command.output().await {
+        Ok(output) if output.status.success() => {
+            let response = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
+            LocalAgentPingResult::Ok {
+                greeting: greeting.to_string(),
+                response,
+            }
+        }
+        Ok(_) => LocalAgentPingResult::Error,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LocalAgentPingResult::NotInstalled,
+        Err(_) => LocalAgentPingResult::CouldNotRun,
+    }
+}
+
+/// Result of trying to make the host agent rotate its credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRefreshOutcome {
+    /// The credential expiry advanced after the sanctioned ping.
+    Advanced { expires_at: std::time::SystemTime },
+    /// The ping completed, but the host credential did not advance. The
+    /// existing last-known-good credential remains usable until it expires.
+    NotAdvanced { remediation: String },
+    /// The sanctioned ping itself failed.
+    PingFailed { result: LocalAgentPingResult },
+}
+
+const HOST_REFRESH_REMEDIATION: &str = "run `claude` on the host / check login";
+
+/// Run a descriptor's host refresh action and verify that its credential's
+/// expiry actually advanced. A stale or unreadable post-refresh credential is
+/// reported as a warning outcome so callers can retain the last-known-good
+/// file; it is never promoted to an engine error.
+pub async fn refresh_host_credential(
+    spec: &RefreshableCredentialSpec,
+    resolver: &crate::data::fs::auth_paths::AuthPathResolver,
+) -> HostRefreshOutcome {
+    let source = (spec.source)(resolver);
+    let before = match (spec.read)(&source) {
+        Ok(snapshot) => (spec.expiry)(&snapshot),
+        Err(reason) => {
+            tracing::warn!(
+                agent = spec.agent,
+                reason = %reason,
+                "could not read host credential before refresh"
+            );
+            return HostRefreshOutcome::NotAdvanced {
+                remediation: HOST_REFRESH_REMEDIATION.to_string(),
+            };
+        }
+    };
+
+    let ping_result = match (spec.host_refresh)() {
+        HostRefreshAction::ReadyCheckPing { agent } => {
+            let Ok(agent) = AgentName::new(agent) else {
+                return HostRefreshOutcome::PingFailed {
+                    result: LocalAgentPingResult::CouldNotRun,
+                };
+            };
+            ping_local_agent(&agent).await
+        }
+    };
+    if !matches!(&ping_result, LocalAgentPingResult::Ok { .. }) {
+        return HostRefreshOutcome::PingFailed {
+            result: ping_result,
+        };
+    }
+
+    let after = match (spec.read)(&source) {
+        Ok(snapshot) => (spec.expiry)(&snapshot),
+        Err(reason) => {
+            tracing::warn!(
+                agent = spec.agent,
+                reason = %reason,
+                "could not read host credential after refresh"
+            );
+            return HostRefreshOutcome::NotAdvanced {
+                remediation: HOST_REFRESH_REMEDIATION.to_string(),
+            };
+        }
+    };
+
+    match (before, after) {
+        (Some(before), Some(after)) if after > before => {
+            HostRefreshOutcome::Advanced { expires_at: after }
+        }
+        _ => {
+            tracing::warn!(
+                agent = spec.agent,
+                remediation = HOST_REFRESH_REMEDIATION,
+                "host credential expiry did not advance after refresh"
+            );
+            HostRefreshOutcome::NotAdvanced {
+                remediation: HOST_REFRESH_REMEDIATION.to_string(),
+            }
+        }
+    }
+}
+
 pub mod frontend;
 pub mod phase;
 pub mod summary;
@@ -134,6 +304,15 @@ impl ReadyEngine {
 
     pub fn summary(&self) -> ReadySummary {
         self.summary.clone()
+    }
+
+    /// Supply command-layer credential health before the terminal summary is
+    /// rendered. The ready engine itself never reads credential contents.
+    pub fn set_agent_credentials(
+        &mut self,
+        credentials: Vec<crate::data::ready_summary::AgentCredentialHealth>,
+    ) {
+        self.summary.agent_credentials = credentials;
     }
 
     /// Advance one phase. Drives Q&A and progress through `frontend`.
@@ -458,25 +637,8 @@ impl ReadyEngine {
             ReadyPhase::CheckingLocalAgent => {
                 frontend.report_step_status("Check local agent", StepStatus::Running);
                 let agent_name = self.options.agent.as_str();
-                let greeting = select_random_greeting();
-                let (cmd, args): (&str, Vec<&str>) = match agent_name {
-                    "claude" => ("claude", vec!["--print", greeting]),
-                    "codex" => ("codex", vec!["exec", greeting]),
-                    "opencode" => ("opencode", vec!["run", greeting]),
-                    "maki" => ("maki", vec!["--print", greeting]),
-                    "gemini" => ("gemini", vec!["-p", greeting]),
-                    "copilot" => ("copilot", vec!["-p", "-i", greeting]),
-                    "crush" => ("crush", vec!["run", greeting]),
-                    "cline" => ("cline", vec!["task", greeting]),
-                    _ => (agent_name, vec!["--print", greeting]),
-                };
-                match tokio::process::Command::new(cmd).args(&args).output().await {
-                    Ok(output) if output.status.success() => {
-                        let response = String::from_utf8_lossy(&output.stdout)
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .to_string();
+                match ping_local_agent(&self.options.agent).await {
+                    LocalAgentPingResult::Ok { greeting, response } => {
                         frontend.write_message(crate::data::message::UserMessage {
                             level: crate::data::message::MessageLevel::Info,
                             text: format!("> {greeting}"),
@@ -488,7 +650,7 @@ impl ReadyEngine {
                         self.summary.local_agent = StepStatus::Done;
                         frontend.report_step_status("Check local agent", StepStatus::Done);
                     }
-                    Ok(_output) => {
+                    LocalAgentPingResult::Error => {
                         self.summary.local_agent =
                             StepStatus::Failed(format!("{agent_name}: error (check auth)"));
                         frontend.report_step_status(
@@ -496,7 +658,7 @@ impl ReadyEngine {
                             StepStatus::Failed(format!("{agent_name}: error (check auth)")),
                         );
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    LocalAgentPingResult::NotInstalled => {
                         self.summary.local_agent =
                             StepStatus::Failed(format!("{agent_name}: not installed"));
                         frontend.report_step_status(
@@ -504,7 +666,7 @@ impl ReadyEngine {
                             StepStatus::Failed(format!("{agent_name}: not installed")),
                         );
                     }
-                    Err(_) => {
+                    LocalAgentPingResult::CouldNotRun => {
                         self.summary.local_agent =
                             StepStatus::Failed(format!("{agent_name}: could not run"));
                         frontend.report_step_status(
@@ -876,6 +1038,24 @@ mod tests {
     }
 
     // ── Tests ────────────────────────────────────────────────────────────────
+
+    /// INV-8 / BLOCKING-2: the Claude host ping pins the cheapest model, carries
+    /// the greeting drawn from the hardcoded table, and takes no other argument
+    /// (no user input, no repo content). The greeting is the only variable part.
+    #[test]
+    fn ping_command_for_claude_pins_cheapest_model_and_only_the_greeting() {
+        let agent = AgentName::new("claude").unwrap();
+        let greeting = super::select_random_greeting();
+        let (cmd, args) = super::ping_command(&agent, greeting);
+        assert_eq!(cmd, "claude");
+        assert_eq!(args, vec!["--model", "haiku", "--print", greeting]);
+        // Every argument except the greeting is a fixed literal, and the
+        // greeting itself is drawn only from the hardcoded table.
+        assert!(
+            super::GREETINGS.contains(&args.last().unwrap().as_str()),
+            "the ping's only variable argument must come from GREETINGS"
+        );
+    }
 
     #[tokio::test]
     async fn awaiting_dockerfile_decision_false_leads_to_failed_phase() {

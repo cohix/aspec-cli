@@ -9,11 +9,11 @@
 //! - E2E full flow (filesystem only, no Docker): completed workflow file is removed,
 //!   pending workflow preserved, exit 0
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
-fn awman_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_awman"))
+fn awman_bin() -> std::path::PathBuf {
+    crate::awman_bin()
 }
 
 /// Initialise a minimal git repo at `path`.

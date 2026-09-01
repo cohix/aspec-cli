@@ -55,6 +55,7 @@ use crate::command::commands::Command;
 use crate::command::dispatch::catalogue::{CommandCatalogue, FlagKind, FlagSpec};
 use crate::command::error::CommandError;
 use crate::data::config::global::GlobalConfig;
+use crate::data::config::EffectiveConfig;
 use crate::data::fs::task_store::{MountScope, TaskWorkspace};
 use crate::data::message::UserMessageSink;
 use crate::data::session::Session;
@@ -72,6 +73,23 @@ pub mod parsed_input;
 pub mod projections;
 
 pub use parsed_input::ParsedCommandBoxInput;
+
+/// Install the process-wide live credential monitor for this command session.
+/// The container backends intentionally have no command/session dependency, so
+/// this is the one command-layer bridge to their global no-op hook.
+pub fn install_credential_refresh(config: &EffectiveConfig) {
+    let settings = config.auth_refresh();
+    if settings.enabled {
+        crate::engine::credential_refresh::install_global(
+            crate::engine::credential_refresh::CredentialRefreshMonitor::new(
+                crate::engine::credential_refresh::MonitorConfig {
+                    refresh_threshold: settings.threshold,
+                    tick_interval: settings.tick,
+                },
+            ),
+        );
+    }
+}
 
 // ─── Pre-wired engines bundle ───────────────────────────────────────────────
 
@@ -320,6 +338,11 @@ pub struct Dispatch<F: CommandFrontend> {
 
 impl<F: CommandFrontend> Dispatch<F> {
     pub fn new(frontend: F, session: Arc<RwLock<Session>>, engines: Engines) -> Self {
+        // A disabled `authRefresh` leaves the monitor uninstalled, making lease
+        // registration a no-op and preserving legacy env-var delivery.
+        if let Ok(session_guard) = session.try_read() {
+            install_credential_refresh(&session_guard.effective_config());
+        }
         Self {
             catalogue: CommandCatalogue::get(),
             frontend,

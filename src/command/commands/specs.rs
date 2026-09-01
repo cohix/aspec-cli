@@ -495,10 +495,12 @@ pub(crate) async fn create_new_spec(
         engines
             .require_container_runtime()
             .map_err(CommandError::from)?;
-        let mut options = match engines
-            .agent_engine
-            .build_options(&session, &agent, &run_opts)
-        {
+        let mut options = match engines.agent_engine.build_options_with_credentials(
+            &session,
+            &agent,
+            &run_opts,
+            &credentials,
+        ) {
             Ok(o) => o,
             Err(e) => {
                 frontend.write_message(UserMessage {
@@ -508,7 +510,12 @@ pub(crate) async fn create_new_spec(
                 return Err(CommandError::from(e));
             }
         };
-        if !credentials.env_vars.is_empty() {
+        if !credentials.env_vars.is_empty()
+            && matches!(
+                credentials.delivery,
+                crate::engine::auth::CredentialDelivery::Env
+            )
+        {
             options.push(ContainerOption::AgentCredentials {
                 env_vars: credentials.env_vars,
             });

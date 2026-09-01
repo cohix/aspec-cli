@@ -15,9 +15,17 @@ By default, an agent environment:
 
 This means a misbehaving agent can't access your SSH keys, can't run arbitrary containers on your behalf, and can't touch files outside the project. The worst case is that it makes bad edits inside the repo — which git can undo.
 
-**Docker / Apple Containers:** agents run in a Linux container or lightweight VM respectively. The container is removed (`--rm`) when the session ends. Credentials are injected as environment variables.
+**Docker / Apple Containers:** agents run in a Linux container or lightweight VM respectively. The container is removed (`--rm`) when the session ends. Most agents receive credentials as environment variables. Claude Code is the exception: it receives a live-updated credential file (access token, expiry, and scopes only — never the refresh token) written into its staged settings directory and kept fresh for as long as the session runs. See [Live credential refresh](#live-credential-refresh) below.
 
-**Docker Sandboxes (`docker-sbx-experimental`):** agents run in a dedicated microVM with its own kernel, private Docker daemon, and private filesystem. Host escape requires a hypervisor exploit rather than a container escape. Sandboxes persist between sessions (state survives `sbx stop`); awman runs `sbx rm` only on explicit teardown. Credentials are registered at agent launch with sandbox-scoped `sbx secret set` calls (never global), so removing a sandbox removes its secrets with it. See [Runtimes](11-runtimes.md#docker-sandboxes-experimental) for setup and limitations.
+**Docker Sandboxes (`docker-sbx-experimental`):** agents run in a dedicated microVM with its own kernel, private Docker daemon, and private filesystem. Host escape requires a hypervisor exploit rather than a container escape. Sandboxes persist between sessions (state survives `sbx stop`); awman runs `sbx rm` only on explicit teardown. Credentials are registered at agent launch with sandbox-scoped `sbx secret set` calls (never global), so removing a sandbox removes its secrets with it. sbx is unaffected by the live credential-file refresh described below — it continues to authenticate Claude only through `ANTHROPIC_API_KEY` or an in-sandbox login. See [Runtimes](11-runtimes.md#docker-sandboxes-experimental) for setup and limitations.
+
+### Live credential refresh
+
+Claude Code's OAuth refresh token — the credential that could mint new access tokens indefinitely — never leaves your host and is never given to a container. Instead, for each session awman writes a sanitized, awman-authored `.credentials.json` (access token, expiry, and scopes only, mode `0600`) into the staged `~/.claude` directory that's bind-mounted into the container; the host's own `~/.claude/.credentials.json` is excluded from that mount entirely.
+
+While a Claude session is running, awman's credential-refresh monitor watches the access token's expiry. Shortly before it would expire, the monitor triggers a host-side refresh: it invokes the same sanctioned, hardcoded ready-check ping that `awman ready` uses to verify your local agent is authenticated (fixed prompt, no user input, no repository content, no working directory) — this causes your host's Claude Code installation to rotate its own Keychain entry. The monitor then atomically replaces the staged credential file for every live session with the new token, so a long-running container observes it on its next request without a restart.
+
+If the host can't refresh (asleep, logged out, offline), awman keeps the last-known-good token in place, warns loudly, and retries with backoff; it never leaves a container with no credential at all. This behavior is on by default and can be tuned or disabled — see [Control credential refresh](07-configuration.md#control-credential-refresh-authrefresh).
 
 ### Transparency
 
@@ -25,7 +33,7 @@ Every time awman runs a container or sandbox command, the full CLI invocation is
 
 ```
 $ docker run --rm -it -v /home/user/myproject:/workspace -w /workspace \
-    -e CLAUDE_CODE_OAUTH_TOKEN -e GEMINI_API_KEY=*** awman-myproject:latest claude "..."
+    -v /tmp/awman-claude-dir-a1b2c3/.claude:/root/.claude -e GEMINI_API_KEY=*** awman-myproject:latest claude "..."
 ```
 
 For Docker Sandboxes, every `sbx` invocation is announced the same way:
@@ -36,7 +44,7 @@ Running: sbx secret set awman-ab12-claude anthropic (value piped via stdin)
 Running: sbx run awman-ab12-claude
 ```
 
-Credential values never appear in a printed command. Agent-managed credentials (like the Claude Code OAuth token) show as a bare `-e VAR_NAME` — the value is passed straight from awman's own environment to the container CLI's process, never through argv. Env vars you configure yourself (`env()` overlays, `envPassthrough`) still show as `VAR_NAME=***`. Everything else is visible in full. You can always see exactly what awman is doing.
+Credential values never appear in a printed command. Env-delivered agent credentials show as a bare `-e VAR_NAME` — the value is passed straight from awman's own environment to the container CLI's process, never through argv. Claude Code's OAuth credential is instead delivered as a file (see [Live credential refresh](#live-credential-refresh)), so the printed command shows only the staged directory's mount path, never a token. Env vars you configure yourself (`env()` overlays, `envPassthrough`) still show as `VAR_NAME=***`. Everything else is visible in full. You can always see exactly what awman is doing.
 
 ---
 
@@ -247,11 +255,11 @@ $ docker build -t awman-myapp:latest -f Dockerfile.dev /path/to/repo
 $ docker run --rm -it \
     -v /path/to/repo:/workspace \
     -w /workspace \
-    -e CLAUDE_CODE_OAUTH_TOKEN \
+    -v /tmp/awman-claude-dir-a1b2c3/.claude:/root/.claude \
     awman-myapp:latest claude "Implement work item 0001..."
 ```
 
-With the Apple Containers runtime, the same commands are shown with `container` instead of `docker`. With the Docker Sandboxes runtime, every `sbx` invocation is announced — `sbx run`, `sbx exec`, `sbx stop`, `sbx rm`, `sbx secret set`, `sbx kit validate` — without sensitive values. Credential values are never printed: agent-managed credentials render as a bare `-e VAR_NAME`, and user-configured environment overlays render as `VAR_NAME=***`.
+With the Apple Containers runtime, the same commands are shown with `container` instead of `docker`. With the Docker Sandboxes runtime, every `sbx` invocation is announced — `sbx run`, `sbx exec`, `sbx stop`, `sbx rm`, `sbx secret set`, `sbx kit validate` — without sensitive values. Credential values are never printed: env-delivered agent credentials render as a bare `-e VAR_NAME`, Claude's file-delivered OAuth credential shows only as the staged directory's ordinary mount path, and user-configured environment overlays render as `VAR_NAME=***`.
 
 ---
 

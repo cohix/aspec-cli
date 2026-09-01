@@ -636,11 +636,15 @@ execution.
 
 awman automatically passes your agent's credentials into the container — you never have to log in manually inside a container session.
 
-For Claude Code, awman reads the OAuth token from the macOS Keychain (service: `Claude Code-credentials`) and passes it into the container as the `CLAUDE_CODE_OAUTH_TOKEN` environment variable. Credentials are never mounted as files, and the token value is never shown in displayed Docker commands; the command renders a bare `-e CLAUDE_CODE_OAUTH_TOKEN`.
+For Claude Code, awman reads your OAuth credential from the macOS Keychain (service: `Claude Code-credentials`) — or, on non-macOS hosts, from `~/.claude/.credentials.json` — and writes an awman-authored `.credentials.json` (access token, expiry, and scopes only) into the staged `~/.claude` directory that's mounted into the container. Your refresh token is never captured from the host credential and never mounted into a container.
+
+While the session is running, a background monitor tracks the token's expiry and, before it runs out, pings your host's local Claude Code installation — the same sanctioned check `awman ready` uses — so it rotates its own Keychain entry. awman then atomically rewrites the staged credential file for every live session, so a long-running container picks up the new token on its next request with no restart. If the host can't refresh (asleep, logged out, offline), awman keeps the last-known-good token, warns you, and retries; a workflow step that fails on an auth error is retried once automatically after a fresh refresh. See [Control credential refresh](07-configuration.md#control-credential-refresh-authrefresh) to change the refresh threshold or turn this off.
+
+The token value is never shown in displayed container commands; the mounted `~/.claude` directory appears only as an ordinary bind-mount path.
 
 | Agent | Auth mechanism |
 |-------|---------------|
-| `claude` | OAuth token read from macOS Keychain (`Claude Code-credentials`), injected as `CLAUDE_CODE_OAUTH_TOKEN` |
+| `claude` | OAuth credential read from macOS Keychain (or `~/.claude/.credentials.json`), delivered as a live-refreshed `.credentials.json` file in the staged `~/.claude` mount — never as an env var |
 | `codex` | — |
 | `opencode` | — |
 | `maki` | API key via `env()` overlay |
@@ -925,6 +929,16 @@ This applies whenever `ready` starts a build — `--build`, `--refresh`, or the 
 
 `awman ready` also checks whether work item paths are configured. If neither `aspec/work-items/` exists nor `work_items.dir` is set, the summary shows a `⚠ not configured` warning (not a failure) for the `work items config` row, and prints a tip to run `awman config set work_items.dir <path>`.
 
+### Credential health
+
+`awman ready` also reports the health of any live-refreshed agent credential (currently Claude's Keychain-backed OAuth token), as read on the host at the time you ran `ready`:
+
+```
+Credential claude (68432s remaining)   ✓
+```
+
+If the credential can't be read, has already expired, or its expiry can't be determined, the row shows a warning instead (`credential unreadable: ...`, `credential expired`, or `credential expiry unknown`) rather than failing the whole `ready` check.
+
 ### `ready --json`
 
 When `--json` is set, `awman ready` suppresses the human-readable table and instead prints structured JSON summarising the environment check results. This is useful for CI pipelines and scripts that need to inspect readiness programmatically.
@@ -956,6 +970,16 @@ When `--refresh` is also set, the audit runs and its results are included once c
 ```
 
 `--json` implies `--non-interactive` — no interactive prompts are shown regardless of environment state. Streaming audit output is buffered internally and not printed; only the final JSON is written to stdout.
+
+Alongside the fields above, the output includes an `agent_credentials` array — one entry per agent with a live-refreshed credential — carrying only non-secret health data:
+
+```json
+"agent_credentials": [
+  { "agent": "claude", "refreshable": true, "expires_in_secs": 68432, "expired": false, "read_error": null }
+]
+```
+
+`expires_in_secs` is `null` when the expiry couldn't be determined; `read_error` is set instead of `expires_in_secs` when the credential couldn't be read at all. No token value ever appears in this output.
 
 ---
 

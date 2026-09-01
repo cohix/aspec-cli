@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::data::config::env::{Env, EnvSnapshot};
-use crate::data::config::repo::{ApiConfig, RemoteConfig, SquadConfig};
+use crate::data::config::repo::{
+    validate_auth_refresh, ApiConfig, AuthRefreshConfig, RemoteConfig, SquadConfig,
+};
 use crate::data::error::DataError;
 
 /// Behavior when a configured ACP launch is requested for an agent that does
@@ -63,6 +65,8 @@ pub struct GlobalConfig {
     pub max_concurrent_agents: Option<usize>,
     #[serde(rename = "launchModeFallback", skip_serializing_if = "Option::is_none")]
     pub launch_mode_fallback: Option<LaunchModeFallback>,
+    #[serde(rename = "authRefresh", skip_serializing_if = "Option::is_none")]
+    pub auth_refresh: Option<AuthRefreshConfig>,
 }
 
 impl GlobalConfig {
@@ -139,6 +143,9 @@ impl GlobalConfig {
         if let Some(squad) = &cfg.squad {
             squad.validate()?;
         }
+        if let Some(auth_refresh) = &cfg.auth_refresh {
+            validate_auth_refresh(auth_refresh)?;
+        }
         Ok(cfg)
     }
 
@@ -213,6 +220,7 @@ mod tests {
             base_image: None,
             max_concurrent_agents: Some(4),
             launch_mode_fallback: None,
+            auth_refresh: None,
         };
 
         original.save_with(&env).unwrap();

@@ -28,14 +28,23 @@ const API_SOURCE_FILES: &[&str] = &[
     "session_setup.rs",
 ];
 
-/// Read one `src/frontend/api/<file>` and drop the trailing `#[cfg(test)]`
-/// module so only runtime code is scanned.
+/// Load one `src/frontend/api/<file>` at compile time and drop the trailing
+/// `#[cfg(test)]` module so only runtime code is scanned. This retains the
+/// source-level architecture guard when the test binary runs without a live
+/// checkout.
 fn read_runtime_source(file: &str) -> String {
-    let path = format!("{}/src/frontend/api/{}", env!("CARGO_MANIFEST_DIR"), file);
-    let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let src = match file {
+        "command_frontend.rs" => include_str!("../../src/frontend/api/command_frontend.rs"),
+        "event_bus.rs" => include_str!("../../src/frontend/api/event_bus.rs"),
+        "mod.rs" => include_str!("../../src/frontend/api/mod.rs"),
+        "queue_worker.rs" => include_str!("../../src/frontend/api/queue_worker.rs"),
+        "routes.rs" => include_str!("../../src/frontend/api/routes.rs"),
+        "session_setup.rs" => include_str!("../../src/frontend/api/session_setup.rs"),
+        _ => unreachable!("API_SOURCE_FILES contains only known API frontend files"),
+    };
     match src.find("#[cfg(test)]") {
         Some(idx) => src[..idx].to_string(),
-        None => src,
+        None => src.to_string(),
     }
 }
 

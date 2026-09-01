@@ -7,6 +7,7 @@ use crate::command::commands::{resolve_agent, Command};
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::message::{MessageLevel, UserMessage};
+use crate::data::ready_summary::AgentCredentialHealth;
 use crate::engine::ready::{ReadyEngine, ReadyEngineOptions, ReadyFrontend, ReadySummary};
 use crate::engine::step_status::StepStatus;
 
@@ -29,6 +30,7 @@ pub struct ReadyOutcome {
     pub local_agent: StepStatus,
     pub audit: StepStatus,
     pub image_rebuild: StepStatus,
+    pub agent_credentials: Vec<AgentCredentialHealth>,
     /// Per non-default agent image status.
     pub non_default_agent_images: Vec<(String, StepStatus)>,
     /// `true` when `--json` was passed; controls how the CLI renders the outcome.
@@ -49,6 +51,7 @@ impl From<ReadySummary> for ReadyOutcome {
             local_agent: s.local_agent,
             audit: s.audit,
             image_rebuild: s.image_rebuild,
+            agent_credentials: s.agent_credentials,
             non_default_agent_images: s.non_default_agent_images,
             json_requested: false,
             refresh_requested: false,
@@ -109,6 +112,7 @@ impl ReadyOutcome {
         serde_json::json!({
             "ready": !any_failed,
             "runtime": self.runtime,
+            "agent_credentials": self.agent_credentials,
             "steps": {
                 "docker_daemon": step_to_json(&docker_daemon),
                 "dockerfile": step_to_json(&self.dockerfile),
@@ -206,6 +210,7 @@ impl Command for ReadyCommand {
                 local_agent: StepStatus::Skipped,
                 audit: StepStatus::Skipped,
                 image_rebuild: StepStatus::Skipped,
+                agent_credentials: credential_health(&self.engines.auth_engine, &agent),
                 non_default_agent_images: Vec::new(),
                 json_requested: self.flags.json,
                 refresh_requested: self.flags.refresh,
@@ -215,7 +220,7 @@ impl Command for ReadyCommand {
         }
 
         let options = ReadyEngineOptions {
-            agent,
+            agent: agent.clone(),
             refresh: self.flags.refresh,
             build: self.flags.build,
             no_cache: self.flags.no_cache,
@@ -253,6 +258,7 @@ impl Command for ReadyCommand {
             self.engines.agent_engine.clone(),
             options,
         );
+        engine.set_agent_credentials(credential_health(&self.engines.auth_engine, &agent));
         let summary = match engine.run_to_completion(frontend.as_mut()).await {
             Ok(s) => s,
             Err(e) => {
@@ -283,4 +289,42 @@ impl Command for ReadyCommand {
 
         Ok(outcome)
     }
+}
+
+fn credential_health(
+    auth_engine: &crate::engine::auth::AuthEngine,
+    agent: &crate::data::session::AgentName,
+) -> Vec<AgentCredentialHealth> {
+    let Ok(status) = auth_engine.list_agent_credentials(agent) else {
+        return vec![AgentCredentialHealth {
+            agent: agent.as_str().to_string(),
+            refreshable: false,
+            expires_in_secs: None,
+            expired: false,
+            read_error: Some("credential status could not be read".to_string()),
+        }];
+    };
+    if !status.refreshable {
+        return Vec::new();
+    }
+    let (expires_in_secs, expired) = match status.expires_at {
+        Some(expires_at) => match expires_at.duration_since(std::time::SystemTime::now()) {
+            Ok(remaining) => (
+                Some(i64::try_from(remaining.as_secs()).unwrap_or(i64::MAX)),
+                false,
+            ),
+            Err(elapsed) => (
+                Some(-i64::try_from(elapsed.duration().as_secs()).unwrap_or(i64::MAX)),
+                true,
+            ),
+        },
+        None => (None, false),
+    };
+    vec![AgentCredentialHealth {
+        agent: status.agent.as_str().to_string(),
+        refreshable: status.refreshable,
+        expires_in_secs,
+        expired,
+        read_error: status.read_error.map(|error| error.to_string()),
+    }]
 }

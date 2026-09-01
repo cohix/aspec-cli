@@ -20,6 +20,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::data::session::AgentName;
+use crate::engine::auth::credential::{
+    self, HostCredentialSource, RefreshableCredentialSpec, CLAUDE_KEYCHAIN_SERVICE,
+};
 
 /// File-form credential to be written into an agent's settings-dir overlay
 /// before mounting the overlay into the container. Lifecycle: produced from
@@ -55,27 +58,51 @@ pub fn agent_keychain_files(agent: &AgentName) -> Vec<AgentSecretFile> {
     }
 }
 
+/// Refresh descriptor lookup — the generic replacement for the per-agent
+/// dispatch. `Some` only for agents that opt into refreshable file delivery;
+/// `None` keeps an agent's behaviour EXACTLY as it is today (env delivery for
+/// claude-less agents, `AgentSecretFile` delivery for antigravity).
+pub fn refreshable_spec_for(agent: &AgentName) -> Option<&'static RefreshableCredentialSpec> {
+    match agent.as_str() {
+        "claude" => Some(credential::claude_spec()),
+        _ => None,
+    }
+}
+
 // ── Claude (env-var) ────────────────────────────────────────────────────────
 
-/// macOS-only: look up the Claude Code OAuth credential and extract its
-/// access token via the JSON path `claudeAiOauth.accessToken`.
+/// macOS-only: look up the Claude Code OAuth credential and extract its access
+/// token. This is the legacy **env** delivery path (`CLAUDE_CODE_OAUTH_TOKEN`),
+/// still used by the sandbox/sbx runtime and any non-container caller; the
+/// container path now delivers Claude's credential as a refreshable file via
+/// [`refreshable_spec_for`].
+///
+/// The keychain code stays macOS-only (the descriptor's cross-platform *source*
+/// handles non-macOS); a missing entry or unparseable payload is logged with a
+/// typed reason so `awman ready` can surface it, rather than silently returning
+/// an empty vec.
 fn claude_keychain_credentials() -> Vec<(String, String)> {
     if !cfg!(target_os = "macos") {
         return Vec::new();
     }
-    let Some(raw) = run_macos_keychain_lookup("Claude Code-credentials", None) else {
-        return Vec::new();
+    let source = HostCredentialSource::MacosKeychain {
+        service: CLAUDE_KEYCHAIN_SERVICE,
     };
-    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    parsed
-        .get("claudeAiOauth")
-        .and_then(|v| v.get("accessToken"))
-        .and_then(|v| v.as_str())
-        .map(|t| vec![("CLAUDE_CODE_OAUTH_TOKEN".to_string(), t.to_string())])
-        .unwrap_or_default()
+    match credential::read_claude_credential(&source) {
+        Ok(snap) => vec![(
+            "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
+            snap.secret.expose().to_string(),
+        )],
+        Err(reason) => {
+            // Never log the secret — `reason` and the agent name only.
+            tracing::warn!(
+                agent = "claude",
+                reason = %reason,
+                "could not read Claude keychain credential for env delivery"
+            );
+            Vec::new()
+        }
+    }
 }
 
 // ── Antigravity (file-form) ─────────────────────────────────────────────────
@@ -136,7 +163,7 @@ fn read_antigravity_secret() -> Option<String> {
 
 // ── Shared OS keychain shims ────────────────────────────────────────────────
 
-fn run_macos_keychain_lookup(service: &str, account: Option<&str>) -> Option<String> {
+pub(crate) fn run_macos_keychain_lookup(service: &str, account: Option<&str>) -> Option<String> {
     let mut cmd = Command::new("security");
     cmd.arg("find-generic-password").arg("-s").arg(service);
     if let Some(a) = account {
@@ -254,5 +281,19 @@ mod tests {
     fn agent_keychain_credentials_for_unknown_agent_is_empty() {
         let agent = AgentName::new("totallymadeup").unwrap();
         assert!(agent_keychain_credentials(&agent).is_empty());
+    }
+
+    #[test]
+    fn refreshable_spec_only_for_claude() {
+        let claude = AgentName::new("claude").unwrap();
+        assert!(refreshable_spec_for(&claude).is_some());
+        // Agents without a descriptor keep today's behaviour (env / AgentSecretFile).
+        for other in ["antigravity", "codex", "gemini", "totallymadeup"] {
+            let agent = AgentName::new(other).unwrap();
+            assert!(
+                refreshable_spec_for(&agent).is_none(),
+                "{other} must have no refresh descriptor"
+            );
+        }
     }
 }

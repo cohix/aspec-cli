@@ -133,11 +133,11 @@ fn api_serve_config_type_uses_api_naming() {
 /// constant, so changes to the log message string are caught directly.
 #[test]
 fn api_startup_log_message_contains_awman_and_api_mode() {
-    let src = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/frontend/api/mod.rs",
-    ))
-    .expect("read src/frontend/api/mod.rs");
+    // Keep the source scan independent of the runtime checkout. Some test
+    // runners execute the compiled test binary after the source workspace has
+    // been torn down; `include_str!` makes Cargo track this file as an input
+    // while preserving the assertion against the actual source.
+    let src = include_str!("../../src/frontend/api/mod.rs");
 
     // Collect every `tracing::info!` literal that mentions "starting",
     // "listening", or "stopped" — those are the lifecycle log lines.

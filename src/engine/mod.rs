@@ -14,6 +14,7 @@ pub mod agent_runtime;
 pub mod auth;
 pub mod container;
 pub mod context_prompt;
+pub mod credential_refresh;
 pub mod error;
 pub mod git;
 pub mod init;

@@ -428,12 +428,23 @@ impl LocalTaskEvaluator {
             Arc::clone(&self.engines.agent_engine),
             Arc::clone(&self.engines.runtime),
         );
-        let credential_env_vars = self
+        let resolved_credentials = self
             .engines
             .auth_engine
             .resolve_agent_auth(&session, &agent)
-            .map(|creds| creds.env_vars)
             .unwrap_or_default();
+        let credentials = if self.engines.runtime.capabilities().kit_declarative
+            && matches!(
+                resolved_credentials.delivery,
+                crate::engine::auth::CredentialDelivery::File(_)
+            ) {
+            self.engines
+                .auth_engine
+                .agent_env_credentials(&agent)
+                .unwrap_or_default()
+        } else {
+            resolved_credentials
+        };
 
         let generated_path = request.task_dir.join("workflow.toml");
         let mut repair = WorkflowRepairLoop::new(generated_path.clone(), prompt);
@@ -464,7 +475,7 @@ impl LocalTaskEvaluator {
                         session: session.clone(),
                         agent: agent.clone(),
                         run_options,
-                        credential_env_vars: credential_env_vars.clone(),
+                        credentials: credentials.clone(),
                         task_name: task.name.clone(),
                         task_dir: request.task_dir.clone(),
                     },
