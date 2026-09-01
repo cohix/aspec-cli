@@ -543,6 +543,7 @@ fn bridge_config_for(
         output_tail: std::sync::Arc::new(
             crate::engine::agent_runtime::output_tail::OutputTail::with_default_capacity(),
         ),
+        output_broadcast: None,
     }
 }
 
@@ -898,6 +899,7 @@ pub(super) fn attach_bridge_config(
         output_tail: std::sync::Arc::new(
             crate::engine::agent_runtime::output_tail::OutputTail::with_default_capacity(),
         ),
+        output_broadcast: None,
     }
 }
 
@@ -958,11 +960,14 @@ impl AgentInstance for AttachInstance {
         // agent launched by `docker run -it`), rather than creating a sibling
         // shell with `docker exec`. The outer bridge PTY carries terminal size
         // and resize signals to the attach client.
-        let argv = vec![
-            "attach".to_string(),
-            "--sig-proxy=false".to_string(),
-            handle.id.clone(),
-        ];
+        //
+        // No `--sig-proxy=false`: every awman agent container has a TTY, where
+        // signal proxying is inapplicable — and newer Docker CLIs reject the
+        // flag outright for TTY containers, which made the attach client exit
+        // immediately and the TUI attach session collapse on arrival. Session
+        // teardown never relied on it either (`kill_local_exec` SIGKILLs the
+        // local client, and SIGKILL is never proxied).
+        let argv = vec!["attach".to_string(), handle.id.clone()];
         if io.initial_size.is_some() {
             return spawn_pty_bridged_attach(io, argv, started_at, handle, bridge_cfg);
         }
@@ -2001,6 +2006,7 @@ mod tests {
             output_tail: Arc::new(
                 crate::engine::agent_runtime::output_tail::OutputTail::with_default_capacity(),
             ),
+            output_broadcast: None,
         };
 
         let mut execution = spawn_piped_interactive_docker_with_bin(

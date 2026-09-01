@@ -15,10 +15,11 @@ use crate::data::fs::task_store::MountScope;
 use crate::frontend::tui::command_frontend::TuiCommandFrontend;
 use crate::frontend::tui::dialogs::{DialogRequest, DialogResponse};
 
-/// The task-description modal's title, spelled out once so the CLI and TUI
-/// interviews ask the same question.
-pub const TASK_DESCRIPTION_TITLE: &str = "Describe the new squad task including its triggering \
-     conditions and how squad should handle the task each time it is triggered";
+/// The task-description modal's title. Deliberately short — it is drawn into
+/// the dialog rect's upper border, where a long sentence overflows or clips.
+/// The full instruction lives in the dialog body (`ask_task_description`'s
+/// prompt), which wraps and is always readable.
+pub const TASK_DESCRIPTION_TITLE: &str = "New squad task description";
 
 impl SquadCommandFrontend for TuiCommandFrontend {
     /// The TUI runs in the user's own terminal, so the process's current
@@ -45,9 +46,9 @@ impl SquadCommandFrontend for TuiCommandFrontend {
     fn ask_task_description(&mut self) -> Result<String, CommandError> {
         let response = self.ask_dialog(DialogRequest::MultilineInput {
             title: TASK_DESCRIPTION_TITLE.into(),
-            // The frame title clips on a narrow terminal, so the same
-            // instruction is repeated in the body, pre-wrapped (the multiline
-            // dialog renders its prompt without wrapping).
+            // The border title is a short label; the full instruction lives
+            // here in the body, pre-wrapped (the multiline dialog renders its
+            // prompt without wrapping).
             prompt: "Describe the new squad task including its triggering conditions\n\
                      and how squad should handle the task each time it is triggered.\n\
                      (Ctrl+Enter to submit)"

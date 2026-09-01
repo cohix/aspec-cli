@@ -246,6 +246,8 @@ impl SquadSlotDriver {
         let cancel = self.session_cancel.clone();
         let cancel_handle = execution.cancel_handle();
         let slot_events = self.slot_events.clone();
+        let status_log = self.status_log.clone();
+        let output_tail = execution.output_tail();
         tokio::spawn(async move {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -253,7 +255,45 @@ impl SquadSlotDriver {
                         let _ = handle.cancel();
                     }
                 }
-                _ = execution.wait() => {
+                result = execution.wait() => {
+                    // A dying attach client must say *why* before its slot is
+                    // evicted — an instant local-client failure otherwise
+                    // renders as a content-free flash back to the task grid.
+                    let summary = match &result {
+                        Ok(info) => format!(
+                            "attach session for {step_name:?} ended (local attach client \
+                             exit code {})",
+                            info.exit_code
+                        ),
+                        Err(error) => {
+                            format!("attach session for {step_name:?} failed: {error}")
+                        }
+                    };
+                    let failed = !matches!(&result, Ok(info) if info.exit_code == 0);
+                    if let Ok(mut log) = status_log.lock() {
+                        log.push(StatusLogEntry {
+                            level: if failed {
+                                MessageLevel::Error
+                            } else {
+                                MessageLevel::Info
+                            },
+                            text: summary,
+                        });
+                        if failed {
+                            if let Some(tail) = output_tail.as_ref() {
+                                for line in tail
+                                    .snapshot()
+                                    .iter()
+                                    .filter(|line| !line.trim().is_empty())
+                                {
+                                    log.push(StatusLogEntry {
+                                        level: MessageLevel::Info,
+                                        text: format!("  {line}"),
+                                    });
+                                }
+                            }
+                        }
+                    }
                     if exit_slot_when_session_ends {
                         push_slot_event(
                             &slot_events,
@@ -278,6 +318,11 @@ impl SquadSlotDriver {
 }
 
 /// Resolve a daemon-reported id against currently running runtime handles.
+///
+/// The workflow engine publishes the container *name* as a step's
+/// `container_id` (its execution handle id is the name it assigned), while
+/// `list_running_all` reports the runtime's real ids — short hex for Docker.
+/// Match on either, or every workflow-phase attach silently resolves nothing.
 pub fn handle_for_container_id(
     runtime: &dyn AgentRuntimeEngine,
     container_id: &str,
@@ -285,11 +330,11 @@ pub fn handle_for_container_id(
     if container_id.is_empty() {
         return None;
     }
-    runtime
-        .list_running_all()
-        .ok()?
-        .into_iter()
-        .find(|handle| handle.id.starts_with(container_id) || container_id.starts_with(&handle.id))
+    runtime.list_running_all().ok()?.into_iter().find(|handle| {
+        handle.id.starts_with(container_id)
+            || container_id.starts_with(&handle.id)
+            || handle.name == container_id
+    })
 }
 
 /// Start an `squad attach <name>` session in the active squad tab.

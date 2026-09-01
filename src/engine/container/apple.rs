@@ -329,9 +329,24 @@ impl ContainerBackend for AppleBackend {
     }
 
     fn attach(&self, handle: &AgentHandle) -> Result<Box<dyn AgentInstance>, EngineError> {
-        Ok(Box::new(AppleAttachInstance {
-            handle: handle.clone(),
-        }))
+        // Apple's `container` CLI has no `attach` subcommand, so reattach
+        // goes through the awman-owned rendezvous instead: the process that
+        // launched the container serves its live PTY on a per-container unix
+        // socket (see `attach_socket.rs`), and this instance connects to it.
+        // Docker keeps its native `docker attach`; the semantics are the same
+        // either way — the real agent TTY, never a sibling shell.
+        let path = crate::engine::container::attach_socket::attach_socket_path(&handle.name)
+            .ok_or_else(|| {
+                EngineError::Container(
+                    "cannot resolve the attach socket directory (no home directory)".into(),
+                )
+            })?;
+        Ok(Box::new(
+            crate::engine::container::attach_socket::SocketAttachInstance {
+                handle: handle.clone(),
+                path,
+            },
+        ))
     }
 
     fn list_running_with_name_prefix(&self, prefix: &str) -> Result<Vec<AgentHandle>, EngineError> {
@@ -473,6 +488,7 @@ fn bridge_config_for(
         output_tail: std::sync::Arc::new(
             crate::engine::agent_runtime::output_tail::OutputTail::with_default_capacity(),
         ),
+        output_broadcast: None,
     }
 }
 
@@ -522,8 +538,61 @@ fn spawn_pty_bridged_apple(
     // Writing it here would cause the PTY to echo the prompt text into the
     // terminal output, painting it over the TUI before the agent starts.
 
+    // Apple's `container` CLI has no attach verb, so this process — the sole
+    // holder of the container's PTY — is the attach rendezvous: tap the
+    // bridge's output stream and serve the PTY over a per-container unix
+    // socket that `AppleBackend::attach` clients connect to.
+    let (output_broadcast_tx, _) = tokio::sync::broadcast::channel::<Vec<u8>>(256);
+    let output_broadcast_tx = std::sync::Arc::new(output_broadcast_tx);
+    let mut bridge_cfg = bridge_cfg;
+    bridge_cfg.output_broadcast = Some(std::sync::Arc::clone(&output_broadcast_tx));
+
     let (master_arc, bridge) =
         crate::engine::container::io_bridge::bridge_pty(io, pair, bridge_cfg)?;
+
+    // A weak master reference: the attach server must never keep the PTY
+    // alive past the execution backend that owns it.
+    let master_for_resize = std::sync::Arc::downgrade(&master_arc);
+    let resize: std::sync::Arc<dyn Fn(u16, u16) + Send + Sync> =
+        std::sync::Arc::new(move |cols, rows| {
+            if let Some(master) = master_for_resize.upgrade() {
+                if let Ok(master) = master.lock() {
+                    let _ = master.resize(portable_pty::PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+            }
+        });
+    let attach_socket =
+        match crate::engine::container::attach_socket::attach_socket_path(&instance.name.0) {
+            Some(path) => crate::engine::container::attach_socket::spawn_attach_socket_server(
+                &path,
+                crate::engine::container::attach_socket::AttachHooks {
+                    output: output_broadcast_tx,
+                    stdin: bridge.stdin_injector.clone(),
+                    resize,
+                },
+            )
+            .map_err(|error| {
+                tracing::warn!(
+                    container = %instance.name.0,
+                    error = %error,
+                    "attach socket unavailable; the container runs but cannot be attached to"
+                );
+            })
+            .ok(),
+            None => {
+                tracing::warn!(
+                    container = %instance.name.0,
+                    "no home directory to place the attach socket in; the container \
+                     runs but cannot be attached to"
+                );
+                None
+            }
+        };
 
     let backend = AppleExecution {
         child: None,
@@ -532,6 +601,7 @@ fn spawn_pty_bridged_apple(
         stdin_injector: Some(bridge.stdin_injector),
         container_name: instance.name.0.clone(),
         started_at,
+        attach_socket,
     };
     Ok(AgentExecution::new(
         handle,
@@ -593,6 +663,7 @@ fn spawn_piped_apple(
         stdin_injector: None,
         container_name: instance.name.0.clone(),
         started_at,
+        attach_socket: None,
     };
     Ok(AgentExecution::new(
         handle,
@@ -666,6 +737,7 @@ fn spawn_piped_interactive_apple(
         stdin_injector: Some(bridge.stdin_injector),
         container_name: instance.name.0.clone(),
         started_at,
+        attach_socket: None,
     };
     Ok(AgentExecution::new(
         handle,
@@ -687,6 +759,10 @@ struct AppleExecution {
     stdin_injector: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
     container_name: String,
     started_at: chrono::DateTime<chrono::Utc>,
+    /// The attach rendezvous socket for PTY-backed runs (`None` on the piped
+    /// paths). Dropped with this backend, which closes every attach session
+    /// and removes the socket file.
+    attach_socket: Option<crate::engine::container::attach_socket::AttachSocketGuard>,
 }
 
 impl ExecutionBackend for AppleExecution {
@@ -766,225 +842,6 @@ impl ExecutionBackend for AppleExecution {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
-                Ok(())
-            },
-        ))
-    }
-}
-
-// ─── Attach (re-attach into a foreign, already-running container) ───────────
-
-/// Configured-but-not-running Apple attach handle. It reconnects to the
-/// running container's primary process rather than execing a shell alongside
-/// it, and never stops the target when the local client closes.
-struct AppleAttachInstance {
-    handle: AgentHandle,
-}
-
-impl AgentInstance for AppleAttachInstance {
-    fn handle_preview(&self) -> AgentHandlePreview {
-        AgentHandlePreview {
-            id: self.handle.id.clone(),
-            name: self.handle.name.clone(),
-            image: self.handle.image_tag.clone(),
-        }
-    }
-
-    fn run_with_frontend(
-        self: Box<Self>,
-        mut frontend: Box<dyn crate::engine::agent_runtime::frontend::AgentFrontend>,
-    ) -> Result<AgentExecution, EngineError> {
-        use crate::engine::container::docker::attach_bridge_config;
-
-        let started_at = chrono::Utc::now();
-        let handle = self.handle.clone();
-
-        frontend.report_status(
-            crate::engine::agent_runtime::frontend::AgentStatus::Running {
-                container_name: handle.name.clone(),
-            },
-        );
-
-        let grace_timeout = frontend.grace_timeout();
-        let stuck_timeout = frontend.stuck_timeout();
-        let io = frontend.take_io();
-        let bridge_cfg = attach_bridge_config(grace_timeout, stuck_timeout);
-
-        let argv = vec!["attach".to_string(), handle.id.clone()];
-
-        if io.initial_size.is_some() {
-            return spawn_pty_bridged_apple_attach(io, argv, started_at, handle, bridge_cfg);
-        }
-
-        spawn_piped_apple_attach(io, argv, started_at, handle, bridge_cfg)
-    }
-}
-
-/// Spawn `container attach` via `portable-pty` and bridge through `AgentIo`.
-fn spawn_pty_bridged_apple_attach(
-    io: crate::engine::agent_runtime::frontend::AgentIo,
-    argv: Vec<String>,
-    started_at: chrono::DateTime<chrono::Utc>,
-    handle: crate::data::session::AgentHandle,
-    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
-) -> Result<AgentExecution, EngineError> {
-    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-
-    let (cols, rows) = io.initial_size.expect("PTY path requires initial_size");
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| EngineError::Container(format!("openpty: {e}")))?;
-
-    let mut cmd = CommandBuilder::new("container");
-    for arg in &argv {
-        cmd.arg(arg);
-    }
-
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| EngineError::Container(format!("spawn container attach via pty: {e}")))?;
-    let child_pid = child.process_id();
-
-    let (master_arc, bridge) =
-        crate::engine::container::io_bridge::bridge_pty(io, pair, bridge_cfg)?;
-
-    let backend = AppleAttachExecution {
-        child: None,
-        pty_child: Some(child),
-        pty_master: Some(master_arc),
-        stdin_injector: Some(bridge.stdin_injector),
-        child_pid,
-        started_at,
-    };
-    Ok(AgentExecution::new(
-        handle,
-        Box::new(backend),
-        bridge.stuck_tx,
-        Some(bridge.output_tail),
-    ))
-}
-
-/// Spawn `container attach` with piped stdio and bridge through `AgentIo`.
-fn spawn_piped_apple_attach(
-    io: crate::engine::agent_runtime::frontend::AgentIo,
-    argv: Vec<String>,
-    started_at: chrono::DateTime<chrono::Utc>,
-    handle: crate::data::session::AgentHandle,
-    bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
-) -> Result<AgentExecution, EngineError> {
-    let mut cmd = Command::new("container");
-    cmd.args(&argv);
-    cmd.stdin(Stdio::piped());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            EngineError::ContainerRuntimeUnavailable {
-                binary: "container".into(),
-            }
-        } else {
-            EngineError::Container(format!("spawn container attach: {e}"))
-        }
-    })?;
-    let child_pid = Some(child.id());
-
-    let bridge = crate::engine::container::io_bridge::bridge_piped(io, &mut child, bridge_cfg);
-    drop(bridge.stdin_injector);
-
-    let backend = AppleAttachExecution {
-        child: Some(child),
-        pty_child: None,
-        pty_master: None,
-        stdin_injector: None,
-        child_pid,
-        started_at,
-    };
-    Ok(AgentExecution::new(
-        handle,
-        Box::new(backend),
-        bridge.stuck_tx,
-        Some(bridge.output_tail),
-    ))
-}
-
-/// Execution backend for an Apple attach session. Cancellation kills only the
-/// local `container attach` client — never `container stop <name>`, because the
-/// target container belongs to another process.
-struct AppleAttachExecution {
-    child: Option<std::process::Child>,
-    pty_child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
-    pty_master: Option<std::sync::Arc<std::sync::Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
-    stdin_injector: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
-    child_pid: Option<u32>,
-    started_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl ExecutionBackend for AppleAttachExecution {
-    fn wait_blocking(mut self: Box<Self>) -> Result<AgentExitInfo, EngineError> {
-        if let Some(mut child) = self.pty_child.take() {
-            let status = child
-                .wait()
-                .map_err(|e| EngineError::Container(format!("wait container attach (pty): {e}")))?;
-            self.pty_master = None;
-            let exit_code = status.exit_code().try_into().unwrap_or(-1);
-            return Ok(AgentExitInfo {
-                exit_code,
-                signal: None,
-                started_at: self.started_at,
-                ended_at: chrono::Utc::now(),
-            });
-        }
-
-        let mut child = self
-            .child
-            .take()
-            .ok_or_else(|| EngineError::Container("execution already waited".into()))?;
-        let status = child
-            .wait()
-            .map_err(|e| EngineError::Container(format!("wait container attach: {e}")))?;
-        let exit_code = status.code().unwrap_or(-1);
-        #[cfg(unix)]
-        let signal = {
-            use std::os::unix::process::ExitStatusExt;
-            status.signal()
-        };
-        #[cfg(not(unix))]
-        let signal = None;
-        Ok(AgentExitInfo {
-            exit_code,
-            signal,
-            started_at: self.started_at,
-            ended_at: chrono::Utc::now(),
-        })
-    }
-
-    fn try_inject_stdin(&self, bytes: &[u8]) -> Result<bool, EngineError> {
-        if let Some(tx) = &self.stdin_injector {
-            tx.send(bytes.to_vec())
-                .map_err(|e| EngineError::Container(format!("inject stdin: {e}")))?;
-            return Ok(true);
-        }
-        Ok(false)
-    }
-
-    fn cancel(&self) -> Result<(), EngineError> {
-        crate::engine::container::docker::kill_local_exec(self.child_pid);
-        Ok(())
-    }
-
-    fn cancel_handle(&self) -> Option<crate::engine::agent_runtime::execution::CancelHandle> {
-        let pid = self.child_pid;
-        Some(crate::engine::agent_runtime::execution::CancelHandle::new(
-            move || {
-                crate::engine::container::docker::kill_local_exec(pid);
                 Ok(())
             },
         ))

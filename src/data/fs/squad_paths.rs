@@ -18,6 +18,9 @@ pub const SQUAD_SUBDIR: &str = "squad";
 /// Subdirectory holding per-task context directories.
 const TASKS_SUBDIR: &str = "tasks";
 
+/// Subdirectory holding per-task container image build logs.
+const BUILDS_SUBDIR: &str = "builds";
+
 /// Resolves every path under the squad storage root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SquadPaths {
@@ -83,6 +86,26 @@ impl SquadPaths {
             "task directory must reside under the squad tasks root",
         )?;
         Ok(base.join("workspace"))
+    }
+
+    /// Directory holding per-task container image build logs.
+    pub fn builds_dir(&self) -> PathBuf {
+        self.root.join(BUILDS_SUBDIR)
+    }
+
+    /// The image build-log directory for one task:
+    /// `<root>/builds/<name>/`. Validated the same way as [`task_dir`]
+    /// (a crafted `name` cannot escape via `..`).
+    ///
+    /// [`task_dir`]: SquadPaths::task_dir
+    pub fn task_builds_dir(&self, name: &str) -> Result<PathBuf, DataError> {
+        let base = self.builds_dir().join(name);
+        validate_under_root(
+            &self.builds_dir(),
+            &base,
+            "build-log directory must reside under the squad builds root",
+        )?;
+        Ok(base)
     }
 
     /// Create the root directory (and parents) on disk.

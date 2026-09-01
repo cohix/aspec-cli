@@ -801,8 +801,14 @@ fn render_squad_detail(state: &dialogs::SquadDetailState, area: Rect, frame: &mu
         TaskStatus::Active => "active",
         TaskStatus::Paused => "paused",
     };
-    let fields: Vec<Line> = vec![
-        squad_field_line("Description", &c.description),
+    // The description is free text and often longer than the modal is wide,
+    // so it renders as its own wrapped multi-line block rather than a single
+    // clipped `label: value` line. Capped at half the modal so a very long
+    // description can never squeeze out the run history.
+    let description_cap = (inner.height / 2).max(1) as usize;
+    let mut fields: Vec<Line> =
+        squad_description_lines(&c.description, inner.width as usize, description_cap);
+    fields.extend(vec![
         squad_field_line("Status", status),
         squad_field_line("Mount scope", mount),
         squad_field_line(
@@ -836,7 +842,7 @@ fn render_squad_detail(state: &dialogs::SquadDetailState, area: Rect, frame: &mu
             "Updated",
             &c.updated_at.format("%Y-%m-%d %H:%M").to_string(),
         ),
-    ];
+    ]);
     let field_h = fields.len() as u16;
 
     let chunks = Layout::vertical([
@@ -877,6 +883,92 @@ fn squad_field_line(label: &str, value: &str) -> Line<'static> {
         Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
         Span::raw(value.to_string()),
     ])
+}
+
+/// The detail modal's description block: the label line followed by the full
+/// description word-wrapped to `width`, indented two cells, and capped at
+/// `max_lines` total (an ellipsis line marks a capped description).
+fn squad_description_lines(
+    description: &str,
+    width: usize,
+    max_lines: usize,
+) -> Vec<Line<'static>> {
+    const INDENT: &str = "  ";
+    let wrap_width = width.saturating_sub(INDENT.len()).max(1);
+    let mut lines = vec![Line::from(Span::styled(
+        "Description:",
+        Style::default().fg(Color::DarkGray),
+    ))];
+    let mut wrapped: Vec<String> = description
+        .lines()
+        .flat_map(|line| wrap_display_width(line, wrap_width))
+        .collect();
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    let cap = max_lines.saturating_sub(1).max(1);
+    let truncated = wrapped.len() > cap;
+    wrapped.truncate(cap);
+    if truncated {
+        if let Some(last) = wrapped.last_mut() {
+            *last = format!("{last}\u{2026}");
+        }
+    }
+    lines.extend(
+        wrapped
+            .into_iter()
+            .map(|line| Line::from(Span::raw(format!("{INDENT}{line}")))),
+    );
+    lines
+}
+
+/// Greedy word wrap by display width. A single word wider than `width` is
+/// split mid-word rather than overflowing the modal.
+fn wrap_display_width(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    use unicode_width::UnicodeWidthStr;
+
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_w = 0usize;
+    for word in text.split_whitespace() {
+        let word_w = UnicodeWidthStr::width(word);
+        let sep_w = if current.is_empty() { 0 } else { 1 };
+        if current_w + sep_w + word_w <= width {
+            if sep_w == 1 {
+                current.push(' ');
+            }
+            current.push_str(word);
+            current_w += sep_w + word_w;
+            continue;
+        }
+        if !current.is_empty() {
+            out.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if word_w <= width {
+            current.push_str(word);
+            current_w = word_w;
+        } else {
+            // Split an over-wide word across as many lines as it needs.
+            for ch in word.chars() {
+                let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if current_w + ch_w > width && !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                    current_w = 0;
+                }
+                current.push(ch);
+                current_w += ch_w;
+            }
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
 }
 
 /// The run-history table (Started | Status | Finished | Error), scrolled by

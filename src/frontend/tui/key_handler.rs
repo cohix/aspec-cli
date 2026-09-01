@@ -140,11 +140,12 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
         return;
     }
 
-    // WI 0102: Ctrl-A inside the New Tab dialog opens the squad tab. Safe
-    // because keymap.rs already gates the global Ctrl-A -> PreviousTab mapping
-    // on `ctx != FocusContext::Dialog`, so the key is genuinely unclaimed here.
-    // Do NOT add a second global Ctrl-A mapping and do NOT relax that guard.
-    if key.code == KeyCode::Char('a')
+    // Ctrl-S inside the New Tab dialog opens the squad tab. Safe because the
+    // other Ctrl-S meanings (multiline submit, slot cycling) are gated on
+    // dialog types / no-dialog states that can never be the New Tab dialog,
+    // so the key is genuinely unclaimed here. Do NOT add a global Ctrl-S
+    // mapping for this — the binding is scoped to this one dialog.
+    if key.code == KeyCode::Char('s')
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && matches!(&app.active_dialog, Some(Dialog::TextInput { title, .. }) if title == "New Tab")
     {
@@ -173,7 +174,7 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 .to_string();
             app.active_dialog = Some(Dialog::TextInput {
                 title: "New Tab".to_string(),
-                prompt: "Working directory:\nPress Ctrl-A to open squad".to_string(),
+                prompt: "Working directory:\nPress Ctrl-S to open squad".to_string(),
                 editor: {
                     let mut ed = text_edit::TextEdit::new(false);
                     ed.set_text(&cwd);

@@ -837,13 +837,13 @@ fn squad_list_app() -> App {
 }
 
 #[test]
-fn ctrl_t_new_tab_dialog_shows_press_ctrl_a_hint() {
+fn ctrl_t_new_tab_dialog_shows_press_ctrl_s_hint() {
     let mut app = make_app();
     press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
     match &app.active_dialog {
         Some(Dialog::TextInput { prompt, .. }) => {
             assert!(
-                prompt.contains("Press Ctrl-A to open squad"),
+                prompt.contains("Press Ctrl-S to open squad"),
                 "New Tab prompt must hint at squad: {prompt:?}"
             );
         }
@@ -852,28 +852,28 @@ fn ctrl_t_new_tab_dialog_shows_press_ctrl_a_hint() {
 }
 
 #[test]
-fn ctrl_a_in_new_tab_dialog_focuses_existing_squad_tab_and_closes_dialog() {
+fn ctrl_s_in_new_tab_dialog_focuses_existing_squad_tab_and_closes_dialog() {
     let mut app = make_app();
     let squad_idx = push_squad_tab(&mut app);
     app.active_tab = 0; // back on the normal tab
     press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
     assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
-    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    press_key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
     assert!(
         app.active_dialog.is_none(),
-        "Ctrl-A in the New Tab dialog must close it"
+        "Ctrl-S in the New Tab dialog must close it"
     );
     assert_eq!(
         app.active_tab, squad_idx,
-        "Ctrl-A must activate the squad tab"
+        "Ctrl-S must activate the squad tab"
     );
 }
 
-// The load-bearing test for the Ctrl-A binding (implementation-contract.md
-// §2.8): the New Tab dialog is the ONLY thing that reroutes Ctrl-A to squad.
-// Both directions are asserted with three tabs open, so "previous tab" (tab
-// 0) and "the squad tab" (tab 2) are distinct and the two behaviors can't be
-// confused with one another.
+// The load-bearing tests for the Ctrl-S binding: the New Tab dialog is the
+// ONLY place Ctrl-S opens squad, and rerouting it there must not disturb the
+// global Ctrl-A previous-tab navigation. Three tabs are open so "previous
+// tab" (tab 0) and "the squad tab" (tab 2) are distinct and the two behaviors
+// can't be confused with one another.
 #[test]
 fn ctrl_a_without_dialog_switches_to_previous_tab_and_does_not_open_squad() {
     let mut app = make_app(); // tab 0
@@ -893,17 +893,17 @@ fn ctrl_a_without_dialog_switches_to_previous_tab_and_does_not_open_squad() {
 }
 
 #[test]
-fn ctrl_a_with_new_tab_dialog_open_opens_squad_and_does_not_switch_tabs() {
+fn ctrl_s_with_new_tab_dialog_open_opens_squad_and_does_not_switch_tabs() {
     let mut app = make_app(); // tab 0
     app.add_tab(make_session()); // tab 1
     let squad_idx = push_squad_tab(&mut app); // tab 2 == squad
     app.active_tab = 1; // sit on the middle tab: "previous" (0) != squad (2)
     press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
     assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
-    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    press_key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
     assert_eq!(
         app.active_tab, squad_idx,
-        "Ctrl-A inside the New Tab dialog must open the squad tab"
+        "Ctrl-S inside the New Tab dialog must open the squad tab"
     );
     assert_ne!(
         app.active_tab, 0,

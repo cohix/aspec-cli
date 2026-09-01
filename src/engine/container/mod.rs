@@ -10,6 +10,7 @@
 //! `AgentHandle`, …) live in `src/engine/agent_runtime/`.
 
 mod apple;
+mod attach_socket;
 mod backend;
 pub mod background;
 pub mod display;

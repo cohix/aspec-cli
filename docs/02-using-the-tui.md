@@ -597,11 +597,11 @@ squad — awman's always-on task-watching daemon — gets its own singleton
 tab inside this same multi-tab TUI rather than a separate program. Open it
 either of two ways:
 
-- Press **Ctrl+T** to open the New Tab dialog, then press **Ctrl-A** while
-  it's focused. The dialog's prompt shows a hint — "Press Ctrl-A to open
-  squad" — as a reminder. This doesn't add a second global `Ctrl-A` binding:
-  outside the New Tab dialog, `Ctrl-A` still switches to the previous tab as
-  usual.
+- Press **Ctrl+T** to open the New Tab dialog, then press **Ctrl-S** while
+  it's focused. The dialog's prompt shows a hint — "Press Ctrl-S to open
+  squad" — as a reminder. This doesn't add a second global `Ctrl-S` binding:
+  outside the New Tab dialog, `Ctrl-S` keeps its usual meanings (cycling
+  parallel container slots, submitting multiline dialogs).
 - Run `awman squad` with no subcommand from a terminal (with a TTY attached
   and no `-n`/`--json`); awman opens the TUI pre-focused on the squad tab.
 

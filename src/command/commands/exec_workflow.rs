@@ -2856,6 +2856,21 @@ fn worktree_git_status(worktree: &std::path::Path) -> String {
         .unwrap_or_default()
 }
 
+/// Where an image build's raw output stream goes when it is not wanted in the
+/// caller's message sink. The squad daemon implements this with a per-build
+/// log file so build output never floods the daemon log; `begin`/`finish` are
+/// its hooks for the lifecycle messages (including the log file's path) that
+/// replace the streamed lines.
+pub(crate) trait BuildOutputTarget {
+    /// A build for `image` is actually starting (never called when the image
+    /// already exists).
+    fn begin(&mut self, image: &str);
+    /// One line of raw build output.
+    fn line(&mut self, line: &str);
+    /// The build ended; `error` is `Some` on failure.
+    fn finish(&mut self, image: &str, error: Option<&str>);
+}
+
 /// Ensure a Dockerfile-backed agent image is available for a container runtime,
 /// building it from `.awman/Dockerfile.<agent>` when missing (WI-0092 §9b).
 /// A missing Dockerfile is a hard error; a build failure is a hard error and
@@ -2866,6 +2881,20 @@ pub(crate) fn ensure_agent_image(
     paths: &crate::data::RepoDockerfilePaths,
     agent: &str,
     sink: &mut dyn UserMessageSink,
+) -> Result<(), CommandError> {
+    ensure_agent_image_with_build_output(engines, git_root, paths, agent, sink, None)
+}
+
+/// [`ensure_agent_image`] with the raw build output optionally redirected to a
+/// [`BuildOutputTarget`] instead of streaming through `sink`. Lifecycle
+/// messages still go to `sink` either way.
+pub(crate) fn ensure_agent_image_with_build_output(
+    engines: &Engines,
+    git_root: &std::path::Path,
+    paths: &crate::data::RepoDockerfilePaths,
+    agent: &str,
+    sink: &mut dyn UserMessageSink,
+    mut build_output: Option<&mut dyn BuildOutputTarget>,
 ) -> Result<(), CommandError> {
     let runtime = engines
         .require_container_runtime()
@@ -2885,19 +2914,40 @@ pub(crate) fn ensure_agent_image(
         level: MessageLevel::Info,
         text: format!("Building image for agent '{agent}' ({tag})…"),
     });
-    runtime
-        .build_image(&tag, &dockerfile, git_root, false, &mut |line: &str| {
-            sink.write_message(UserMessage {
-                level: MessageLevel::Info,
-                text: line.to_string(),
-            });
-        })
+    if let Some(target) = build_output.as_mut() {
+        target.begin(&tag);
+    }
+    let build_result = runtime
+        .build_image(
+            &tag,
+            &dockerfile,
+            git_root,
+            false,
+            &mut |line: &str| match build_output.as_mut() {
+                Some(target) => target.line(line),
+                None => sink.write_message(UserMessage {
+                    level: MessageLevel::Info,
+                    text: line.to_string(),
+                }),
+            },
+        )
         .map_err(|e| {
             CommandError::Other(format!(
                 "failed to build image for agent '{agent}' from {}: {e}",
                 dockerfile.display()
             ))
-        })?;
+        });
+    if let Some(target) = build_output.as_mut() {
+        target.finish(
+            &tag,
+            build_result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .as_deref(),
+        );
+    }
+    build_result?;
     sink.write_message(UserMessage {
         level: MessageLevel::Info,
         text: format!("Built image for agent '{agent}'."),

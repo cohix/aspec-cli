@@ -26,7 +26,9 @@ pub mod verdict;
 pub use evaluator::{
     EvaluationOutcome, EvaluationRequest, NoRunProgress, RunProgress, TaskEvaluator,
 };
-pub use launcher::{ensure_directory_workspace_project, LeaderRunSpec, SquadAgentLauncher};
+pub use launcher::{
+    drive_unattended_agent, ensure_directory_workspace_project, LeaderRunSpec, SquadAgentLauncher,
+};
 pub use scheduler::{SchedulerStatus, SquadScheduler, TICK_INTERVAL};
 pub use verdict::{
     read_verdict, verdict_path, RunVerdict, VerdictError, RUN_DIR_CONTAINER_PATH, VERDICT_FILE_NAME,

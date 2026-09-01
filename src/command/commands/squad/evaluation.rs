@@ -19,9 +19,10 @@ use async_trait::async_trait;
 
 use crate::command::commands::dynamic_repair::{RepairDecision, WorkflowRepairLoop};
 use crate::command::commands::exec_workflow::{
-    build_effective_agents_to_models, ensure_agent_image, format_agents_with_models,
-    format_available_agents, validate_generated_workflow, ExecWorkflowCommand,
-    ExecWorkflowCommandFlags, ExecWorkflowCommandFrontend, LeaderSpec,
+    build_effective_agents_to_models, ensure_agent_image_with_build_output,
+    format_agents_with_models, format_available_agents, validate_generated_workflow,
+    BuildOutputTarget, ExecWorkflowCommand, ExecWorkflowCommandFlags, ExecWorkflowCommandFrontend,
+    LeaderSpec,
 };
 use crate::command::commands::mount_scope::MountScopeDecision;
 use crate::command::commands::squad::runtime_guard::require_container_tier;
@@ -293,6 +294,7 @@ impl LocalTaskEvaluator {
         root: &Path,
         agents: &[String],
         sink: &mut dyn UserMessageSink,
+        build_logs: &mut SquadBuildLogs,
     ) -> Result<(), CommandError> {
         crate::engine::squad::ensure_directory_workspace_project(root, agents)
             .map_err(CommandError::from)?;
@@ -310,20 +312,22 @@ impl LocalTaskEvaluator {
             level: MessageLevel::Info,
             text: format!("Building base image for the task workspace ({project_tag})…"),
         });
-        runtime
+        build_logs.begin(&project_tag);
+        let result = runtime
             .build_image(&project_tag, &dockerfile, root, false, &mut |line: &str| {
-                sink.write_message(UserMessage {
-                    level: MessageLevel::Info,
-                    text: line.to_string(),
-                });
+                build_logs.line(line);
             })
             .map_err(|error| {
                 CommandError::Other(format!(
                     "failed to build the task workspace's base image from {}: {error}",
                     dockerfile.display()
                 ))
-            })?;
-        Ok(())
+            });
+        build_logs.finish(
+            &project_tag,
+            result.as_ref().err().map(|e| e.to_string()).as_deref(),
+        );
+        result
     }
 
     async fn evaluate_inner(
@@ -340,6 +344,10 @@ impl LocalTaskEvaluator {
         let git_root = session.git_root().to_path_buf();
 
         let mut sink = TracingSink::new(&task.name);
+        // Raw container image build output goes to per-build files under
+        // `<squad root>/builds/<task>/`, never into the daemon log; the daemon
+        // log gets one lifecycle line per build naming the file instead.
+        let mut build_logs = SquadBuildLogs::new(&self.env, &task.name, &request.run_id)?;
 
         // A directory-workspace task's root is a plain directory, not a
         // repository, so it carries none of the image definitions
@@ -359,6 +367,7 @@ impl LocalTaskEvaluator {
                     session.default_agent().map(|a| a.as_str()),
                 ),
                 &mut sink,
+                &mut build_logs,
             )?;
         }
 
@@ -394,12 +403,13 @@ impl LocalTaskEvaluator {
             session.default_agent().map(|a| a.as_str()),
         )?;
         let agent = AgentName::new(leader.agent.clone()).map_err(CommandError::Data)?;
-        ensure_agent_image(
+        ensure_agent_image_with_build_output(
             &self.engines,
             &git_root,
             &dockerfiles,
             agent.as_str(),
             &mut sink,
+            Some(&mut build_logs),
         )?;
 
         // `guidance` is additive and never overridden by a task, so it is
@@ -543,6 +553,28 @@ impl LocalTaskEvaluator {
             workflow_path = %generated_path.display(),
             "squad workflow generated and validated"
         );
+
+        // Build any missing step-agent images before execution, exactly as the
+        // dynamic path does (WI-0092 §9b) — the generated workflow may pick
+        // agents other than the leader. Build output goes to the per-build log
+        // files, not the daemon log.
+        let workflow_agents =
+            crate::command::commands::exec_workflow::resolve_and_validate_workflow_agents(
+                &workflow,
+                &session,
+                &dockerfiles,
+            )
+            .map_err(CommandError::Other)?;
+        for step_agent in &workflow_agents {
+            ensure_agent_image_with_build_output(
+                &self.engines,
+                &git_root,
+                &dockerfiles,
+                step_agent,
+                &mut sink,
+                Some(&mut build_logs),
+            )?;
+        }
 
         // Record the engine's own state file on the run row *before* the
         // workflow starts, so the daemon's workflow route can serve live state.
@@ -811,6 +843,107 @@ fn mount_scope_decision(scope: MountScope) -> MountScopeDecision {
         // asked. Answering "mount the root" keeps the never-widen invariant
         // trivially true either way.
         MountScope::Directory => MountScopeDecision::MountGitRoot,
+    }
+}
+
+/// Per-build log files for one run's container image builds, plus the
+/// lifecycle lines the daemon log carries instead of the raw build stream.
+///
+/// Files live at `<squad root>/builds/<task>/<run-id>-<n>.log` — one file per
+/// build that actually happens (`begin` is only called when an image is
+/// missing, so an image-exists fast path never leaves an empty file behind).
+pub(crate) struct SquadBuildLogs {
+    task: String,
+    dir: std::path::PathBuf,
+    run_id: String,
+    seq: u32,
+    current: Option<(std::path::PathBuf, std::fs::File)>,
+}
+
+impl SquadBuildLogs {
+    pub(crate) fn new(
+        env: &EnvSnapshot,
+        task: &str,
+        run_id: &crate::data::fs::RunId,
+    ) -> Result<Self, CommandError> {
+        let paths = crate::data::fs::SquadPaths::from_env(env).map_err(CommandError::Data)?;
+        let dir = paths.task_builds_dir(task).map_err(CommandError::Data)?;
+        std::fs::create_dir_all(&dir).map_err(|error| {
+            CommandError::Other(format!(
+                "preparing squad build-log directory {}: {error}",
+                dir.display()
+            ))
+        })?;
+        Ok(Self {
+            task: task.to_string(),
+            dir,
+            run_id: run_id.as_str().to_string(),
+            seq: 0,
+            current: None,
+        })
+    }
+}
+
+impl BuildOutputTarget for SquadBuildLogs {
+    fn begin(&mut self, image: &str) {
+        self.seq += 1;
+        let path = self.dir.join(format!("{}-{}.log", self.run_id, self.seq));
+        match std::fs::File::create(&path) {
+            Ok(file) => {
+                tracing::info!(
+                    task = %self.task,
+                    image,
+                    log_path = %path.display(),
+                    "squad container image build started"
+                );
+                self.current = Some((path, file));
+            }
+            Err(error) => {
+                // The build still proceeds; its output is simply dropped
+                // rather than rerouted into the daemon log.
+                tracing::error!(
+                    task = %self.task,
+                    image,
+                    log_path = %path.display(),
+                    error = %error,
+                    "squad failed to open container image build log"
+                );
+            }
+        }
+    }
+
+    fn line(&mut self, line: &str) {
+        use std::io::Write;
+        if let Some((_, file)) = self.current.as_mut() {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    fn finish(&mut self, image: &str, error: Option<&str>) {
+        use std::io::Write;
+        let path = self.current.take().map(|(path, mut file)| {
+            let _ = file.flush();
+            path
+        });
+        let log_path = path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(no log file)".to_string());
+        match error {
+            None => tracing::info!(
+                task = %self.task,
+                image,
+                log_path,
+                "squad container image build finished"
+            ),
+            Some(error) => tracing::error!(
+                task = %self.task,
+                image,
+                log_path,
+                error,
+                "squad container image build failed"
+            ),
+        }
     }
 }
 

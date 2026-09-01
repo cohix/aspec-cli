@@ -143,6 +143,12 @@ fn render_task_grid(tasks: &[Task], selected: usize, area: Rect, frame: &mut Fra
         .spacing(CARD_ROW_SPACING)
         .split(area);
 
+    // A card never spans more than half the grid width: with few columns the
+    // remaining width is left empty rather than stretching one card across the
+    // whole tab. On a terminal too narrow for a half-width card to reach the
+    // minimum card width, the minimum wins and the card may exceed half.
+    let card_width = grid_card_width(area.width, columns);
+
     for (ri, row_area) in row_areas.iter().enumerate() {
         let row = start_row + ri;
         let row_start = row * columns;
@@ -151,8 +157,12 @@ fn render_task_grid(tasks: &[Task], selected: usize, area: Rect, frame: &mut Fra
         if n == 0 {
             continue;
         }
-        let col_constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Fill(1)).collect();
+        let col_constraints: Vec<Constraint> =
+            (0..n).map(|_| Constraint::Length(card_width)).collect();
+        // Flex::Start pins every card to its fixed width: leftover row width
+        // stays empty instead of stretching the final card back to full width.
         let col_areas = Layout::horizontal(col_constraints)
+            .flex(ratatui::layout::Flex::Start)
             .spacing(CARD_COL_SPACING)
             .split(*row_area);
         for (ci, card_area) in col_areas.iter().enumerate() {
@@ -162,6 +172,18 @@ fn render_task_grid(tasks: &[Task], selected: usize, area: Rect, frame: &mut Fra
     }
 
     columns
+}
+
+/// The width every card in the grid renders at: an even share of the grid
+/// width, capped at half of it (WI fix: a lone column must not produce a
+/// full-width card). `CARD_MIN_WIDTH` still wins over the half-width cap so
+/// narrow terminals keep a readable card.
+fn grid_card_width(area_width: u16, columns: usize) -> u16 {
+    let columns = (columns.max(1)) as u16;
+    let total_spacing = CARD_COL_SPACING * columns.saturating_sub(1);
+    let share = area_width.saturating_sub(total_spacing) / columns;
+    let cap = (area_width / 2).max(CARD_MIN_WIDTH.min(area_width));
+    share.min(cap).max(1)
 }
 
 /// A message in place of the grid when there are no tasks — never a
@@ -231,10 +253,14 @@ fn render_task_card(task: &Task, is_selected: bool, area: Rect, frame: &mut Fram
     // `next_evaluation` already renders it as the next-evaluation answer.
     //
     // No `.wrap()`: each `Line` is horizontally clipped to `inner.width` by
-    // the buffer, which is the truncation the table's cells used to give the
-    // description/summary column for free.
+    // the buffer. The description is truncated explicitly (with an ellipsis)
+    // to the card's actual inner width so the cut is visible rather than a
+    // silent clip.
     let lines = vec![
-        Line::from(Span::raw(first_line(&task.description))),
+        Line::from(Span::raw(truncate_to_width(
+            &first_line(&task.description),
+            inner.width as usize,
+        ))),
         Line::from(vec![
             Span::styled("Last run: ", Style::default().fg(Color::DarkGray)),
             Span::raw(last_run_outcome(task)),
@@ -271,6 +297,31 @@ fn first_line(description: &str) -> String {
     description.lines().next().unwrap_or("").to_string()
 }
 
+/// Truncate `text` to at most `width` display cells, ending in an ellipsis
+/// when anything was cut. Width-aware so wide characters never overflow the
+/// card border.
+fn truncate_to_width(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    use unicode_width::UnicodeWidthStr;
+
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let budget = width.saturating_sub(1); // reserve one cell for the ellipsis
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
+}
+
 /// Format a timestamp for the card fields.
 fn format_time(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format("%Y-%m-%d %H:%M").to_string()
@@ -293,4 +344,39 @@ fn next_evaluation(task: &Task) -> String {
         }
     }
     format_time(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grid_card_width, truncate_to_width, CARD_MIN_WIDTH};
+
+    #[test]
+    fn a_single_column_card_is_capped_at_half_the_grid_width() {
+        assert_eq!(
+            grid_card_width(120, 1),
+            60,
+            "one column must not span the tab"
+        );
+        // Two columns already share the width below the cap.
+        assert_eq!(grid_card_width(120, 2), 59);
+    }
+
+    #[test]
+    fn the_minimum_card_width_survives_a_narrow_terminal() {
+        // Half of 40 is 20, below the 30-cell minimum: the minimum wins.
+        assert_eq!(grid_card_width(40, 1), CARD_MIN_WIDTH);
+        // Narrower than the minimum itself: the card takes what exists.
+        assert_eq!(grid_card_width(20, 1), 20);
+    }
+
+    #[test]
+    fn descriptions_are_truncated_with_an_ellipsis_to_the_card_width() {
+        assert_eq!(truncate_to_width("short", 28), "short");
+        assert_eq!(
+            truncate_to_width("a very long description that cannot fit", 12),
+            "a very long\u{2026}"
+        );
+        // Width-aware: wide characters count as two cells.
+        assert_eq!(truncate_to_width("日本語テスト", 5), "日本\u{2026}");
+    }
 }

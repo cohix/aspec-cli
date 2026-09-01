@@ -1,13 +1,14 @@
-//! WI 0101 — `AgentRuntimeEngine::attach` against a container started by a
-//! **different process**.
+//! WI 0101/0106 — `AgentRuntimeEngine::attach` against a container started by
+//! a **different process**.
 //!
-//! Starts a plain container with a raw `docker run` (not through awman at
-//! all — the point is that awman never spawned it), attaches to it via
-//! `ContainerRuntime::attach`, proves the resulting `AgentInstance`'s
-//! `run_with_frontend` streams live output (round-tripping a command through
-//! the attached shell's stdin/stdout), and proves that ending the attach
-//! session (`AgentExecution::cancel`) does **not** stop the target container
-//! — only the local `docker exec` client dies, matching `AttachExecution`'s
+//! Starts an interactive (`-it`) container with a raw `docker run` (not
+//! through awman at all — the point is that awman never spawned it), attaches
+//! to it via `ContainerRuntime::attach`, and proves the WI 0106 contract:
+//! attach reconnects to the container's **PID-1 process's existing TTY**
+//! (`docker attach`), not a sibling shell — round-tripping input through the
+//! primary process's stdin/stdout — and ending the attach session
+//! (`AgentExecution::cancel`) does **not** stop the target container — only
+//! the local `docker attach` client dies, matching `AttachExecution`'s
 //! documented contract (`src/engine/container/docker.rs`).
 //!
 //! Gated on Docker availability; skips cleanly otherwise.
@@ -123,18 +124,20 @@ async fn attach_to_foreign_container_streams_output_and_exit_does_not_stop_it() 
     );
 
     // Started by an entirely separate process — a raw `docker run`, never
-    // going through awman's own build/run path.
+    // going through awman's own build/run path. `-it` matters: squad launches
+    // every agent PTY-backed, and `docker attach` reconnects to that primary
+    // process's TTY (WI 0106 §3c), so the target must have one. PID 1 is an
+    // interactive shell — the process attach must reach directly.
     let status = Command::new("docker")
         .args([
             "run",
-            "-d",
+            "-dit",
             "--name",
             &name,
             "-w",
             "/workspace",
             "alpine:latest",
-            "sleep",
-            "300",
+            "sh",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -171,8 +174,9 @@ async fn attach_to_foreign_container_streams_output_and_exit_does_not_stop_it() 
             .run_with_frontend(Box::new(frontend))
             .expect("run_with_frontend must succeed");
 
-        // Give the exec'd shell a moment to come up, then drive it — this is
-        // what proves the bridge is genuinely live, not just "didn't error".
+        // Give the attach client a moment to connect, then drive the
+        // container's PID-1 shell through it — this is what proves the bridge
+        // reconnects to the primary process, not just "didn't error".
         tokio::time::sleep(Duration::from_millis(800)).await;
         let stdin_tx = captured
             .stdin_tx
@@ -203,7 +207,7 @@ async fn attach_to_foreign_container_streams_output_and_exit_does_not_stop_it() 
         }
 
         // End the attach session. This must kill only the local `docker
-        // exec` client, never the target container.
+        // attach` client, never the target container.
         execution.cancel().expect("cancel must succeed");
         let _ = tokio::time::timeout(Duration::from_secs(10), execution.wait()).await;
     })

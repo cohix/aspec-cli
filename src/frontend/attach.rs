@@ -60,7 +60,12 @@ pub fn label_with_step_names(candidates: &mut [SquadContainer], state: &Workflow
             continue;
         };
         for candidate in candidates.iter_mut() {
-            if candidate.handle.id == container_id.as_str() {
+            // The engine records the container *name* as the step's id, while
+            // runtime discovery reports real runtime ids — accept either, so
+            // step labels actually resolve.
+            if candidate.handle.id == container_id.as_str()
+                || candidate.handle.name == container_id.as_str()
+            {
                 candidate.label = step_name.clone();
             }
         }
@@ -144,6 +149,24 @@ mod tests {
                 started_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
             },
         }
+    }
+
+    /// The workflow engine publishes the container *name* as the step's
+    /// `container_id`, while runtime discovery reports real runtime ids —
+    /// labeling must resolve on either, or step names never appear.
+    #[test]
+    fn step_labels_resolve_when_the_daemon_publishes_a_container_name() {
+        use crate::data::workflow_state::{StepState, WorkflowState};
+        let mut candidates = vec![candidate("aaaa1111bbbb", "awman-squad-t-00000001")];
+        let mut state = WorkflowState::new("wf".to_string(), &[], "hash".to_string(), None);
+        state.step_states.insert(
+            "build".to_string(),
+            StepState::Running {
+                container_id: Some("awman-squad-t-00000001".to_string()),
+            },
+        );
+        label_with_step_names(&mut candidates, &state);
+        assert_eq!(candidates[0].label, "build");
     }
 
     #[test]

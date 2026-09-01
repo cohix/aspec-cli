@@ -129,6 +129,12 @@ templates `awman init` uses. Both are written only if absent: edit either one
 to control how the task's containers are built, and squad will leave your
 version alone from then on.
 
+Images built from a default task workspace are tagged with the task's own
+name — `awman-squad-<name>:latest` for the base image and
+`awman-squad-<name>-<agent>:latest` per agent — so two tasks never share or
+overwrite each other's images. (A custom workspace that is a repository uses
+the same folder-derived tags as any other awman project in that repository.)
+
 Whether the task uses the default workspace or a custom path, the durable
 task workspace is also available to its containers through the
 `context(workflow)` location. This gives custom-workspace tasks a stable place
@@ -173,13 +179,13 @@ happen to have `awman` open.
 
 Two ways to get there:
 
-- **`Ctrl-A` from the New Tab dialog.** Press **Ctrl-T** to open a new tab,
-  and the prompt shows a second line — "Press Ctrl-A to open squad" —
-  alongside the usual working-directory prompt. Pressing **Ctrl-A** while
+- **`Ctrl-S` from the New Tab dialog.** Press **Ctrl-T** to open a new tab,
+  and the prompt shows a second line — "Press Ctrl-S to open squad" —
+  alongside the usual working-directory prompt. Pressing **Ctrl-S** while
   that dialog is focused closes the dialog and opens (or focuses) the squad
   tab instead of creating a directory-bound tab. This doesn't change what
-  `Ctrl-A` does anywhere else — outside that dialog it still switches to the
-  previous tab.
+  `Ctrl-S` does anywhere else — outside that dialog it keeps its usual
+  meanings (cycling parallel container slots, submitting multiline dialogs).
 - **Bare `awman squad` in a terminal.** Run `awman squad` with no subcommand
   in a TTY (and without `-n`/`--json`) and awman opens the TUI pre-focused
   on the squad tab.
@@ -286,6 +292,24 @@ streaming — those are direct connections to the container runtime, not
 proxied through the daemon — but the Workflow Overview freezes and the tab
 shows a "daemon not reachable" indicator until the daemon comes back.
 
+If the local attach client itself dies (for example, the container stopped a
+moment earlier), the session ends and the client's exit code and final output
+are written to the tab's status log, so a failed attach explains itself
+rather than silently returning to the task grid.
+
+Attach works on both runtimes, through different plumbing with the same
+semantics. On **docker**, attach is a native `docker attach` to the agent's
+TTY. Apple's `container` CLI has no attach verb, so on **apple-containers**
+the awman process that launched the agent (the squad daemon, for squad tasks)
+serves the agent's live terminal on a local, user-private socket, and attach
+connects to that. Either way you reach the real agent TUI, several clients
+can attach at once, and detaching never stops the container.
+
+The one Apple-specific caveat: the launching process is the only holder of
+the agent's terminal there, so if it has exited (say, the daemon was
+restarted mid-run), attach reports that there is no live attach endpoint —
+the agent's per-run log file still has everything it printed.
+
 ---
 
 ## Guardrails for unattended execution
@@ -306,10 +330,15 @@ fixed set of guardrails to every run rather than leaving them optional:
   repository are mounted directly and never use a worktree. This decision is
   made when the task is created.
 - **Every run is autonomous and PTY-backed.** There's no human around to
-  answer a permission prompt, so generated workflows use the same
-  auto-advance guardrails as `--yolo` — see [Permission modes](03-agent-sessions.md#permission-modes).
-  Agents still run in a terminal-sized PTY so attaching later shows the real
-  interactive agent interface.
+  answer a permission prompt, so the evaluation leader and every generated
+  workflow run under the same auto-advance guardrails as `--yolo` — see
+  [Permission modes](03-agent-sessions.md#permission-modes). An agent that
+  goes quiet starts the standard stuck detection and 60-second yolo
+  countdown; if it stays idle the run advances past it automatically, exactly
+  as a dynamic workflow would. The countdown's start, cancellation, and
+  auto-advance are recorded in the daemon log (never each tick). Agents still
+  run in a terminal-sized PTY so attaching later shows the real interactive
+  agent interface.
 - **The durable workspace is preserved.** Squad never clears task files
   between runs. The task workspace is also mounted at the stable
   `context(workflow)` location, including for custom-workspace tasks.
@@ -431,6 +460,17 @@ The evaluation agent and every generated-workflow container use this layout.
 The files are written as the run progresses, so output remains available even
 if a run stops unexpectedly. The daemon log and these per-container logs are
 separate: use the latter when you need an agent's detailed terminal output.
+
+Container *image build* output is kept out of the daemon log the same way.
+Each build a task triggers writes its full output to its own file:
+
+```text
+~/.awman/squad/builds/<name>/<run-id>-<n>.log
+```
+
+The daemon log records one lifecycle line when a build starts and one when it
+finishes or fails, each naming the image and the path of that build's log
+file.
 
 At the end of an evaluation, the leader records whether the task was
 triggered for that specific run. An older `workflow.toml` by itself is not
