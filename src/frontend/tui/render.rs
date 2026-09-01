@@ -17,11 +17,11 @@ use crate::frontend::tui::tabs::{
 };
 use crate::frontend::tui::workflow_view;
 
-mod amie;
 mod command_box;
 mod dialog;
 mod execution_window;
 mod sidebar;
+mod squad;
 mod status_bar;
 mod tab_bar;
 #[cfg(test)]
@@ -137,13 +137,13 @@ pub fn render_frame(app: &mut App, frame: &mut Frame) {
     .split(main_area);
 
     tab_bar::render_tab_bar(app, chunks[0], frame);
-    // WI 0102: the amie tab replaces the execution-window body with the
-    // condition list. While an attach session owns the tab's slots the normal
+    // WI 0102: the squad tab replaces the execution-window body with the
+    // task list. While an attach session owns the tab's slots the normal
     // execution/container rendering applies unchanged, which is what makes
     // attach reproduce the `exec workflow --dynamic` UX with no renderer
     // changes (see WI 0102 §0.3).
-    if app.active_tab().is_amie && app.active_tab().container_slots.is_empty() {
-        amie::render_amie_body(app, chunks[1], frame);
+    if app.active_tab().is_squad && app.active_tab().container_slots.is_empty() {
+        squad::render_squad_body(app, chunks[1], frame);
     } else {
         execution_window::render_execution_window(app, chunks[1], frame);
     }

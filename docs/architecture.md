@@ -499,7 +499,7 @@ impl EnvSnapshot {
     pub fn remote_addr(&self) -> Option<&str>;       // AWMAN_REMOTE_ADDR
     pub fn remote_session(&self) -> Option<&str>;    // AWMAN_REMOTE_SESSION
     pub fn api_key(&self) -> Option<&str>;           // AWMAN_API_KEY
-    pub fn amie_key(&self) -> Option<&str>;          // AWMAN_AMIE_KEY
+    pub fn squad_key(&self) -> Option<&str>;          // AWMAN_SQUAD_KEY
     pub fn shell(&self) -> Option<&str>;             // SHELL
 }
 ```
@@ -516,8 +516,8 @@ Defined constants for every env var awman reads:
 | `AWMAN_REMOTE_ADDR` | `AWMAN_REMOTE_ADDR` | Override remote server address |
 | `AWMAN_REMOTE_SESSION` | `AWMAN_REMOTE_SESSION` | Sticky session id for remote ops |
 | `AWMAN_API_KEY` | `AWMAN_API_KEY` | API key for API server |
-| `AWMAN_AMIE_KEY` | `AWMAN_AMIE_KEY` | Bearer key for the amie daemon |
-| `SHELL` | `SHELL` | Login shell, used only to tailor the amie key-export snippet |
+| `AWMAN_SQUAD_KEY` | `AWMAN_SQUAD_KEY` | Bearer key for the squad daemon |
+| `SHELL` | `SHELL` | Login shell, used only to tailor the squad key-export snippet |
 
 #### `FlagConfig` (`config/flags.rs`)
 
@@ -593,7 +593,7 @@ impl SqliteSessionStore {
 }
 ```
 
-`SqliteSessionStore::open_at(path)` opens the database at `path`, enables WAL mode, and runs schema migrations idempotently. The database is shared by API mode and the amie daemon and lives at `<data_home>/data/awman.db`; it carries the `sessions` and `commands` tables plus amie's `amie_conditions` and `amie_runs`.
+`SqliteSessionStore::open_at(path)` opens the database at `path`, enables WAL mode, and runs schema migrations idempotently. The database is shared by API mode and the squad daemon and lives at `<data_home>/data/awman.db`; it carries the `sessions` and `commands` tables plus squad's `squad_tasks` and `squad_runs`.
 
 `SessionRecord` and `CommandRecord` are plain structs (no Arc, no async) that carry the persisted metadata fields.
 

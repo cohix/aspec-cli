@@ -224,7 +224,7 @@ async fn auth_middleware(
     next: axum::middleware::Next,
 ) -> Response {
     // State extraction only: the decision itself lives in one shared place so
-    // the API and amie daemons can never diverge on how a key is accepted.
+    // the API and squad daemons can never diverge on how a key is accepted.
     if let Some(rejection) =
         crate::frontend::api::serve::check_bearer_auth(&state.auth_mode, req.headers())
     {

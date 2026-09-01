@@ -12,7 +12,7 @@ use crate::command::error::CommandError;
 use crate::data::config::env::Env;
 use crate::data::fs::daemon_guard::{AcquireError, DaemonGuard, DaemonKind};
 use crate::data::fs::daemon_process::{
-    self, API_PLIST_LABEL, API_UNIT_NAME, DaemonProcess, ServerMeta, Termination,
+    self, DaemonProcess, ServerMeta, Termination, API_PLIST_LABEL, API_UNIT_NAME,
 };
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
 use crate::engine::auth::TlsMaterial;
@@ -184,7 +184,7 @@ async fn run_start(
     let guard = DaemonGuard::with_paths(
         DaemonKind::Api,
         api_paths,
-        &crate::data::fs::AmiePaths::from_env(&Env::from_process()).map_err(CommandError::Data)?,
+        &crate::data::fs::SquadPaths::from_env(&Env::from_process()).map_err(CommandError::Data)?,
     );
 
     // Resolve workdirs by merging CLI --workdirs with the global API config.
@@ -243,7 +243,7 @@ async fn run_start(
 
     // Background mode: spawn a child process and exit.
     if flags.background {
-        // Refuse to start if the amie daemon is running.
+        // Refuse to start if the squad daemon is running.
         guard.check().map_err(CommandError::Data)?;
         let binary = std::env::current_exe()
             .map_err(|e| CommandError::Other(format!("cannot determine awman binary: {e}")))?;

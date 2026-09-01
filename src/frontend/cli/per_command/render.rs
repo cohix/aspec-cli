@@ -55,7 +55,7 @@ pub fn render(outcome: &CommandOutcome, json: bool) -> Option<String> {
         CommandOutcome::Auth(o) => render_auth(o),
         CommandOutcome::Download(o) => render_download(o),
         CommandOutcome::Clean(o) => render_clean(o),
-        CommandOutcome::Amie(o) => super::amie::render_amie(o, json),
+        CommandOutcome::Squad(o) => super::squad::render_squad(o, json),
     }
 }
 
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn render_status_marks_amie_container_and_leaves_session_row_plain() {
+    fn render_status_marks_squad_container_and_leaves_session_row_plain() {
         let o = StatusOutcome {
             containers: vec![
                 StatusContainerRow {
@@ -522,11 +522,11 @@ mod tests {
                 },
                 StatusContainerRow {
                     id: "def1234567890".into(),
-                    name: "awman-amie-issue-triage-12ab34cd".into(),
+                    name: "awman-squad-issue-triage-12ab34cd".into(),
                     image: "awman/dev:latest".into(),
                     started_at: "2025-01-01T00:00:00Z".into(),
                     kind: ContainerKind::Agent,
-                    source: ContainerSource::Amie("issue-triage".into()),
+                    source: ContainerSource::Squad("issue-triage".into()),
                     tab_number: None,
                     stuck: false,
                     command_label: None,
@@ -538,7 +538,7 @@ mod tests {
             tip: "test tip".into(),
         };
         let s = render_status(&o);
-        assert!(s.contains("amie:issue-triage"), "{s}");
+        assert!(s.contains("squad:issue-triage"), "{s}");
         assert!(s.contains("session"), "{s}");
     }
 

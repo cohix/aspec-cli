@@ -1,7 +1,7 @@
 //! Daemon bootstrap primitives shared by every awman HTTP daemon.
 //!
 //! Extracted verbatim from the `frontend::api::serve` monolith so a second
-//! daemon (the amie daemon, WI 0101 Part 4) can bind, serve, and shut down over
+//! daemon (the squad daemon, WI 0101 Part 4) can bind, serve, and shut down over
 //! the exact same code path instead of duplicating it. Nothing here is
 //! API-specific: `serve_router` takes a fully-formed [`Router`] and
 //! `resolve_auth_mode` takes a [`DaemonPaths`], so both daemons drive them with

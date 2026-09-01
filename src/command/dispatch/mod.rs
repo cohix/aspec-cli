@@ -11,15 +11,6 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::command::commands::amie::commands::{
-    AmieAddRequest, AmieCommand, AmieCommandFrontend, AmieSubcommand,
-};
-use crate::command::commands::amie::daemon::{
-    AmieLogsFlags, AmieStartFlags, AmieStatusFlags, AmieStopFlags,
-};
-use crate::command::commands::amie::gateway::{
-    ConditionGateway, CreateCondition, SharedConditionGateway,
-};
 use crate::command::commands::api_server::{
     ApiServerCommand, ApiServerCommandFrontend, ApiServerKillFlags, ApiServerLogsFlags,
     ApiServerStartFlags, ApiServerStatusFlags, ApiServerSubcommand,
@@ -50,12 +41,21 @@ use crate::command::commands::remote::{
 use crate::command::commands::specs::{
     SpecsAmendFlags, SpecsCommand, SpecsCommandFrontend, SpecsSubcommand,
 };
+use crate::command::commands::squad::commands::{
+    SquadAddRequest, SquadCommand, SquadCommandFrontend, SquadSubcommand,
+};
+use crate::command::commands::squad::daemon::{
+    SquadLogsFlags, SquadStartFlags, SquadStatusFlags, SquadStopFlags,
+};
+use crate::command::commands::squad::gateway::{
+    CreateTask, SharedTaskGateway, TaskGateway, DEFAULT_WORKSPACE_FLAG_VALUE,
+};
 use crate::command::commands::status::{StatusCommand, StatusCommandFlags, StatusCommandFrontend};
 use crate::command::commands::Command;
 use crate::command::dispatch::catalogue::{CommandCatalogue, FlagKind, FlagSpec};
 use crate::command::error::CommandError;
 use crate::data::config::global::GlobalConfig;
-use crate::data::fs::condition_store::MountScope;
+use crate::data::fs::task_store::{MountScope, TaskWorkspace};
 use crate::data::message::UserMessageSink;
 use crate::data::session::Session;
 use crate::engine::agent::AgentEngine;
@@ -230,7 +230,7 @@ pub trait DispatchFrontend:
     + ExecPromptCommandFrontend
     + ExecWorkflowCommandFrontend
     + ApiServerCommandFrontend
-    + AmieCommandFrontend
+    + SquadCommandFrontend
     + RemoteCommandFrontend
     + NewCommandFrontend
     + AuthCommandFrontend
@@ -251,7 +251,7 @@ impl<T> DispatchFrontend for T where
         + ExecPromptCommandFrontend
         + ExecWorkflowCommandFrontend
         + ApiServerCommandFrontend
-        + AmieCommandFrontend
+        + SquadCommandFrontend
         + RemoteCommandFrontend
         + NewCommandFrontend
         + AuthCommandFrontend
@@ -277,7 +277,7 @@ pub enum CommandOutcome {
     ExecPrompt(crate::command::commands::exec_prompt::ExecPromptOutcome),
     ExecWorkflow(crate::command::commands::exec_workflow::ExecWorkflowOutcome),
     ApiServer(crate::command::commands::api_server::ApiServerOutcome),
-    Amie(crate::command::commands::amie::commands::AmieOutcome),
+    Squad(crate::command::commands::squad::commands::SquadOutcome),
     Remote(crate::command::commands::remote::RemoteOutcome),
     New(crate::command::commands::new::NewOutcome),
     Specs(crate::command::commands::specs::SpecsOutcome),
@@ -300,7 +300,7 @@ pub enum BuiltCommand {
     ExecPrompt(ExecPromptCommand),
     ExecWorkflow(ExecWorkflowCommand),
     ApiServer(ApiServerCommand),
-    Amie(AmieCommand),
+    Squad(SquadCommand),
     Remote(RemoteCommand),
     New(NewCommand),
     Auth(AuthCommand),
@@ -315,7 +315,7 @@ pub struct Dispatch<F: CommandFrontend> {
     frontend: F,
     session: Arc<RwLock<Session>>,
     engines: Engines,
-    amie_gateway: Option<Arc<dyn ConditionGateway>>,
+    squad_gateway: Option<Arc<dyn TaskGateway>>,
 }
 
 impl<F: CommandFrontend> Dispatch<F> {
@@ -325,7 +325,7 @@ impl<F: CommandFrontend> Dispatch<F> {
             frontend,
             session,
             engines,
-            amie_gateway: None,
+            squad_gateway: None,
         }
     }
 
@@ -349,10 +349,10 @@ impl<F: CommandFrontend> Dispatch<F> {
         &self.engines
     }
 
-    /// Inject the daemon-local gateway for amie HTTP dispatch. CLI and TUI do
-    /// not receive this: they obtain a remote gateway through AmieSupervisor.
-    pub fn with_amie_gateway(mut self, gateway: Arc<dyn ConditionGateway>) -> Self {
-        self.amie_gateway = Some(gateway);
+    /// Inject the daemon-local gateway for squad HTTP dispatch. CLI and TUI do
+    /// not receive this: they obtain a remote gateway through SquadSupervisor.
+    pub fn with_squad_gateway(mut self, gateway: Arc<dyn TaskGateway>) -> Self {
+        self.squad_gateway = Some(gateway);
         self
     }
 
@@ -573,8 +573,8 @@ impl<F: CommandFrontend> Dispatch<F> {
                 ApiServerSubcommand::Status(ApiServerStatusFlags {}),
                 self.engines.clone(),
             ))),
-            ["amie", "start"] => Ok(BuiltCommand::Amie(AmieCommand::new(
-                AmieSubcommand::Start(AmieStartFlags {
+            ["squad", "start"] => Ok(BuiltCommand::Squad(SquadCommand::new(
+                SquadSubcommand::Start(SquadStartFlags {
                     port: self
                         .frontend
                         .flag_u16(&canonical_refs, "port")?
@@ -595,25 +595,26 @@ impl<F: CommandFrontend> Dispatch<F> {
                 None,
                 self.engines.clone(),
             ))),
-            ["amie", "stop"] => Ok(BuiltCommand::Amie(AmieCommand::new(
-                AmieSubcommand::Stop(AmieStopFlags),
+            ["squad", "stop"] => Ok(BuiltCommand::Squad(SquadCommand::new(
+                SquadSubcommand::Stop(SquadStopFlags),
                 None,
                 self.engines.clone(),
             ))),
-            ["amie", "status"] => {
+            ["squad", "status"] => {
                 // Carry the injected remote gateway so Layer 2 can overlay live
                 // scheduler counts onto the pidfile-derived liveness (§9.4).
-                let gateway = self.amie_gateway.clone().map(|gateway| {
-                    Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
-                });
-                Ok(BuiltCommand::Amie(AmieCommand::new(
-                    AmieSubcommand::Status(AmieStatusFlags),
+                let gateway = self
+                    .squad_gateway
+                    .clone()
+                    .map(|gateway| Box::new(SharedTaskGateway(gateway)) as Box<dyn TaskGateway>);
+                Ok(BuiltCommand::Squad(SquadCommand::new(
+                    SquadSubcommand::Status(SquadStatusFlags),
                     gateway,
                     self.engines.clone(),
                 )))
             }
-            ["amie", "logs"] => Ok(BuiltCommand::Amie(AmieCommand::new(
-                AmieSubcommand::Logs(AmieLogsFlags {
+            ["squad", "logs"] => Ok(BuiltCommand::Squad(SquadCommand::new(
+                SquadSubcommand::Logs(SquadLogsFlags {
                     follow: self
                         .frontend
                         .flag_bool(&canonical_refs, "follow")?
@@ -622,27 +623,39 @@ impl<F: CommandFrontend> Dispatch<F> {
                 None,
                 self.engines.clone(),
             ))),
-            ["amie", "add"] => {
-                let gateway = self.amie_gateway.clone().map(|gateway| {
-                    Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
-                });
+            ["squad", "add"] => {
+                let gateway = self
+                    .squad_gateway
+                    .clone()
+                    .map(|gateway| Box::new(SharedTaskGateway(gateway)) as Box<dyn TaskGateway>);
                 let interview = self
                     .frontend
                     .flag_bool(&canonical_refs, "interview")?
+                    .unwrap_or(false);
+                // `-n` never reaches the interview (the catalogue makes the two
+                // flags conflict); it governs the one confirmation scripted
+                // creation can still raise — the parent-directory mount scope.
+                let non_interactive = self
+                    .frontend
+                    .flag_bool(&canonical_refs, "non-interactive")?
                     .unwrap_or(false);
                 // Interview mode collects every field in Layer 2 through the
                 // frontend trait (BLOCKER-3, §9.3), so the frontend here only
                 // records the intent. Non-interview keeps the flag-driven
                 // behaviour: required name/description, defaulted rest.
                 let request = if interview {
-                    AmieAddRequest {
+                    SquadAddRequest {
                         interview: true,
+                        non_interactive,
                         prefilled: None,
                     }
                 } else {
-                    let name = self.frontend.flag_string(&canonical_refs, "name")?.ok_or_else(
-                        || CommandError::missing_required_flag(&canonical_refs, "name"),
-                    )?;
+                    let name = self
+                        .frontend
+                        .flag_string(&canonical_refs, "name")?
+                        .ok_or_else(|| {
+                            CommandError::missing_required_flag(&canonical_refs, "name")
+                        })?;
                     let description = self
                         .frontend
                         .flag_string(&canonical_refs, "description")?
@@ -652,12 +665,27 @@ impl<F: CommandFrontend> Dispatch<F> {
                     let interval = self
                         .frontend
                         .flag_string(&canonical_refs, "interval")?
-                        .unwrap_or_else(|| "5m".into());
-                    let interval_secs = parse_amie_interval(&canonical_refs, &interval)?;
-                    let repo_scope = self
+                        .unwrap_or_else(|| "6h".into());
+                    let interval_secs = parse_squad_interval(&canonical_refs, &interval)?;
+                    // `--workspace` is the scripted equivalent of the
+                    // interview's workspace-choice step: `default` binds the
+                    // task to its durable per-task workspace, anything else is
+                    // a custom folder or repo. `--repo` predates it and is
+                    // kept as the same thing said differently, so an existing
+                    // scripted `--repo <path>` still means "use that path";
+                    // `--workspace` wins when both are given.
+                    let workspace = match self
                         .frontend
-                        .flag_path(&canonical_refs, "repo")?
-                        .unwrap_or_else(|| session.working_dir().to_path_buf());
+                        .flag_string(&canonical_refs, "workspace")?
+                        .as_deref()
+                    {
+                        Some(DEFAULT_WORKSPACE_FLAG_VALUE) => TaskWorkspace::Default,
+                        Some(path) => TaskWorkspace::Custom(PathBuf::from(path)),
+                        None => match self.frontend.flag_path(&canonical_refs, "repo")? {
+                            Some(repo) => TaskWorkspace::Custom(repo),
+                            None => TaskWorkspace::Default,
+                        },
+                    };
                     let mount_scope = match self
                         .frontend
                         .flag_enum(&canonical_refs, "mount-scope")?
@@ -668,39 +696,44 @@ impl<F: CommandFrontend> Dispatch<F> {
                         "gitroot" => MountScope::GitRoot,
                         _ => unreachable!("catalogue enum validation"),
                     };
-                    AmieAddRequest {
+                    SquadAddRequest {
                         interview: false,
-                        prefilled: Some(CreateCondition {
+                        non_interactive,
+                        prefilled: Some(CreateTask {
                             name,
                             description,
-                            repo_scope,
+                            workspace,
                             mount_scope,
                             interval_secs,
                             agent: self.frontend.flag_string(&canonical_refs, "agent")?,
                             model: self.frontend.flag_string(&canonical_refs, "model")?,
+                            // Raw specs only; syntax is validated once, in the
+                            // gateway, before anything is persisted.
+                            overlays: self.frontend.flag_strings(&canonical_refs, "overlay")?,
                         }),
                     }
                 };
-                Ok(BuiltCommand::Amie(AmieCommand::new(
-                    AmieSubcommand::Add(request),
+                Ok(BuiltCommand::Squad(SquadCommand::new(
+                    SquadSubcommand::Add(request),
                     gateway,
                     self.engines.clone(),
                 )))
             }
-            ["amie", action @ ("list" | "show" | "remove" | "pause" | "resume")] => {
-                let gateway = self.amie_gateway.clone().map(|gateway| {
-                    Box::new(SharedConditionGateway(gateway)) as Box<dyn ConditionGateway>
-                });
+            ["squad", action @ ("list" | "show" | "remove" | "pause" | "resume")] => {
+                let gateway = self
+                    .squad_gateway
+                    .clone()
+                    .map(|gateway| Box::new(SharedTaskGateway(gateway)) as Box<dyn TaskGateway>);
                 let sub = match *action {
-                    "list" => AmieSubcommand::List,
-                    "show" => AmieSubcommand::Show(
+                    "list" => SquadSubcommand::List,
+                    "show" => SquadSubcommand::Show(
                         self.frontend
                             .argument(&canonical_refs, "name")?
                             .ok_or_else(|| {
                                 CommandError::missing_required_argument(&canonical_refs, "name")
                             })?,
                     ),
-                    "remove" => AmieSubcommand::Remove {
+                    "remove" => SquadSubcommand::Remove {
                         name: self
                             .frontend
                             .argument(&canonical_refs, "name")?
@@ -712,14 +745,14 @@ impl<F: CommandFrontend> Dispatch<F> {
                             .flag_bool(&canonical_refs, "yes")?
                             .unwrap_or(false),
                     },
-                    "pause" => AmieSubcommand::Pause(
+                    "pause" => SquadSubcommand::Pause(
                         self.frontend
                             .argument(&canonical_refs, "name")?
                             .ok_or_else(|| {
                                 CommandError::missing_required_argument(&canonical_refs, "name")
                             })?,
                     ),
-                    "resume" => AmieSubcommand::Resume(
+                    "resume" => SquadSubcommand::Resume(
                         self.frontend
                             .argument(&canonical_refs, "name")?
                             .ok_or_else(|| {
@@ -728,7 +761,7 @@ impl<F: CommandFrontend> Dispatch<F> {
                     ),
                     _ => unreachable!(),
                 };
-                Ok(BuiltCommand::Amie(AmieCommand::new(
+                Ok(BuiltCommand::Squad(SquadCommand::new(
                     sub,
                     gateway,
                     self.engines.clone(),
@@ -994,9 +1027,11 @@ impl<F: DispatchFrontend> Dispatch<F> {
                     .await
                     .map(CommandOutcome::ApiServer)
             }
-            BuiltCommand::Amie(cmd) => {
-                let boxed: Box<dyn AmieCommandFrontend> = Box::new(frontend);
-                cmd.run_with_frontend(boxed).await.map(CommandOutcome::Amie)
+            BuiltCommand::Squad(cmd) => {
+                let boxed: Box<dyn SquadCommandFrontend> = Box::new(frontend);
+                cmd.run_with_frontend(boxed)
+                    .await
+                    .map(CommandOutcome::Squad)
             }
             BuiltCommand::Remote(cmd) => {
                 let boxed: Box<dyn RemoteCommandFrontend> = Box::new(frontend);
@@ -1067,7 +1102,7 @@ fn validate_conflicts<F: CommandFrontend>(
     Ok(())
 }
 
-pub(crate) fn parse_amie_interval(command: &[&str], raw: &str) -> Result<u64, CommandError> {
+pub(crate) fn parse_squad_interval(command: &[&str], raw: &str) -> Result<u64, CommandError> {
     let value = raw.trim();
     let (number, multiplier) = if let Some(number) = value.strip_suffix('s') {
         (number, 1)

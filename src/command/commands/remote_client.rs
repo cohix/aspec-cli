@@ -227,11 +227,10 @@ impl RemoteClient {
                     ("subcommand", serde_json::json!(subcommand)),
                     (
                         "args",
-                        serde_json::json!(
-                            args.iter()
-                                .map(|s| serde_json::json!(s))
-                                .collect::<Vec<_>>()
-                        ),
+                        serde_json::json!(args
+                            .iter()
+                            .map(|s| serde_json::json!(s))
+                            .collect::<Vec<_>>()),
                     ),
                 ],
                 &[("x-awman-session", session_id)],
@@ -679,7 +678,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_command_200_response_returns_parsed_remote_response() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
@@ -697,7 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_command_400_response_maps_to_remote_http_status_error() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
@@ -722,7 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_command_500_response_maps_to_remote_http_status_error() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(matchers::method("POST"))
@@ -747,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_command_parses_sse_events_and_calls_sink() {
-        use wiremock::{Mock, MockServer, ResponseTemplate, matchers};
+        use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
         let sse_body = "data: hello world\n\ndata: second line\n\ndata: [awman:done]\n\n";
 

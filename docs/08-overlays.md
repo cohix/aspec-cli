@@ -295,6 +295,13 @@ awman chat --overlay "ssh(),env(GITHUB_TOKEN),skill(lint)"
 
 This source has the highest priority among global/repo/env/flag sources, but per-step overlays in workflows override it.
 
+`awman squad add` also accepts repeatable `--overlay` flags, and the squad
+interview offers the same overlay step. These task overlays are saved with
+the task and applied to its evaluation and workflow containers, together with
+the other overlay sources. See [Squad: Defining a task](16-squad.md#defining-a-task)
+for the task-creation flow; this page remains the authoritative reference for
+overlay syntax and merge behavior.
+
 ---
 
 ## Workflow step overlays
@@ -534,10 +541,13 @@ The three scopes:
 | **repo** | `~/.awman/context/repo/{owner}/{repo}/` | Project-specific architecture notes, gotchas, accumulated team knowledge | All agents working on this repo |
 | **workflow** | `~/.awman/context/workflow/` (per workflow invocation) | Shared state and coordination between steps in a multi-agent workflow | All steps in the same workflow run |
 
-The amie daemon keeps each condition's context in a separate sibling directory,
-`~/.awman/amie/conditions/{name}/`, alongside `context(global)` rather than
-inside it. A condition's directory is long-lived: it is created once and reused
-for every evaluation of that condition. It is never recreated for each run.
+The squad daemon keeps each task's durable context in
+`~/.awman/squad/tasks/{name}/workspace/`. It is a task-scoped location in
+addition to the ordinary global, repo, and workflow contexts. A task's
+workspace is long-lived: it is created once and reused for every evaluation
+of that task, including when the task's primary workspace is a custom folder.
+It is never recreated for each run. See [Squad: Task workspaces](16-squad.md#task-workspaces)
+for how this location is selected and preserved.
 
 ### When to use each scope
 
@@ -718,10 +728,12 @@ The command does not proceed — you must fix the syntax before launching.
 If a configured host path does not exist when you launch the session:
 
 ```
-warning: overlay host path '/nonexistent/data' does not exist; skipping
+error: overlay host path '/nonexistent/data' does not exist
 ```
 
-The warning is logged, but the session proceeds without that overlay. This is intentional — you may list optional paths that only exist in some contexts (CI vs. local, different machines, etc.).
+The launch fails rather than asking Docker to create an empty bind-mount source.
+If a directory is optional across environments (for example, CI versus a local
+machine), add the overlay only in the environments where that path exists.
 
 ### Missing named skills
 

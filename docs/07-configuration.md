@@ -58,7 +58,7 @@ Applies to every project on the machine unless a repo overrides it.
     "workDirs": ["/home/user/my-project"],
     "alwaysNonInteractive": false
   },
-  "amie": {
+  "squad": {
     "agentsToModels": {
       "claude": ["claude-opus-4-8", "claude-sonnet-4-6"]
     },
@@ -74,19 +74,25 @@ Applies to every project on the machine unless a repo overrides it.
 }
 ```
 
-### Amie daemon configuration
+### Squad daemon configuration
 
-The optional `amie` block is global, so it belongs in
+The optional `squad` block is global, so it belongs in
 `~/.awman/config.json` (or the relocated global config file). It controls the
-agents and models available to the amie daemon and the guidance it passes to
-condition evaluations:
+agents and models available to the squad daemon and the guidance it passes to
+task evaluations:
+
+Task-specific workspace, interval, and overlay choices are configured with
+`awman squad add` rather than in this global block. See [Squad](16-squad.md)
+for the durable workspace, task-creation, and daemon details. The squad daemon
+and API server cannot run at the same time because they share the awman
+database; see [API Mode: API server and squad daemon](09-api-mode.md#api-server-and-squad-daemon).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `agentsToModels` | object (agent name → non-empty string array) | unset | Models available for each agent; every map key must be a valid agent name |
-| `maxConcurrentEvaluations` | positive integer | `2` | Maximum number of condition evaluations running at once |
-| `defaultLeader` | string (`agent::model`) | unset | Default agent and model for evaluations when a condition does not specify them |
-| `guidance` | non-empty string array | unset | Instructions added to every condition evaluation and generated workflow |
+| `maxConcurrentEvaluations` | positive integer | `2` | Maximum number of task evaluations running at once |
+| `defaultLeader` | string (`agent::model`) | unset | Default agent and model for evaluations when a task does not specify them |
+| `guidance` | non-empty string array | unset | Instructions added to every task evaluation and generated workflow |
 
 All four keys are optional. Configuration is rejected when
 `maxConcurrentEvaluations` is zero; an `agentsToModels` entry has no models or
@@ -371,7 +377,7 @@ awman keeps global config and data (workflows, skills, worktrees, API state) und
 | `remote.defaultAddr` | string | (unset) | Default remote awman API server address | yes |
 | `remote.defaultAPIKey` | string | (unset) | API key for the default remote server; only sent when the target address matches `remote.defaultAddr` | yes |
 | `remote.savedDirs` | string array | `[]` | Remote-host paths shown in the `remote session start` picker — see [Remote Mode](10-remote-mode.md) | no (edit file) |
-| `amie` | object | (unset) | Global amie daemon settings; see [Amie daemon configuration](#amie-daemon-configuration) | no (edit file) |
+| `squad` | object | (unset) | Global squad daemon settings; see [Squad daemon configuration](#squad-daemon-configuration) | no (edit file) |
 | `launchModeFallback` | `"stdio"` \| `"error"` | `"error"` | What to do when a requested ACP launch uses an agent without ACP support | no (edit file) |
 
 ### `awman config` subcommands
@@ -435,7 +441,7 @@ Value handling:
 | `AWMAN_MAX_CONCURRENT_AGENTS` | Cap on concurrently-running workflow steps; beats `maxConcurrentAgents` in repo/global config, beaten by `--max-concurrent` — see [Parallel Workflows](15-parallel-workflows.md) |
 | `AWMAN_REMOTE_ADDR` | Remote API server address; beats `remote.defaultAddr`, beaten by `--remote-addr` |
 | `AWMAN_API_KEY` | Remote API key; beats `remote.defaultAPIKey`, beaten by `--api-key` |
-| `AWMAN_AMIE_KEY` | Bearer key the CLI and TUI authenticate to the amie daemon with; printed once as a shell snippet on the daemon's first start — see [amie: Authenticating to the daemon](16-amie.md#authenticating-to-the-daemon) |
+| `AWMAN_SQUAD_KEY` | Bearer key the CLI and TUI authenticate to the squad daemon with; printed once as a shell snippet on the daemon's first start — see [squad: Authenticating to the daemon](16-squad.md#authenticating-to-the-daemon) |
 | `AWMAN_REMOTE_SESSION` | Sticky session id for `remote exec` commands; beaten by `--session` |
 
 ---

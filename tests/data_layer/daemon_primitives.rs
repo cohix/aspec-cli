@@ -4,16 +4,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use awman::data::config::env::{EnvSnapshot, AWMAN_AMIE_ROOT, AWMAN_API_ROOT};
-use awman::data::fs::daemon_process::{
-    DaemonProcess, ServerMeta, AMIE_PLIST_LABEL, AMIE_UNIT_NAME, API_PLIST_LABEL, API_UNIT_NAME,
-};
-use awman::data::fs::{AmiePaths, DaemonGuard, DaemonKind, DaemonPaths};
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
 
-fn paths_env(api_root: &Path, amie_root: &Path) -> EnvSnapshot {
+use awman::data::config::env::{EnvSnapshot, AWMAN_API_ROOT, AWMAN_SQUAD_ROOT};
+use awman::data::fs::daemon_process::{
+    DaemonProcess, ServerMeta, API_PLIST_LABEL, API_UNIT_NAME, SQUAD_PLIST_LABEL, SQUAD_UNIT_NAME,
+};
+use awman::data::fs::{DaemonGuard, DaemonKind, DaemonPaths, SquadPaths};
+
+/// A few daemon-spawn tests temporarily replace `PATH` to inject a platform
+/// launcher.  Keep that process-global state serialized across the whole test
+/// module so one injection cannot change another test's meaning.
+#[cfg(target_os = "linux")]
+static PATH_LOCK: Mutex<()> = Mutex::new(());
+
+fn paths_env(api_root: &Path, squad_root: &Path) -> EnvSnapshot {
     EnvSnapshot::with_overrides([
         (AWMAN_API_ROOT, api_root.to_string_lossy().to_string()),
-        (AWMAN_AMIE_ROOT, amie_root.to_string_lossy().to_string()),
+        (AWMAN_SQUAD_ROOT, squad_root.to_string_lossy().to_string()),
     ])
 }
 
@@ -24,16 +33,16 @@ fn daemon(root: &Path, kind: DaemonKind) -> DaemonProcess {
             API_UNIT_NAME,
             API_PLIST_LABEL,
         ),
-        DaemonKind::Amie => DaemonProcess::new(
-            DaemonPaths::new(root, "amie_key"),
-            AMIE_UNIT_NAME,
-            AMIE_PLIST_LABEL,
+        DaemonKind::Squad => DaemonProcess::new(
+            DaemonPaths::new(root, "squad_key"),
+            SQUAD_UNIT_NAME,
+            SQUAD_PLIST_LABEL,
         ),
     }
 }
 
 #[test]
-fn daemon_paths_preserve_api_filenames_and_isolate_amie_key() {
+fn daemon_paths_preserve_api_filenames_and_isolate_squad_key() {
     let api = DaemonPaths::new("/tmp/api", "api_key");
     assert_eq!(api.pid_file(), PathBuf::from("/tmp/api/awman.pid"));
     assert_eq!(api.log_file(), PathBuf::from("/tmp/api/awman.log"));
@@ -43,18 +52,18 @@ fn daemon_paths_preserve_api_filenames_and_isolate_amie_key() {
     );
     assert_eq!(api.key_hash_file(), PathBuf::from("/tmp/api/api_key.hash"));
 
-    let amie = AmiePaths::from_root("/tmp/amie").daemon();
-    assert_eq!(amie.pid_file(), PathBuf::from("/tmp/amie/awman.pid"));
-    assert_eq!(amie.log_file(), PathBuf::from("/tmp/amie/awman.log"));
+    let squad = SquadPaths::from_root("/tmp/squad").daemon();
+    assert_eq!(squad.pid_file(), PathBuf::from("/tmp/squad/awman.pid"));
+    assert_eq!(squad.log_file(), PathBuf::from("/tmp/squad/awman.log"));
     assert_eq!(
-        amie.server_meta_file(),
-        PathBuf::from("/tmp/amie/server.json")
+        squad.server_meta_file(),
+        PathBuf::from("/tmp/squad/server.json")
     );
     assert_eq!(
-        amie.key_hash_file(),
-        PathBuf::from("/tmp/amie/amie_key.hash")
+        squad.key_hash_file(),
+        PathBuf::from("/tmp/squad/squad_key.hash")
     );
-    assert_ne!(api.key_hash_file(), amie.key_hash_file());
+    assert_ne!(api.key_hash_file(), squad.key_hash_file());
 }
 
 #[test]
@@ -83,20 +92,18 @@ fn daemon_process_pidfile_and_server_meta_round_trip() {
 }
 
 #[test]
-fn spawn_detached_identity_is_distinct_for_api_and_amie() {
+fn spawn_detached_identity_is_distinct_for_api_and_squad() {
     let api_root = tempfile::tempdir().unwrap();
-    let amie_root = tempfile::tempdir().unwrap();
+    let squad_root = tempfile::tempdir().unwrap();
     let api = daemon(api_root.path(), DaemonKind::Api);
-    let amie = daemon(amie_root.path(), DaemonKind::Amie);
+    let squad = daemon(squad_root.path(), DaemonKind::Squad);
 
-    assert_ne!(API_UNIT_NAME, AMIE_UNIT_NAME);
-    assert_ne!(API_PLIST_LABEL, AMIE_PLIST_LABEL);
-    assert_ne!(api.paths().log_file(), amie.paths().log_file());
+    assert_ne!(API_UNIT_NAME, SQUAD_UNIT_NAME);
+    assert_ne!(API_PLIST_LABEL, SQUAD_PLIST_LABEL);
+    assert_ne!(api.paths().log_file(), squad.paths().log_file());
 
     #[cfg(target_os = "linux")]
     {
-        use std::sync::Mutex;
-        static PATH_LOCK: Mutex<()> = Mutex::new(());
         let _lock = PATH_LOCK.lock().unwrap();
         let bin_dir = api_root.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -117,7 +124,10 @@ fn spawn_detached_identity_is_distinct_for_api_and_amie() {
         std::env::set_var("PATH", new_path);
         std::env::set_var("AWMAN_TEST_SYSTEMD_LOG", &log);
         assert_eq!(api.spawn_detached(Path::new("/bin/true"), &[]).unwrap(), 0);
-        assert_eq!(amie.spawn_detached(Path::new("/bin/true"), &[]).unwrap(), 0);
+        assert_eq!(
+            squad.spawn_detached(Path::new("/bin/true"), &[]).unwrap(),
+            0
+        );
         if let Some(path) = old_path {
             std::env::set_var("PATH", path);
         } else {
@@ -130,8 +140,8 @@ fn spawn_detached_identity_is_distinct_for_api_and_amie() {
             "API unit was not threaded: {args}"
         );
         assert!(
-            args.contains("--unit=awman-amie"),
-            "amie unit was not threaded: {args}"
+            args.contains("--unit=awman-squad"),
+            "squad unit was not threaded: {args}"
         );
     }
 
@@ -165,7 +175,8 @@ fn spawn_detached_identity_is_distinct_for_api_and_amie() {
         std::env::set_var("HOME", home.path());
 
         api.spawn_detached(Path::new("/usr/bin/true"), &[]).unwrap();
-        amie.spawn_detached(Path::new("/usr/bin/true"), &[])
+        squad
+            .spawn_detached(Path::new("/usr/bin/true"), &[])
             .unwrap();
 
         match old_path {
@@ -180,14 +191,68 @@ fn spawn_detached_identity_is_distinct_for_api_and_amie() {
         let agents = home.path().join("Library/LaunchAgents");
         let api_plist = std::fs::read_to_string(agents.join(format!("{API_PLIST_LABEL}.plist")))
             .expect("the API daemon must write its own plist");
-        let amie_plist = std::fs::read_to_string(agents.join(format!("{AMIE_PLIST_LABEL}.plist")))
-            .expect("the amie daemon must write its own plist, not overwrite the API's");
+        let squad_plist =
+            std::fs::read_to_string(agents.join(format!("{SQUAD_PLIST_LABEL}.plist")))
+                .expect("the squad daemon must write its own plist, not overwrite the API's");
         assert!(api_plist.contains(&format!("<string>{API_PLIST_LABEL}</string>")));
-        assert!(amie_plist.contains(&format!("<string>{AMIE_PLIST_LABEL}</string>")));
+        assert!(squad_plist.contains(&format!("<string>{SQUAD_PLIST_LABEL}</string>")));
         // Each daemon's stdout goes to its own log, never the other's.
         assert!(api_plist.contains(&api.paths().log_file().display().to_string()));
-        assert!(amie_plist.contains(&amie.paths().log_file().display().to_string()));
-        assert!(!api_plist.contains(&amie.paths().log_file().display().to_string()));
+        assert!(squad_plist.contains(&squad.paths().log_file().display().to_string()));
+        assert!(!api_plist.contains(&squad.paths().log_file().display().to_string()));
+    }
+}
+
+#[test]
+fn squad_spawn_failure_is_wrapped_with_an_attributable_daemon_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let process = daemon(tmp.path(), DaemonKind::Squad);
+
+    // Force the portable `double_fork_spawn` path.  A real systemd-run can
+    // accept a unit before its executable fails, which is correct production
+    // behavior but not a synchronous failure injection.  This tiny stub makes
+    // its availability probe fail so the missing binary is observed here.
+    #[cfg(target_os = "linux")]
+    let _path_guard = {
+        let _lock = PATH_LOCK.lock().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir(&bin_dir).unwrap();
+        let systemd = bin_dir.join("systemd-run");
+        std::fs::write(&systemd, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&systemd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", &bin_dir);
+        PathGuard { _lock, old_path }
+    };
+
+    let error = process
+        .spawn_detached(Path::new("/definitely-not-an-awman-daemon-binary"), &[])
+        .expect_err("a missing daemon binary must surface a spawn failure");
+    let text = error.to_string();
+    assert!(
+        text.starts_with("failed to start the squad daemon:"),
+        "daemon startup errors must be attributable instead of raw OS diagnostics: {text}"
+    );
+    assert!(
+        !text.starts_with("Load failed:"),
+        "the raw launchd diagnostic must never be surfaced verbatim: {text}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+struct PathGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    old_path: Option<std::ffi::OsString>,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match self.old_path.take() {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
     }
 }
 
@@ -195,10 +260,10 @@ fn spawn_detached_identity_is_distinct_for_api_and_amie() {
 fn daemon_guard_check_accepts_absent_and_stale_pidfiles_in_both_directions() {
     let tmp = tempfile::tempdir().unwrap();
     let api_root = tmp.path().join("api");
-    let amie_root = tmp.path().join("amie");
-    let env = paths_env(&api_root, &amie_root);
+    let squad_root = tmp.path().join("squad");
+    let env = paths_env(&api_root, &squad_root);
 
-    for kind in [DaemonKind::Api, DaemonKind::Amie] {
+    for kind in [DaemonKind::Api, DaemonKind::Squad] {
         let guard = DaemonGuard::for_daemon(kind, &env).unwrap();
         assert!(
             guard.check().is_ok(),
@@ -206,12 +271,12 @@ fn daemon_guard_check_accepts_absent_and_stale_pidfiles_in_both_directions() {
         );
 
         let other_kind = match kind {
-            DaemonKind::Api => DaemonKind::Amie,
-            DaemonKind::Amie => DaemonKind::Api,
+            DaemonKind::Api => DaemonKind::Squad,
+            DaemonKind::Squad => DaemonKind::Api,
         };
         let other_root = match other_kind {
             DaemonKind::Api => &api_root,
-            DaemonKind::Amie => &amie_root,
+            DaemonKind::Squad => &squad_root,
         };
         daemon(other_root, other_kind)
             .force_write_pidfile(u32::MAX - 1)
@@ -261,15 +326,15 @@ fn awman_named_test_process() -> Child {
 fn assert_guard_rejects_live_other(kind: DaemonKind) {
     let tmp = tempfile::tempdir().unwrap();
     let api_root = tmp.path().join("api");
-    let amie_root = tmp.path().join("amie");
-    let env = paths_env(&api_root, &amie_root);
+    let squad_root = tmp.path().join("squad");
+    let env = paths_env(&api_root, &squad_root);
     let other_kind = match kind {
-        DaemonKind::Api => DaemonKind::Amie,
-        DaemonKind::Amie => DaemonKind::Api,
+        DaemonKind::Api => DaemonKind::Squad,
+        DaemonKind::Squad => DaemonKind::Api,
     };
     let other_root = match other_kind {
         DaemonKind::Api => &api_root,
-        DaemonKind::Amie => &amie_root,
+        DaemonKind::Squad => &squad_root,
     };
     let mut child = awman_named_test_process();
     for _ in 0..40 {
@@ -296,7 +361,7 @@ fn assert_guard_rejects_live_other(kind: DaemonKind) {
     );
     match other_kind {
         DaemonKind::Api => assert!(text.contains("awman api"), "missing API name: {text}"),
-        DaemonKind::Amie => assert!(text.contains("amie"), "missing amie name: {text}"),
+        DaemonKind::Squad => assert!(text.contains("squad"), "missing squad name: {text}"),
     }
 
     let _ = child.kill();
@@ -305,14 +370,14 @@ fn assert_guard_rejects_live_other(kind: DaemonKind) {
 
 #[cfg(unix)]
 #[test]
-fn daemon_guard_check_rejects_live_amie_when_checking_api() {
+fn daemon_guard_check_rejects_live_squad_when_checking_api() {
     assert_guard_rejects_live_other(DaemonKind::Api);
 }
 
 #[cfg(unix)]
 #[test]
-fn daemon_guard_check_rejects_live_api_when_checking_amie() {
-    assert_guard_rejects_live_other(DaemonKind::Amie);
+fn daemon_guard_check_rejects_live_api_when_checking_squad() {
+    assert_guard_rejects_live_other(DaemonKind::Squad);
 }
 
 #[test]

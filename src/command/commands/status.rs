@@ -26,8 +26,8 @@ pub enum ContainerKind {
 pub enum ContainerSource {
     /// An interactive `awman` session container: today's behaviour, unmarked.
     Session,
-    /// Launched by amie for the named condition.
-    Amie(String),
+    /// Launched by squad for the named task.
+    Squad(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,11 +59,11 @@ pub struct StatusContainerRow {
 
 impl StatusContainerRow {
     /// `None` for a plain session container (today's behaviour, unmarked);
-    /// `Some("amie:<slug>")` for one amie launched.
+    /// `Some("squad:<slug>")` for one squad launched.
     pub fn source_label(&self) -> Option<String> {
         match &self.source {
             ContainerSource::Session => None,
-            ContainerSource::Amie(slug) => Some(format!("amie:{slug}")),
+            ContainerSource::Squad(slug) => Some(format!("squad:{slug}")),
         }
     }
 }
@@ -72,8 +72,8 @@ impl StatusContainerRow {
 /// every runtime tier honours (Docker `--filter name=`, Apple client-side
 /// prefix, sandbox `sbx ls` prefix) — never from a label.
 fn classify_source(name: &str) -> ContainerSource {
-    match crate::engine::container::naming::parse_amie_condition_slug(name) {
-        Some(slug) => ContainerSource::Amie(slug.to_string()),
+    match crate::engine::container::naming::parse_squad_task_slug(name) {
+        Some(slug) => ContainerSource::Squad(slug.to_string()),
         None => ContainerSource::Session,
     }
 }
@@ -403,15 +403,15 @@ mod tests {
     }
 
     #[test]
-    fn classify_source_marks_amie_containers() {
+    fn classify_source_marks_squad_containers() {
         assert_eq!(
-            classify_source("awman-amie-issue-triage-12ab34cd"),
-            ContainerSource::Amie("issue-triage".to_string())
+            classify_source("awman-squad-issue-triage-12ab34cd"),
+            ContainerSource::Squad("issue-triage".to_string())
         );
     }
 
     #[test]
-    fn source_label_is_none_for_session_and_marked_for_amie() {
+    fn source_label_is_none_for_session_and_marked_for_squad() {
         let mut row = StatusContainerRow {
             id: "abc".into(),
             name: "awman-x".into(),
@@ -426,7 +426,7 @@ mod tests {
             memory_mb: None,
         };
         assert_eq!(row.source_label(), None);
-        row.source = ContainerSource::Amie("issue-triage".into());
-        assert_eq!(row.source_label().as_deref(), Some("amie:issue-triage"));
+        row.source = ContainerSource::Squad("issue-triage".into());
+        assert_eq!(row.source_label().as_deref(), Some("squad:issue-triage"));
     }
 }

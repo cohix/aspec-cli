@@ -101,8 +101,8 @@ pub struct TuiCommandFrontend {
     pub(crate) last_config_edit_field: Option<String>,
 }
 
-// `AmieCommandFrontend` for `TuiCommandFrontend` (interview dialogs) lives in
-// `per_command::amie`, alongside the other per-command TUI frontend impls.
+// `SquadCommandFrontend` for `TuiCommandFrontend` (interview dialogs) lives in
+// `per_command::squad`, alongside the other per-command TUI frontend impls.
 
 impl TuiCommandFrontend {
     #[allow(clippy::too_many_arguments)]

@@ -1,4 +1,4 @@
-//! Shared amie attach discovery.
+//! Shared squad attach discovery.
 //!
 //! Discovery is deliberately runtime-only: a daemon may enrich the labels a
 //! caller displays, but it never decides which running containers exist.
@@ -7,11 +7,11 @@ use crate::command::error::CommandError;
 use crate::data::session::AgentHandle;
 use crate::data::workflow_state::{StepState, WorkflowState};
 use crate::engine::agent_runtime::AgentRuntimeEngine;
-use crate::engine::container::naming::AMIE_NAME_PREFIX;
+use crate::engine::container::naming::SQUAD_NAME_PREFIX;
 
-/// One running amie container, as presented to the user for disambiguation.
+/// One running squad container, as presented to the user for disambiguation.
 #[derive(Debug, Clone)]
-pub struct AmieContainer {
+pub struct SquadContainer {
     pub handle: AgentHandle,
     /// First 12 characters of the runtime handle ID.
     pub short_id: String,
@@ -22,25 +22,25 @@ pub struct AmieContainer {
 /// The non-guessing result of attach target selection.
 #[derive(Debug)]
 pub enum AttachResolution {
-    One(AmieContainer),
-    Ambiguous(Vec<AmieContainer>),
+    One(SquadContainer),
+    Ambiguous(Vec<SquadContainer>),
 }
 
-/// The running-name prefix for one amie condition.
-pub fn amie_name_prefix(condition: &str) -> String {
-    format!("{AMIE_NAME_PREFIX}{condition}-")
+/// The running-name prefix for one squad task.
+pub fn squad_name_prefix(task: &str) -> String {
+    format!("{SQUAD_NAME_PREFIX}{task}-")
 }
 
-/// Discover running containers for one condition through the cross-runtime
+/// Discover running containers for one task through the cross-runtime
 /// trait. This is the authoritative candidate list.
-pub fn list_condition_containers(
+pub fn list_task_containers(
     runtime: &dyn AgentRuntimeEngine,
-    condition: &str,
-) -> Result<Vec<AmieContainer>, CommandError> {
+    task: &str,
+) -> Result<Vec<SquadContainer>, CommandError> {
     Ok(runtime
-        .list_running_with_name_prefix(&amie_name_prefix(condition))?
+        .list_running_with_name_prefix(&squad_name_prefix(task))?
         .into_iter()
-        .map(|handle| AmieContainer {
+        .map(|handle| SquadContainer {
             short_id: handle.id.chars().take(12).collect(),
             label: handle.name.clone(),
             handle,
@@ -51,7 +51,7 @@ pub fn list_condition_containers(
 /// Best-effort presentation enrichment from a daemon workflow snapshot.
 ///
 /// This never changes the candidate set or its order.
-pub fn label_with_step_names(candidates: &mut [AmieContainer], state: &WorkflowState) {
+pub fn label_with_step_names(candidates: &mut [SquadContainer], state: &WorkflowState) {
     for (step_name, step_state) in &state.step_states {
         let StepState::Running {
             container_id: Some(container_id),
@@ -69,12 +69,12 @@ pub fn label_with_step_names(candidates: &mut [AmieContainer], state: &WorkflowS
 
 /// Resolve a candidate without guessing.
 pub fn resolve_attach_target(
-    candidates: Vec<AmieContainer>,
-    condition: &str,
+    candidates: Vec<SquadContainer>,
+    task: &str,
     requested: Option<&str>,
 ) -> Result<AttachResolution, CommandError> {
     if candidates.is_empty() {
-        return Err(no_run_in_progress(condition));
+        return Err(no_run_in_progress(task));
     }
 
     if let Some(requested) = requested {
@@ -88,7 +88,7 @@ pub fn resolve_attach_target(
             .collect();
         return match matches.as_slice() {
             [candidate] => Ok(AttachResolution::One((*candidate).clone())),
-            _ => Err(not_in_condition(condition, requested, &candidates)),
+            _ => Err(not_in_task(task, requested, &candidates)),
         };
     }
 
@@ -100,15 +100,13 @@ pub fn resolve_attach_target(
     }
 }
 
-/// The explicit idle-condition error shape shared by both frontends.
-pub fn no_run_in_progress(condition: &str) -> CommandError {
-    CommandError::Other(format!(
-        "no run currently in progress for condition {condition:?}"
-    ))
+/// The explicit idle-task error shape shared by both frontends.
+pub fn no_run_in_progress(task: &str) -> CommandError {
+    CommandError::Other(format!("no run currently in progress for task {task:?}"))
 }
 
 /// An explicit `--container` is never allowed to escape the discovered set.
-pub fn not_in_condition(condition: &str, requested: &str, set: &[AmieContainer]) -> CommandError {
+pub fn not_in_task(task: &str, requested: &str, set: &[SquadContainer]) -> CommandError {
     let legal = if set.is_empty() {
         "(none)".to_string()
     } else {
@@ -118,12 +116,12 @@ pub fn not_in_condition(condition: &str, requested: &str, set: &[AmieContainer])
             .join(", ")
     };
     CommandError::Other(format!(
-        "container {requested:?} is not a running container for condition {condition:?}; legal containers: {legal}"
+        "container {requested:?} is not a running container for task {task:?}; legal containers: {legal}"
     ))
 }
 
 /// One line per candidate for a caller's ambiguity error.
-pub fn format_candidates(candidates: &[AmieContainer]) -> String {
+pub fn format_candidates(candidates: &[SquadContainer]) -> String {
     candidates
         .iter()
         .map(|candidate| format!("{}  {}", candidate.short_id, candidate.label))
@@ -135,8 +133,8 @@ pub fn format_candidates(candidates: &[AmieContainer]) -> String {
 mod tests {
     use super::*;
 
-    fn candidate(id: &str, name: &str) -> AmieContainer {
-        AmieContainer {
+    fn candidate(id: &str, name: &str) -> SquadContainer {
+        SquadContainer {
             short_id: id.chars().take(12).collect(),
             label: name.to_string(),
             handle: AgentHandle {
@@ -167,7 +165,10 @@ mod tests {
 
     #[test]
     fn two_candidates_without_a_selector_are_ambiguous_and_attach_nothing() {
-        let candidates = vec![candidate("aaaa1111", "step-a"), candidate("bbbb2222", "step-b")];
+        let candidates = vec![
+            candidate("aaaa1111", "step-a"),
+            candidate("bbbb2222", "step-b"),
+        ];
         match resolve_attach_target(candidates, "c", None).unwrap() {
             AttachResolution::Ambiguous(both) => assert_eq!(both.len(), 2),
             other => panic!("expected Ambiguous, got {other:?}"),
@@ -176,18 +177,27 @@ mod tests {
 
     #[test]
     fn a_container_selector_outside_the_set_is_rejected_and_never_attaches() {
-        let candidates = vec![candidate("aaaa1111", "step-a"), candidate("bbbb2222", "step-b")];
-        let error = resolve_attach_target(candidates, "issue-triage", Some("cccc3333"))
-            .unwrap_err();
+        let candidates = vec![
+            candidate("aaaa1111", "step-a"),
+            candidate("bbbb2222", "step-b"),
+        ];
+        let error =
+            resolve_attach_target(candidates, "issue-triage", Some("cccc3333")).unwrap_err();
         let text = error.to_string();
         assert!(text.contains("not a running container"), "{text}");
         // The legal set is listed so the user can choose one.
-        assert!(text.contains("aaaa1111") && text.contains("bbbb2222"), "{text}");
+        assert!(
+            text.contains("aaaa1111") && text.contains("bbbb2222"),
+            "{text}"
+        );
     }
 
     #[test]
     fn a_valid_container_selector_resolves_to_its_single_match() {
-        let candidates = vec![candidate("aaaa1111", "step-a"), candidate("bbbb2222", "step-b")];
+        let candidates = vec![
+            candidate("aaaa1111", "step-a"),
+            candidate("bbbb2222", "step-b"),
+        ];
         match resolve_attach_target(candidates, "c", Some("bbbb2222")).unwrap() {
             AttachResolution::One(container) => assert_eq!(container.handle.id, "bbbb2222"),
             other => panic!("expected One, got {other:?}"),

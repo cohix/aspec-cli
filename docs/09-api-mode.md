@@ -8,6 +8,11 @@ API metadata, credentials, and output logs are recorded durably under
 `~/.awman/api/` for auditability. The shared SQLite database is stored at
 `~/.awman/data/awman.db`.
 
+API mode is for request-driven sessions and commands. For recurring,
+scheduled automation, use the separate [squad daemon](16-squad.md),
+which manages scheduled tasks and their unattended agent runs. The API server
+and squad daemon share the database and are mutually exclusive on one machine.
+
 ---
 
 ## When to use API mode
@@ -393,17 +398,19 @@ If `bind()` fails because the port is already in use, the error message includes
 error: port 9876 is already in use (PID 41290)
 ```
 
-### API server and amie daemon
+### API server and squad daemon
 
-The API server and the amie daemon share the database and cannot run at the
+The API server and the squad daemon share the database and cannot run at the
 same time. Starting either one while the other is alive fails before the new
 process starts. The error names the other process and its PID, for example:
 
 ```
-error: the amie daemon is already running (PID 41290). Run `awman amie stop` first; awman api and the amie daemon cannot run at the same time.
+error: the squad daemon is already running (PID 41290). Run `awman squad stop` first; awman api and the squad daemon cannot run at the same time.
 ```
 
-Stop the running process before starting the other one.
+Stop the running process before starting the other one. See [Squad and
+`awman api`](16-squad.md#squad-and-awman-api) for the equivalent instructions
+from the squad user's perspective.
 
 ---
 
@@ -1330,8 +1337,8 @@ backup, but never removes the live database.
 
 `workflow.state.json` is written and updated atomically (write to a temp file, then rename) each time the workflow advances to a new step. The file uses the identical JSON structure as the local workflow state in `$GITROOT/.awman/workflows/`. It is created only when the command runs a workflow; it is never present for `exec prompt`, `chat`, `implement` (without `--workflow`), or other non-workflow commands.
 
-`awman.db` contains the API session and command records (and the amie condition
-and run records when amie is in use):
+`awman.db` contains the API session and command records (and the squad task
+and run records when squad is in use):
 
 **`sessions`** — one row per session: `id` (UUID), `workdir`, `status` (`active`/`closed`), `created_at`, `closed_at`.
 
@@ -1440,7 +1447,7 @@ On `SIGTERM` or `SIGINT`, the server finishes all in-flight HTTP responses and a
 | Multiple `POST /v1/commands` in quick succession | All commands are enqueued; first returns immediately, subsequent requests also return immediately with different command IDs; all are processed in FIFO order (one per session at a time) |
 | Session is `closing` on `POST /v1/commands` | HTTP 409 `"session is closing"`; command is rejected to prevent new work during graceful shutdown |
 | Server already running when `api start` is invoked | Error printed; exits non-zero |
-| API server or amie daemon already running when the other is started | Error names the other process and its PID; the new process does not start |
+| API server or squad daemon already running when the other is started | Error names the other process and its PID; the new process does not start |
 | Port already bound (EADDRINUSE) | Error includes the port number and PID holding it |
 | `--workdirs` path doesn't exist at startup | Warning logged; path remains on allowlist |
 | `awman api kill` when server is not running | Informational message; exits 0 |

@@ -134,4 +134,4 @@ an error, so a one-off request cannot silently change modes. See
 
 ---
 
-[← amie](16-amie.md) · [Back to contents](contents.md)
+[← squad](16-squad.md) · [Back to contents](contents.md)

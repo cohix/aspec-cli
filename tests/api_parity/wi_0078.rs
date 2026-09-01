@@ -99,23 +99,23 @@ async fn spawn_router(
 // ─── Dispatch catalogue unit tests ────────────────────────────────────────────
 
 #[test]
-fn catalogue_api_allowed_commands_includes_exec_and_amie_commands() {
+fn catalogue_api_allowed_commands_includes_exec_and_squad_commands() {
     let cat = CommandCatalogue::get();
     let allowed = cat.api_allowed_commands();
 
     let expected = [
         ("exec", "prompt"),
         ("exec", "workflow"),
-        ("amie", "start"),
-        ("amie", "stop"),
-        ("amie", "status"),
-        ("amie", "logs"),
-        ("amie", "add"),
-        ("amie", "list"),
-        ("amie", "show"),
-        ("amie", "remove"),
-        ("amie", "pause"),
-        ("amie", "resume"),
+        ("squad", "start"),
+        ("squad", "stop"),
+        ("squad", "status"),
+        ("squad", "logs"),
+        ("squad", "add"),
+        ("squad", "list"),
+        ("squad", "show"),
+        ("squad", "remove"),
+        ("squad", "pause"),
+        ("squad", "resume"),
     ];
     assert_eq!(
         allowed.as_slice(),

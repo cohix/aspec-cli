@@ -66,7 +66,7 @@ impl WorkflowStateStore {
     }
 
     /// Read a workflow state from an already-recorded engine state path.
-    /// Callers that persist this path (such as amie runs) must use this rather
+    /// Callers that persist this path (such as squad runs) must use this rather
     /// than reconstructing the filename from repository data.
     pub fn read_state_path(path: &Path) -> Result<Option<WorkflowState>, DataError> {
         if !path.exists() {

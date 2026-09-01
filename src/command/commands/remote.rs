@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::command::commands::Command;
 use crate::command::commands::remote_client::RemoteClient;
+use crate::command::commands::Command;
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;
 use crate::data::message::{MessageLevel, UserMessage, UserMessageSink};
@@ -717,7 +717,7 @@ async fn run_session_start(
 /// Render the ReadySummary into a multi-line box similar to the CLI/TUI
 /// `ready` rendering. Uses `render_summary_box` from the CLI helpers.
 fn render_ready_summary(summary: &crate::engine::ready::summary::ReadySummary) -> String {
-    use crate::data::step_status::{StepStatus, render_summary_box};
+    use crate::data::step_status::{render_summary_box, StepStatus};
     let rows: Vec<(&str, &StepStatus)> = vec![
         ("Dockerfile", &summary.dockerfile),
         ("Base image", &summary.base_image),

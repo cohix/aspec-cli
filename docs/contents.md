@@ -24,7 +24,7 @@ A guide to using awman, the containerized multi-agent terminal multiplexer.
 | 13 | [Dynamic Workflows](13-dynamic-workflows.md) | `--dynamic` mode — leader agent designs the workflow, repair loop, `--leader` flag |
 | 14 | [Cleaning Up](14-cleaning-up.md) | `awman clean` — remove containers, workflow files, and dangling images |
 | 15 | [Parallel Workflows](15-parallel-workflows.md) | Concurrent workflow steps, `maxConcurrentAgents`, engine scheduling, per-container stuck/yolo, control board scoping |
-| 16 | [amie](16-amie.md) | Conditions, the amie daemon, the amie TUI tab, attach, unattended-execution guardrails, `amie` config |
+| 16 | [squad](16-squad.md) | Tasks, durable workspaces and overlays, the squad daemon, card-grid TUI tab, attach, unattended-execution guardrails, `squad` config |
 | 17 | [ACP Mode](17-acp-mode.md) | Structured agent sessions (CLI today), launch-mode selection, workflow/TUI limits |
 | — | [Architecture (Detailed)](architecture.md) | Source layout, in-depth design decisions |
 

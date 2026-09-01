@@ -7,8 +7,8 @@ use crate::command::commands::agent_auth::AgentAuthFrontend;
 use crate::command::commands::agent_setup::AgentSetupFrontend;
 use crate::command::commands::mount_scope::MountScopeFrontend;
 use crate::command::commands::{
-    Command, collect_all_overlay_specs, parse_overlay_list, resolve_agent,
-    resolve_context_overlays, warn_legacy_config,
+    collect_all_overlay_specs, parse_overlay_list, resolve_agent, resolve_context_overlays,
+    warn_legacy_config, Command,
 };
 use crate::command::dispatch::Engines;
 use crate::command::error::CommandError;

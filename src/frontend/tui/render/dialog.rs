@@ -639,15 +639,15 @@ pub(super) fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Fr
         dialogs::Dialog::ConfigShow(state) => {
             render_config_show(state, area, frame);
         }
-        dialogs::Dialog::AmieConditionDetail(state) => {
-            render_amie_detail(state, area, frame);
+        dialogs::Dialog::SquadTaskDetail(state) => {
+            render_squad_detail(state, area, frame);
         }
-        dialogs::Dialog::AmieRemoveConfirm { name } => {
+        dialogs::Dialog::SquadRemoveConfirm { name } => {
             let width = 60u16.min(area.width.saturating_sub(4).max(40));
             let dialog_area = dialogs::centered_fixed(width, 8, area);
             let inner =
-                dialogs::render_dialog_frame("Remove condition", Color::Yellow, dialog_area, frame);
-            let text = format!("  Remove condition \"{name}\"?\n\n  [y] remove   [n / Esc] cancel");
+                dialogs::render_dialog_frame("Remove task", Color::Yellow, dialog_area, frame);
+            let text = format!("  Remove task \"{name}\"?\n\n  [y] remove   [n / Esc] cancel");
             frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), inner);
         }
         dialogs::Dialog::Loading { title } => {
@@ -751,7 +751,7 @@ pub(super) fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Fr
         dialogs::Dialog::Notice { title, body } => {
             let body_lines = body.lines().count() as u16;
             let title_w = unicode_width::UnicodeWidthStr::width(title.as_str()) as u16 + 4;
-            // The amie key snippet contains a box-drawn banner and an indented
+            // The squad key snippet contains a box-drawn banner and an indented
             // export line; size to the widest line so neither wraps.
             let max_body_width = body
                 .lines()
@@ -776,46 +776,63 @@ pub(super) fn render_dialog(dialog: &dialogs::Dialog, area: Rect, frame: &mut Fr
     }
 }
 
-/// Render the amie condition-detail modal (WI 0102): the field block plus the
+/// Render the squad task-detail modal (WI 0102): the field block plus the
 /// scrollable run-history table. Reads only the dialog state, which
-/// `tick_all_tabs` keeps in sync with the amie tab's snapshot.
-fn render_amie_detail(state: &dialogs::AmieDetailState, area: Rect, frame: &mut Frame) {
-    use crate::data::fs::condition_store::{ConditionStatus, MountScope};
+/// `tick_all_tabs` keeps in sync with the squad tab's snapshot.
+fn render_squad_detail(state: &dialogs::SquadDetailState, area: Rect, frame: &mut Frame) {
+    use crate::data::fs::task_store::{MountScope, TaskStatus};
 
     let width = area.width.saturating_sub(6).clamp(50, 90);
     let height = area.height.saturating_sub(4).clamp(12, 30);
     let dialog_area = dialogs::centered_fixed(width, height, area);
-    let title = format!("condition: {}", state.name);
+    let title = format!("task: {}", state.name);
     let inner = dialogs::render_dialog_frame(&title, Color::Cyan, dialog_area, frame);
     if inner.height == 0 || inner.width == 0 {
         return;
     }
 
-    let c = &state.condition;
+    let c = &state.task;
     let mount = match c.mount_scope {
         MountScope::Cwd => "cwd",
         MountScope::GitRoot => "gitroot",
+        MountScope::Directory => "directory (no worktree)",
     };
     let status = match c.status {
-        ConditionStatus::Active => "active",
-        ConditionStatus::Paused => "paused",
+        TaskStatus::Active => "active",
+        TaskStatus::Paused => "paused",
     };
     let fields: Vec<Line> = vec![
-        amie_field_line("Description", &c.description),
-        amie_field_line("Status", status),
-        amie_field_line("Mount scope", mount),
-        amie_field_line(
+        squad_field_line("Description", &c.description),
+        squad_field_line("Status", status),
+        squad_field_line("Mount scope", mount),
+        squad_field_line(
             "Interval",
             &crate::frontend::tui::tabs::format_duration(c.interval_secs),
         ),
-        amie_field_line("Agent", c.agent.as_deref().unwrap_or("(default)")),
-        amie_field_line("Model", c.model.as_deref().unwrap_or("(default)")),
-        amie_field_line("Repo scope", &c.repo_scope.display().to_string()),
-        amie_field_line(
+        squad_field_line("Agent", c.agent.as_deref().unwrap_or("(default)")),
+        squad_field_line("Model", c.model.as_deref().unwrap_or("(default)")),
+        squad_field_line("Workspace", &c.repo_scope.display().to_string()),
+        squad_field_line(
+            "Worktree",
+            if c.uses_worktree() {
+                "yes"
+            } else {
+                "no (mounted directly)"
+            },
+        ),
+        squad_field_line(
+            "Overlays",
+            &if c.overlays.is_empty() {
+                "(none)".to_string()
+            } else {
+                c.overlays.join(", ")
+            },
+        ),
+        squad_field_line(
             "Created",
             &c.created_at.format("%Y-%m-%d %H:%M").to_string(),
         ),
-        amie_field_line(
+        squad_field_line(
             "Updated",
             &c.updated_at.format("%Y-%m-%d %H:%M").to_string(),
         ),
@@ -826,6 +843,7 @@ fn render_amie_detail(state: &dialogs::AmieDetailState, area: Rect, frame: &mut 
         Constraint::Length(field_h),
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(1),
     ])
     .split(inner);
     frame.render_widget(Paragraph::new(fields), chunks[0]);
@@ -838,11 +856,23 @@ fn render_amie_detail(state: &dialogs::AmieDetailState, area: Rect, frame: &mut 
         )),
         chunks[1],
     );
-    render_amie_run_history(&state.runs, state.scroll, chunks[2], frame);
+    render_squad_run_history(&state.runs, state.scroll, chunks[2], frame);
+
+    // WI 0106 Part 5: the action tooltip — the same per-task actions the list
+    // view's footer hints at, scoped to this modal's task and actually wired
+    // up (`dialog_router::handle_dialog_char`) so a user doesn't have to
+    // close the modal to attach/pause/resume/remove.
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "a attach \u{b7} p pause \u{b7} r resume \u{b7} d delete \u{b7} esc close",
+            Style::default().fg(Color::DarkGray),
+        )),
+        chunks[3],
+    );
 }
 
 /// A `label: value` line for the detail modal's field block.
-fn amie_field_line(label: &str, value: &str) -> Line<'static> {
+fn squad_field_line(label: &str, value: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
         Span::raw(value.to_string()),
@@ -851,13 +881,13 @@ fn amie_field_line(label: &str, value: &str) -> Line<'static> {
 
 /// The run-history table (Started | Status | Finished | Error), scrolled by
 /// `scroll` rows.
-fn render_amie_run_history(
-    runs: &[crate::data::fs::condition_store::Run],
+fn render_squad_run_history(
+    runs: &[crate::data::fs::task_store::Run],
     scroll: usize,
     area: Rect,
     frame: &mut Frame,
 ) {
-    use crate::data::fs::condition_store::RunStatus;
+    use crate::data::fs::task_store::RunStatus;
     let header_style = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);

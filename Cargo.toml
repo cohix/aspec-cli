@@ -96,67 +96,67 @@ path = "tests/api_parity/main.rs"
 name = "binary_smoke"
 path = "tests/binary_smoke/main.rs"
 
-# ── WI 0101 amie test coverage (tests-amie step) ──────────────────────────────
+# ── WI 0101 squad test coverage (tests-squad step) ──────────────────────────────
 # `autotests = false` above means top-level `tests/*.rs` files are NOT
 # auto-discovered in this repo despite the usual Cargo convention; each needs
 # its own explicit [[test]] entry or `cargo test` silently never builds it.
 
 [[test]]
-name = "amie_naming"
-path = "tests/amie_naming.rs"
+name = "squad_naming"
+path = "tests/squad_naming.rs"
 
 [[test]]
-name = "amie_runtime_discovery"
-path = "tests/amie_runtime_discovery.rs"
+name = "squad_runtime_discovery"
+path = "tests/squad_runtime_discovery.rs"
 
 [[test]]
-name = "amie_attach"
-path = "tests/amie_attach.rs"
+name = "squad_attach"
+path = "tests/squad_attach.rs"
 
 [[test]]
-name = "amie_status_marker"
-path = "tests/amie_status_marker.rs"
+name = "squad_status_marker"
+path = "tests/squad_status_marker.rs"
 
 [[test]]
-name = "amie_scheduler"
-path = "tests/amie_scheduler.rs"
+name = "squad_scheduler"
+path = "tests/squad_scheduler.rs"
 
 [[test]]
-name = "amie_repair_loop"
-path = "tests/amie_repair_loop.rs"
+name = "squad_repair_loop"
+path = "tests/squad_repair_loop.rs"
 
 [[test]]
-name = "amie_daemon_http"
-path = "tests/amie_daemon_http.rs"
+name = "squad_daemon_http"
+path = "tests/squad_daemon_http.rs"
 
 [[test]]
-name = "amie_daemon_e2e"
-path = "tests/amie_daemon_e2e.rs"
+name = "squad_daemon_e2e"
+path = "tests/squad_daemon_e2e.rs"
 
 [[test]]
-name = "amie_mutual_exclusion"
-path = "tests/amie_mutual_exclusion.rs"
+name = "squad_mutual_exclusion"
+path = "tests/squad_mutual_exclusion.rs"
 
 [[test]]
-name = "amie_sandbox_refusal"
-path = "tests/amie_sandbox_refusal.rs"
+name = "squad_sandbox_refusal"
+path = "tests/squad_sandbox_refusal.rs"
 
 [[test]]
-name = "amie_cli_gateway"
-path = "tests/amie_cli_gateway.rs"
+name = "squad_cli_gateway"
+path = "tests/squad_cli_gateway.rs"
 
 [[test]]
-name = "amie_tui_tab"
-path = "tests/amie_tui_tab.rs"
+name = "squad_tui_tab"
+path = "tests/squad_tui_tab.rs"
 
 [[test]]
-name = "amie_attach_frontends"
-path = "tests/amie_attach_frontends.rs"
+name = "squad_attach_frontends"
+path = "tests/squad_attach_frontends.rs"
 
 [[test]]
-name = "amie_blockers"
-path = "tests/amie_blockers.rs"
+name = "squad_blockers"
+path = "tests/squad_blockers.rs"
 
 [[test]]
-name = "amie_auth_key"
-path = "tests/amie_auth_key.rs"
+name = "squad_auth_key"
+path = "tests/squad_auth_key.rs"

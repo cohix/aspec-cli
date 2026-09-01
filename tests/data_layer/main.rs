@@ -6,9 +6,6 @@
 #[path = "../helpers/mod.rs"]
 mod helpers;
 
-mod amie_config;
-mod amie_paths;
-mod condition_store;
 mod config_session_roundtrip;
 mod daemon_primitives;
 mod db_migration;
@@ -16,3 +13,6 @@ mod issue_e2e;
 mod issue_integration;
 mod rename_0077;
 mod sqlite_upgrade_compat;
+mod squad_config;
+mod squad_paths;
+mod task_store;

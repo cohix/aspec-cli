@@ -412,7 +412,40 @@ impl WorkflowEngine {
 
     /// Resume from persisted state. Calls `confirm_resume` on the frontend if
     /// the workflow hash has drifted.
+    ///
+    /// State is persisted under the session's git root, the same place
+    /// `exec workflow` has always kept it.
     pub async fn resume(
+        session: &Session,
+        workflow: Workflow,
+        work_item_context: Option<crate::data::workflow_prompt_template::WorkItemContext>,
+        frontend: Box<dyn WorkflowFrontend>,
+        agent_factory: Box<dyn AgentExecutionFactory>,
+        git_engine: Arc<GitEngine>,
+        overlay_engine: Arc<OverlayEngine>,
+    ) -> Result<Self, EngineError> {
+        Self::resume_with_state_root(
+            session,
+            workflow,
+            work_item_context,
+            frontend,
+            agent_factory,
+            git_engine,
+            overlay_engine,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::resume`], with the workflow-state file rooted somewhere other
+    /// than the session's git root.
+    ///
+    /// The state store creates, rewrites and deletes its file, so a caller
+    /// whose session root must stay untouched between runs — a squad task
+    /// bound to its durable workspace (WI 0106 §6a) — points this at a
+    /// run-scoped directory instead. `None` keeps the session-rooted default.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resume_with_state_root(
         session: &Session,
         workflow: Workflow,
         work_item_context: Option<crate::data::workflow_prompt_template::WorkItemContext>,
@@ -420,11 +453,15 @@ impl WorkflowEngine {
         agent_factory: Box<dyn AgentExecutionFactory>,
         git_engine: Arc<GitEngine>,
         overlay_engine: Arc<OverlayEngine>,
+        state_root: Option<std::path::PathBuf>,
     ) -> Result<Self, EngineError> {
         let dag = WorkflowDag::build(&workflow.steps).map_err(EngineError::Data)?;
         let workflow_context_permission =
             workflow_context_permission_from_overlay_strings(workflow.overlays.as_deref());
-        let store = WorkflowStateStore::new(session);
+        let store = match state_root {
+            Some(root) => WorkflowStateStore::at_git_root(root),
+            None => WorkflowStateStore::new(session),
+        };
         let workflow_name = workflow_name_for(&workflow);
         let work_item_number = work_item_context.as_ref().map(|c| c.number);
         let saved = store.load(work_item_number, &workflow_name)?;
@@ -3831,6 +3868,52 @@ mod tests {
         .unwrap();
         let result = engine.run_to_completion().await.unwrap();
         assert_eq!(result, WorkflowOutcome::Completed);
+    }
+
+    /// WI 0106 §6a: a squad task bound to its durable workspace has no
+    /// worktree to absorb awman's own bookkeeping, and that directory must
+    /// survive every run untouched. `resume_with_state_root` therefore keeps
+    /// the state file — which the engine creates, rewrites and (on a fresh
+    /// run) deletes — entirely outside the session's root.
+    #[tokio::test]
+    async fn a_state_root_override_keeps_the_state_file_out_of_the_session_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = make_session(&tmp);
+        let run_dir = tempfile::tempdir().unwrap();
+        let wf = make_workflow(
+            Some("wf-state-root"),
+            Some("claude"),
+            vec![make_step("a", &[], None), make_step("b", &["a"], None)],
+        );
+
+        let overlay = OverlayEngine::with_auth_resolver(
+            crate::data::fs::auth_paths::AuthPathResolver::at_home(session.git_root()),
+        );
+        let mut engine = WorkflowEngine::resume_with_state_root(
+            &session,
+            wf,
+            None,
+            Box::new(FakeWorkflowFrontend::new([NextAction::Pause])),
+            Box::new(FakeAgentExecutionFactory::always_success()),
+            Arc::new(GitEngine::new()),
+            Arc::new(overlay),
+            Some(run_dir.path().to_path_buf()),
+        )
+        .await
+        .unwrap();
+        engine.run_to_completion().await.unwrap();
+
+        assert!(
+            WorkflowStateStore::at_git_root(run_dir.path())
+                .load(None, "wf-state-root")
+                .unwrap()
+                .is_some(),
+            "state must be persisted under the override root"
+        );
+        assert!(
+            !tmp.path().join(".awman").join("workflows").exists(),
+            "the session root must be left untouched by the engine's bookkeeping"
+        );
     }
 
     #[tokio::test]

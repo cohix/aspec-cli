@@ -756,13 +756,13 @@ fn esc_on_parallel_yolo_modal_cancels_the_focused_slots_flag_only() {
     );
 }
 
-// ─── amie tab key handling (WI 0102) ──────────────────────────────────────
+// ─── squad tab key handling (WI 0102) ──────────────────────────────────────
 
-/// Push the singleton amie tab (bypassing the daemon-backed
-/// `open_or_focus_amie_tab` path — these tests only need `is_amie` state, not
+/// Push the singleton squad tab (bypassing the daemon-backed
+/// `open_or_focus_squad_tab` path — these tests only need `is_squad` state, not
 /// a live gateway), focus it, and return its index.
-fn push_amie_tab(app: &mut App) -> usize {
-    let tab = Tab::new_amie(make_session());
+fn push_squad_tab(app: &mut App) -> usize {
+    let tab = Tab::new_squad(make_session());
     app.tabs.push(tab);
     let idx = app.tabs.len() - 1;
     app.active_tab = idx;
@@ -770,41 +770,47 @@ fn push_amie_tab(app: &mut App) -> usize {
     idx
 }
 
-fn fake_condition(name: &str) -> crate::data::fs::condition_store::Condition {
-    use crate::data::fs::condition_store::{ConditionStatus, MountScope};
+fn fake_task(name: &str) -> crate::data::fs::task_store::Task {
+    use crate::data::fs::task_store::{MountScope, TaskStatus};
     let now = chrono::Utc::now();
-    crate::data::fs::condition_store::Condition {
+    crate::data::fs::task_store::Task {
         id: name.to_string(),
         name: name.to_string(),
-        description: "test condition".into(),
+        description: "test task".into(),
         repo_scope: std::path::PathBuf::from("/tmp"),
         mount_scope: MountScope::GitRoot,
+        overlays: Vec::new(),
         interval_secs: 300,
-        status: ConditionStatus::Active,
+        status: TaskStatus::Active,
         agent: None,
         model: None,
         backoff_until: None,
         created_at: now,
         updated_at: now,
         last_run_at: None,
+        last_run_status: None,
     }
 }
 
-/// Populate the active (amie) tab's snapshot with fake conditions and select
+/// Populate the active (squad) tab's snapshot with fake tasks and select
 /// the first one, so the selection-dependent actions (`a`/`Enter`/`p`/`r`/`d`)
 /// have something to act on.
-fn set_amie_conditions(app: &mut App, names: &[&str]) {
-    let state = app.active_tab().amie.as_ref().expect("active tab is amie");
+fn set_squad_tasks(app: &mut App, names: &[&str]) {
+    let state = app
+        .active_tab()
+        .squad
+        .as_ref()
+        .expect("active tab is squad");
     let mut snap = state.snapshot.lock().unwrap();
-    snap.conditions = names.iter().map(|n| fake_condition(n)).collect();
+    snap.tasks = names.iter().map(|n| fake_task(n)).collect();
     snap.loaded = true;
 }
 
 /// An `App` whose `Engines` report no container runtime, so any code path
-/// that would otherwise touch the real amie daemon (`AmieSupervisor`,
+/// that would otherwise touch the real squad daemon (`SquadSupervisor`,
 /// `provision_key`'s key-hash write) instead takes the sandbox-refusal
 /// fast-path deterministically, with no filesystem or process side effects —
-/// mirroring `tests/amie_sandbox_refusal.rs`'s `FakeSandboxRuntime` approach.
+/// mirroring `tests/squad_sandbox_refusal.rs`'s `FakeSandboxRuntime` approach.
 fn make_app_no_container_runtime() -> App {
     let rt = Box::leak(Box::new(tokio::runtime::Runtime::new().unwrap()));
     let catalogue = CommandCatalogue::get();
@@ -821,12 +827,12 @@ fn make_app_no_container_runtime() -> App {
     )
 }
 
-/// An app with a second ordinary tab plus the amie tab active — enough tabs
-/// for Ctrl-A/Ctrl-D navigation away from the amie tab to be observable.
-fn amie_list_app() -> App {
+/// An app with a second ordinary tab plus the squad tab active — enough tabs
+/// for Ctrl-A/Ctrl-D navigation away from the squad tab to be observable.
+fn squad_list_app() -> App {
     let mut app = make_app();
     app.add_tab(make_session());
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     app
 }
 
@@ -837,8 +843,8 @@ fn ctrl_t_new_tab_dialog_shows_press_ctrl_a_hint() {
     match &app.active_dialog {
         Some(Dialog::TextInput { prompt, .. }) => {
             assert!(
-                prompt.contains("Press Ctrl-A to open amie"),
-                "New Tab prompt must hint at amie: {prompt:?}"
+                prompt.contains("Press Ctrl-A to open squad"),
+                "New Tab prompt must hint at squad: {prompt:?}"
             );
         }
         _ => panic!("Ctrl-T must open the New Tab TextInput dialog"),
@@ -846,9 +852,9 @@ fn ctrl_t_new_tab_dialog_shows_press_ctrl_a_hint() {
 }
 
 #[test]
-fn ctrl_a_in_new_tab_dialog_focuses_existing_amie_tab_and_closes_dialog() {
+fn ctrl_a_in_new_tab_dialog_focuses_existing_squad_tab_and_closes_dialog() {
     let mut app = make_app();
-    let amie_idx = push_amie_tab(&mut app);
+    let squad_idx = push_squad_tab(&mut app);
     app.active_tab = 0; // back on the normal tab
     press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
     assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
@@ -858,28 +864,28 @@ fn ctrl_a_in_new_tab_dialog_focuses_existing_amie_tab_and_closes_dialog() {
         "Ctrl-A in the New Tab dialog must close it"
     );
     assert_eq!(
-        app.active_tab, amie_idx,
-        "Ctrl-A must activate the amie tab"
+        app.active_tab, squad_idx,
+        "Ctrl-A must activate the squad tab"
     );
 }
 
 // The load-bearing test for the Ctrl-A binding (implementation-contract.md
-// §2.8): the New Tab dialog is the ONLY thing that reroutes Ctrl-A to amie.
+// §2.8): the New Tab dialog is the ONLY thing that reroutes Ctrl-A to squad.
 // Both directions are asserted with three tabs open, so "previous tab" (tab
-// 0) and "the amie tab" (tab 2) are distinct and the two behaviors can't be
+// 0) and "the squad tab" (tab 2) are distinct and the two behaviors can't be
 // confused with one another.
 #[test]
-fn ctrl_a_without_dialog_switches_to_previous_tab_and_does_not_open_amie() {
+fn ctrl_a_without_dialog_switches_to_previous_tab_and_does_not_open_squad() {
     let mut app = make_app(); // tab 0
     app.add_tab(make_session()); // tab 1
-    let amie_idx = push_amie_tab(&mut app); // tab 2 == amie, active_tab == amie_idx
+    let squad_idx = push_squad_tab(&mut app); // tab 2 == squad, active_tab == squad_idx
     app.active_tab = 1; // sit on the middle (normal) tab
     press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
     assert_eq!(
         app.active_tab, 0,
         "Ctrl-A with no dialog open must switch to the previous tab"
     );
-    assert_ne!(app.active_tab, amie_idx);
+    assert_ne!(app.active_tab, squad_idx);
     assert!(
         app.active_dialog.is_none(),
         "Ctrl-A with no dialog open must not open any dialog"
@@ -887,17 +893,17 @@ fn ctrl_a_without_dialog_switches_to_previous_tab_and_does_not_open_amie() {
 }
 
 #[test]
-fn ctrl_a_with_new_tab_dialog_open_opens_amie_and_does_not_switch_tabs() {
+fn ctrl_a_with_new_tab_dialog_open_opens_squad_and_does_not_switch_tabs() {
     let mut app = make_app(); // tab 0
     app.add_tab(make_session()); // tab 1
-    let amie_idx = push_amie_tab(&mut app); // tab 2 == amie
-    app.active_tab = 1; // sit on the middle tab: "previous" (0) != amie (2)
+    let squad_idx = push_squad_tab(&mut app); // tab 2 == squad
+    app.active_tab = 1; // sit on the middle tab: "previous" (0) != squad (2)
     press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
     assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
     press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
     assert_eq!(
-        app.active_tab, amie_idx,
-        "Ctrl-A inside the New Tab dialog must open the amie tab"
+        app.active_tab, squad_idx,
+        "Ctrl-A inside the New Tab dialog must open the squad tab"
     );
     assert_ne!(
         app.active_tab, 0,
@@ -909,88 +915,88 @@ fn ctrl_a_with_new_tab_dialog_open_opens_amie_and_does_not_switch_tabs() {
     );
 }
 
-// ── the six amie list keys fire only in FocusContext::AmieList ────────────
+// ── the six squad list keys fire only in FocusContext::SquadList ────────────
 
 #[test]
-fn amie_list_enter_opens_condition_detail() {
+fn squad_list_enter_opens_task_detail() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["cond-a"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
     press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     match &app.active_dialog {
-        Some(Dialog::AmieConditionDetail(state)) => assert_eq!(state.name, "cond-a"),
-        _ => panic!("Enter in the amie list must open the condition detail modal"),
+        Some(Dialog::SquadTaskDetail(state)) => assert_eq!(state.name, "task-a"),
+        _ => panic!("Enter in the squad list must open the task detail modal"),
     }
 }
 
 #[test]
-fn amie_list_enter_is_noop_when_list_is_empty() {
+fn squad_list_enter_is_noop_when_list_is_empty() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(
         app.active_dialog.is_none(),
-        "Enter on an empty amie list must not open a dialog"
+        "Enter on an empty squad list must not open a dialog"
     );
 }
 
 #[test]
-fn amie_list_a_routes_to_start_amie_attach() {
+fn squad_list_a_routes_to_start_squad_attach() {
     // Force the sandbox-refusal fast-path (see `make_app_no_container_runtime`)
     // so this stays deterministic and side-effect-free while still proving
-    // `a` reaches `start_amie_attach` rather than doing nothing.
+    // `a` reaches `start_squad_attach` rather than doing nothing.
     let mut app = make_app_no_container_runtime();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["cond-a"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
     press_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
     assert!(
         app.status_bar
             .text
-            .contains("amie requires a container runtime"),
-        "'a' in the amie list must route to start_amie_attach: {:?}",
+            .contains("squad requires a container runtime"),
+        "'a' in the squad list must route to start_squad_attach: {:?}",
         app.status_bar.text
     );
 }
 
 #[test]
-fn amie_list_n_dispatches_amie_add_interview() {
+fn squad_list_n_dispatches_squad_add_interview() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     press_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
     assert!(
         app.active_tab().command_result_rx.is_some(),
-        "'n' in the amie list must dispatch `amie add --interview`"
+        "'n' in the squad list must dispatch `squad add --interview`"
     );
 }
 
 #[test]
-fn amie_list_p_dispatches_pause() {
+fn squad_list_p_dispatches_pause() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["cond-a"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
     press_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
     assert!(
         app.active_tab().command_result_rx.is_some(),
-        "'p' in the amie list must dispatch `amie pause`"
+        "'p' in the squad list must dispatch `squad pause`"
     );
 }
 
 #[test]
-fn amie_list_r_dispatches_resume() {
+fn squad_list_r_dispatches_resume() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["cond-a"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
     press_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
     assert!(
         app.active_tab().command_result_rx.is_some(),
-        "'r' in the amie list must dispatch `amie resume`"
+        "'r' in the squad list must dispatch `squad resume`"
     );
 }
 
 #[test]
-fn amie_list_p_and_r_are_noop_when_list_is_empty() {
+fn squad_list_p_and_r_are_noop_when_list_is_empty() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
+    push_squad_tab(&mut app);
     press_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
     assert!(app.active_tab().command_result_rx.is_none());
     press_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
@@ -998,14 +1004,14 @@ fn amie_list_p_and_r_are_noop_when_list_is_empty() {
 }
 
 #[test]
-fn amie_list_d_opens_remove_confirm_and_only_dispatches_on_y() {
+fn squad_list_d_opens_remove_confirm_and_only_dispatches_on_y() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["cond-a"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
     press_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
     match &app.active_dialog {
-        Some(Dialog::AmieRemoveConfirm { name }) => assert_eq!(name, "cond-a"),
-        _ => panic!("'d' must open Dialog::AmieRemoveConfirm"),
+        Some(Dialog::SquadRemoveConfirm { name }) => assert_eq!(name, "task-a"),
+        _ => panic!("'d' must open Dialog::SquadRemoveConfirm"),
     }
     assert!(
         app.active_tab().command_result_rx.is_none(),
@@ -1018,15 +1024,15 @@ fn amie_list_d_opens_remove_confirm_and_only_dispatches_on_y() {
     );
     assert!(
         app.active_tab().command_result_rx.is_some(),
-        "'y' must dispatch `amie remove cond-a`"
+        "'y' must dispatch `squad remove task-a`"
     );
 }
 
 #[test]
-fn amie_list_d_then_n_dismisses_without_dispatching() {
+fn squad_list_d_then_n_dismisses_without_dispatching() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["cond-a"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
     press_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
     press_key(&mut app, KeyCode::Char('n'), KeyModifiers::NONE);
     assert!(app.active_dialog.is_none());
@@ -1037,7 +1043,7 @@ fn amie_list_d_then_n_dismisses_without_dispatching() {
 }
 
 #[test]
-fn amie_list_keys_are_inert_on_a_normal_tab() {
+fn squad_list_keys_are_inert_on_a_normal_tab() {
     let mut app = make_app();
     app.focus = Focus::ExecutionWindow;
     for key in [
@@ -1052,115 +1058,213 @@ fn amie_list_keys_are_inert_on_a_normal_tab() {
     }
     assert!(
         app.active_dialog.is_none(),
-        "amie list keys must not fire outside FocusContext::AmieList"
+        "squad list keys must not fire outside FocusContext::SquadList"
     );
     assert_eq!(app.tabs.len(), 1, "no tab must be added or removed");
 }
 
 #[test]
-fn amie_list_arrows_move_selection_not_scroll_offset() {
+fn squad_list_arrows_move_selection_not_scroll_offset() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["a", "b", "c"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["a", "b", "c"]);
     let before_scroll = app.active_tab().scroll_offset;
     press_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
-    assert_eq!(app.active_tab().amie.as_ref().unwrap().selected, 1);
+    assert_eq!(app.active_tab().squad.as_ref().unwrap().selected, 1);
     assert_eq!(
         app.active_tab().scroll_offset,
         before_scroll,
-        "scroll_offset must be untouched while the amie list holds focus"
+        "scroll_offset must be untouched while the squad list holds focus"
     );
     press_key(&mut app, KeyCode::Up, KeyModifiers::NONE);
-    assert_eq!(app.active_tab().amie.as_ref().unwrap().selected, 0);
+    assert_eq!(app.active_tab().squad.as_ref().unwrap().selected, 0);
 }
 
 #[test]
-fn amie_list_context_not_selected_while_attach_owns_the_tabs_slots() {
+fn squad_list_context_not_selected_while_attach_owns_the_tabs_slots() {
     let mut app = make_app();
-    push_amie_tab(&mut app);
-    set_amie_conditions(&mut app, &["a", "b"]);
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["a", "b"]);
     app.active_tab_mut()
         .start_container("claude".into(), "awman-abc".into(), 80, 24);
     // With container_slots non-empty, arrow keys must fall through to the
     // ordinary ExecutionWindow/ContainerMaximized handling instead of moving
-    // the amie selection.
+    // the squad selection.
     press_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
     assert_eq!(
-        app.active_tab().amie.as_ref().unwrap().selected,
+        app.active_tab().squad.as_ref().unwrap().selected,
         0,
-        "FocusContext::AmieList must not apply while an attach session owns the tab's slots"
+        "FocusContext::SquadList must not apply while an attach session owns the tab's slots"
     );
 }
 
-// ── global Ctrl shortcuts keep their meaning while the amie list has focus ─
+// ── global Ctrl shortcuts keep their meaning while the squad list has focus ─
 // (implementation-contract.md §2.9: "the single most important regression
 // risk of adding a context")
 
 #[test]
-fn ctrl_t_still_opens_new_tab_dialog_from_amie_list() {
-    let mut app = amie_list_app();
+fn ctrl_t_still_opens_new_tab_dialog_from_squad_list() {
+    let mut app = squad_list_app();
     press_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
     assert!(matches!(app.active_dialog, Some(Dialog::TextInput { .. })));
 }
 
 #[test]
-fn ctrl_a_still_switches_tabs_from_amie_list() {
-    let mut app = amie_list_app();
-    let amie_idx = app.active_tab;
+fn ctrl_a_still_switches_tabs_from_squad_list() {
+    let mut app = squad_list_app();
+    let squad_idx = app.active_tab;
     press_key(&mut app, KeyCode::Char('a'), KeyModifiers::CONTROL);
     assert_ne!(
-        app.active_tab, amie_idx,
-        "Ctrl-A must still switch tabs when the amie list holds focus"
+        app.active_tab, squad_idx,
+        "Ctrl-A must still switch tabs when the squad list holds focus"
     );
 }
 
 #[test]
-fn ctrl_d_still_switches_tabs_from_amie_list() {
-    let mut app = amie_list_app();
-    let amie_idx = app.active_tab;
+fn ctrl_d_still_switches_tabs_from_squad_list() {
+    let mut app = squad_list_app();
+    let squad_idx = app.active_tab;
     press_key(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
     assert_ne!(
-        app.active_tab, amie_idx,
-        "Ctrl-D must still switch tabs when the amie list holds focus"
+        app.active_tab, squad_idx,
+        "Ctrl-D must still switch tabs when the squad list holds focus"
     );
 }
 
 #[test]
-fn ctrl_m_still_cycles_container_window_from_amie_list() {
-    let mut app = amie_list_app();
+fn ctrl_m_still_cycles_container_window_from_squad_list() {
+    let mut app = squad_list_app();
     let before = app.active_tab().container_window_state;
     press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
     assert_ne!(
         app.active_tab().container_window_state,
         before,
-        "Ctrl-M must still cycle the container window from the amie list"
+        "Ctrl-M must still cycle the container window from the squad list"
     );
 }
 
 #[test]
-fn ctrl_w_from_amie_list_is_silent_noop_without_a_workflow() {
-    let mut app = amie_list_app();
+fn ctrl_w_from_squad_list_is_silent_noop_without_a_workflow() {
+    let mut app = squad_list_app();
     press_key(&mut app, KeyCode::Char('w'), KeyModifiers::CONTROL);
     assert!(
         app.active_dialog.is_none(),
-        "Ctrl-W with no active workflow must stay a silent no-op from the amie list"
+        "Ctrl-W with no active workflow must stay a silent no-op from the squad list"
     );
 }
 
 #[test]
-fn ctrl_g_is_globally_intercepted_but_a_noop_on_the_amie_tab() {
-    let mut app = amie_list_app();
+fn ctrl_g_is_globally_intercepted_but_a_noop_on_the_squad_tab() {
+    let mut app = squad_list_app();
     press_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
     assert_eq!(
         app.active_tab().git_sidebar_state,
         crate::frontend::tui::git_sidebar::GitSidebarState::Closed,
-        "Ctrl-G must never open the git sidebar for the amie tab"
+        "Ctrl-G must never open the git sidebar for the squad tab"
     );
 }
 
 #[test]
-fn ctrl_c_still_opens_close_tab_confirm_from_amie_list() {
-    let mut app = amie_list_app();
+fn ctrl_c_still_opens_close_tab_confirm_from_squad_list() {
+    let mut app = squad_list_app();
     press_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert!(matches!(app.active_dialog, Some(Dialog::CloseTabConfirm)));
+}
+
+// ── the detail modal's action tooltip (WI 0106 Part 5) ─────────────────────
+
+/// Open the detail modal for `name`, whichever card the list happens to have
+/// selected.
+fn open_squad_detail(app: &mut App, name: &str) {
+    let task = {
+        let state = app
+            .active_tab()
+            .squad
+            .as_ref()
+            .expect("active tab is squad");
+        let snap = state.snapshot.lock().unwrap();
+        snap.tasks
+            .iter()
+            .find(|task| task.name == name)
+            .expect("modal must be opened for a task in the snapshot")
+            .clone()
+    };
+    app.active_dialog = Some(Dialog::SquadTaskDetail(
+        crate::frontend::tui::dialogs::SquadDetailState {
+            name: name.to_string(),
+            task,
+            runs: Vec::new(),
+            scroll: 0,
+        },
+    ));
+}
+
+/// The tooltip's keys must act on the task the modal is showing, not on
+/// whatever the card grid currently has selected — the two can differ, since
+/// the modal keeps showing its own task while the list reflows or the poller
+/// reorders it.
+#[test]
+fn squad_detail_modal_p_pauses_the_task_the_modal_is_showing() {
+    let mut app = make_app();
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a", "task-b"]);
+    // The grid selection stays on task-a; the modal is showing task-b.
+    open_squad_detail(&mut app, "task-b");
+
+    press_key(&mut app, KeyCode::Char('p'), KeyModifiers::NONE);
+
+    assert!(
+        app.active_dialog.is_none(),
+        "acting from the modal must close it"
+    );
+    assert!(
+        app.active_tab().command_result_rx.is_some(),
+        "'p' in the modal must dispatch `squad pause`, exactly as the list key does"
+    );
+}
+
+#[test]
+fn squad_detail_modal_r_resumes_and_d_confirms_against_the_modals_task() {
+    let mut app = make_app();
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a", "task-b"]);
+
+    open_squad_detail(&mut app, "task-b");
+    press_key(&mut app, KeyCode::Char('r'), KeyModifiers::NONE);
+    assert!(app.active_dialog.is_none());
+    assert!(
+        app.active_tab().command_result_rx.is_some(),
+        "'r' in the modal must dispatch `squad resume`"
+    );
+
+    open_squad_detail(&mut app, "task-b");
+    press_key(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+    match &app.active_dialog {
+        Some(Dialog::SquadRemoveConfirm { name }) => assert_eq!(
+            name, "task-b",
+            "the confirmation must target the modal's task, not the list selection"
+        ),
+        _ => panic!("'d' in the modal must open the remove confirmation"),
+    }
+}
+
+#[test]
+fn squad_detail_modal_a_routes_to_start_squad_attach() {
+    // Same sandbox-refusal fast-path the list-key test uses, so this stays
+    // deterministic and side-effect-free.
+    let mut app = make_app_no_container_runtime();
+    push_squad_tab(&mut app);
+    set_squad_tasks(&mut app, &["task-a"]);
+    open_squad_detail(&mut app, "task-a");
+
+    press_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+
+    assert!(app.active_dialog.is_none());
+    assert!(
+        app.status_bar
+            .text
+            .contains("squad requires a container runtime"),
+        "'a' in the modal must route to start_squad_attach: {:?}",
+        app.status_bar.text
+    );
 }

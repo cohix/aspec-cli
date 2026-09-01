@@ -209,7 +209,7 @@ impl AgentInstance for SandboxAgentInstance {
 // ─── Attach (re-attach into a foreign, already-running sandbox) ─────────────
 //
 // Sandbox attach exists for cross-tier `AgentRuntimeEngine` completeness and
-// the tier-parity tests; amie itself refuses to run under the sandbox tier
+// the tier-parity tests; squad itself refuses to run under the sandbox tier
 // (see Part 5). The sandbox tier carries its own minimal PTY bridge here
 // rather than reaching into the dsbx driver's private one, keeping the
 // WI-0090 layering rule (no `src/engine/container/` import) intact.

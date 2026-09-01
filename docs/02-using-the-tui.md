@@ -307,7 +307,7 @@ When the container window is visible and maximized, almost all keyboard input is
 
 #### Mouse scroll behavior
 
-awman forwards mouse scroll events to the agent when all of these conditions are true:
+awman forwards mouse scroll events to the agent when all of these tasks are true:
 - The agent has enabled mouse tracking (via escape sequences like `CSI ? 1000 h`)
 - You are viewing the live output (scrolled to the bottom)
 - You are not holding **Shift**
@@ -568,13 +568,13 @@ Tab names are truncated with `…` only when they don't fit their tab: at the mi
 | Grey | Idle or completed |
 | Blue | Running (no container) |
 | Green | Running with active container |
-| Cyan | The [amie tab](#the-amie-tab) |
+| Cyan | The [squad tab](#the-squad-tab) |
 | Purple / Magenta | Permanently bound to a remote API session |
 | Red | Exited with error |
 | Yellow | Container silent for >30 seconds (stuck warning) |
 | Alternating Yellow / Purple | Background yolo countdown in progress: tab label alternates between `⚠️ yolo in Ns` and `🤘 yolo in Ns` every 2 seconds (see [Yolo Mode](06-yolo-mode.md#background-yolo-countdown)) |
 
-The amie tab's cyan and a remote-bound tab's purple/magenta are both fixed,
+The squad tab's cyan and a remote-bound tab's purple/magenta are both fixed,
 kind-based colours: they take priority over the execution-phase colours
 above (grey/blue/green/red) but still yield to the yellow stuck warning and
 the yolo countdown, since those are live signals about a run in progress.
@@ -587,37 +587,69 @@ Remote-bound tabs are **purple** in the tab bar. The tab label shows `host:port`
 
 For full details on creating remote-bound tabs, the create-session sub-modal, and workflow strip behavior, see [Remote Mode: Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs).
 
-### The amie tab
+### The squad tab
 
-amie — awman's always-on condition-watching daemon — gets its own singleton
+squad — awman's always-on task-watching daemon — gets its own singleton
 tab inside this same multi-tab TUI rather than a separate program. Open it
 either of two ways:
 
 - Press **Ctrl+T** to open the New Tab dialog, then press **Ctrl-A** while
   it's focused. The dialog's prompt shows a hint — "Press Ctrl-A to open
-  amie" — as a reminder. This doesn't add a second global `Ctrl-A` binding:
+  squad" — as a reminder. This doesn't add a second global `Ctrl-A` binding:
   outside the New Tab dialog, `Ctrl-A` still switches to the previous tab as
   usual.
-- Run `awman amie` with no subcommand from a terminal (with a TTY attached
-  and no `-n`/`--json`); awman opens the TUI pre-focused on the amie tab.
+- Run `awman squad` with no subcommand from a terminal (with a TTY attached
+  and no `-n`/`--json`); awman opens the TUI pre-focused on the squad tab.
 
-There is at most one amie tab at a time — opening it again just focuses the
+There is at most one squad tab at a time — opening it again just focuses the
 existing one. It's **cyan** in the tab bar, distinct from every other tab
-colour, and its label is always the fixed word `amie` rather than a
+colour, and its label is always the fixed word `squad` rather than a
 directory name, since it isn't bound to a project directory.
 
 Otherwise it's an ordinary tab: it takes part in **Ctrl-A**/**Ctrl-D** tab
 cycling, closes through the normal close-tab flow, and keeps its state
 while you're on a different tab. The command box below it still works
-exactly as it does on any other tab — you can type `amie <subcommand> ...`
+exactly as it does on any other tab — you can type `squad <subcommand> ...`
 directly into it. The one difference is what fills the execution window
-above the command box: amie's condition list instead of plain command
-output, and, once you attach to a running condition, the same
+above the command box: squad's task list instead of plain command
+output, and, once you attach to a running task, the same
 container/workflow-strip view a regular workflow tab shows. **Ctrl-G** (the
 git sidebar) is a no-op here, since the tab has no repository to show.
 
-See [amie](16-amie.md) for what conditions are, the amie tab's key
-bindings, and attaching to a running condition.
+The task list is a grid of generously sized rounded cards rather than a
+table. Each card shows the task name, a short description summary, the
+outcome and time of its last run (`workflow executed`, `not triggered`,
+`failed`, `interrupted`, `running`, or `never run`), and its next scheduled
+evaluation — which reads `paused` for a paused task. The grid reflows
+when the terminal is resized. Use **↑**, **↓**, **←**, and **→** to move among
+cards; selection remains on the same task when the number of columns changes.
+
+Press **Enter** to open a task's details. The modal includes the task's
+workspace, mount scope, interval, overlays, agent/model, timestamps, and run
+history. Its footer repeats the available actions: **a** attach, **p** pause,
+**r** resume, **d** delete, and **Esc** close. These actions apply to the task
+shown by the modal.
+
+Press **n** to create a task. The description step opens the same large,
+multiline editor used by the specification interview and asks:
+
+> Describe the new squad task including its triggering conditions and how
+> squad should handle the task each time it is triggered
+
+The interview then asks for the evaluation interval, a workspace choice, and
+any overlays. **Default Task Workspace** creates and preserves
+`~/.awman/squad/tasks/<name>/workspace/` across runs. **Custom Folder / Repo**
+asks for an existing path; if it is not a Git repository root, awman warns and
+offers to keep it or choose another path. Finally, add overlays one at a time
+using the usual `dir()`, `ssh()`, `env()`, or `skill()` syntax and submit a
+blank entry when finished. Submitting an empty box is an answer — it keeps
+the documented default, or ends the overlay list — while **Esc** dismisses the
+interview outright. Nothing is saved if the interview is dismissed before it
+is complete. See [squad](16-squad.md) and [Overlays](08-overlays.md)
+for the full behavior and overlay reference.
+
+See [squad](16-squad.md) for what tasks are, the squad tab's key
+bindings, and attaching to a running task.
 
 ---
 

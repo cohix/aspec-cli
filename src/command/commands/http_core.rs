@@ -2,7 +2,7 @@
 //! awman HTTP daemon.
 //!
 //! Every route-specific client in the codebase (today `RemoteClient` against
-//! the API server; the amie client in WI 0101 Part 3) is a thin typed façade
+//! the API server; the squad client in WI 0101 Part 3) is a thin typed façade
 //! over one `HttpCore`. There is exactly ONE `reqwest::Client` construction in
 //! the tree, and it lives here: the connect/read timeouts, the bearer-token
 //! default header, the pinned-cert root, trailing-slash trimming, the uniform

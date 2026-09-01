@@ -376,7 +376,7 @@ const ROOT: CommandSpec = CommandSpec {
         &CONFIG,
         &EXEC,
         &API_SERVER,
-        &AMIE,
+        &SQUAD,
         &REMOTE,
         &NEW,
         &CLEAN,
@@ -905,19 +905,19 @@ const API_SERVER_STATUS: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-// ── amie ────────────────────────────────────────────────────────────────────
+// ── squad ────────────────────────────────────────────────────────────────────
 
-const AMIE: CommandSpec = CommandSpec {
-    name: "amie",
+const SQUAD: CommandSpec = CommandSpec {
+    name: "squad",
     aliases: &[],
-    help: "Manage the amie condition daemon and scheduled conditions.",
+    help: "Manage the squad task daemon and scheduled tasks.",
     long_help: None,
     arguments: &[],
     flags: &[
         FlagSpec {
             long: "non-interactive",
             short: Some('n'),
-            help: "Print the amie status summary instead of opening the TUI.",
+            help: "Print the squad status summary instead of opening the TUI.",
             kind: FlagKind::Bool,
             default: FlagDefault::Bool(false),
             frontends: FrontendVisibility::CliAndTui,
@@ -939,24 +939,24 @@ const AMIE: CommandSpec = CommandSpec {
     ],
     api_allowed: false,
     subcommands: &[
-        &AMIE_START,
-        &AMIE_STOP,
-        &AMIE_STATUS,
-        &AMIE_LOGS,
-        &AMIE_ADD,
-        &AMIE_LIST,
-        &AMIE_SHOW,
-        &AMIE_REMOVE,
-        &AMIE_PAUSE,
-        &AMIE_RESUME,
-        &AMIE_ATTACH,
+        &SQUAD_START,
+        &SQUAD_STOP,
+        &SQUAD_STATUS,
+        &SQUAD_LOGS,
+        &SQUAD_ADD,
+        &SQUAD_LIST,
+        &SQUAD_SHOW,
+        &SQUAD_REMOVE,
+        &SQUAD_PAUSE,
+        &SQUAD_RESUME,
+        &SQUAD_ATTACH,
     ],
 };
 
-const AMIE_START: CommandSpec = CommandSpec {
+const SQUAD_START: CommandSpec = CommandSpec {
     name: "start",
     aliases: &[],
-    help: "Start the amie daemon.",
+    help: "Start the squad daemon.",
     long_help: None,
     arguments: &[],
     flags: &[
@@ -985,7 +985,7 @@ const AMIE_START: CommandSpec = CommandSpec {
         FlagSpec {
             long: "refresh-key",
             short: None,
-            help: "Regenerate the amie key and print its AWMAN_AMIE_KEY export snippet.",
+            help: "Regenerate the squad key and print its AWMAN_SQUAD_KEY export snippet.",
             kind: FlagKind::Bool,
             default: FlagDefault::Bool(false),
             frontends: FrontendVisibility::All,
@@ -1009,10 +1009,10 @@ const AMIE_START: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-const AMIE_STOP: CommandSpec = CommandSpec {
+const SQUAD_STOP: CommandSpec = CommandSpec {
     name: "stop",
     aliases: &["kill"],
-    help: "Stop the amie daemon.",
+    help: "Stop the squad daemon.",
     long_help: None,
     arguments: &[],
     flags: &[],
@@ -1020,10 +1020,10 @@ const AMIE_STOP: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-const AMIE_STATUS: CommandSpec = CommandSpec {
+const SQUAD_STATUS: CommandSpec = CommandSpec {
     name: "status",
     aliases: &[],
-    help: "Show amie daemon status.",
+    help: "Show squad daemon status.",
     long_help: None,
     arguments: &[],
     flags: &[FlagSpec {
@@ -1041,10 +1041,10 @@ const AMIE_STATUS: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-const AMIE_LOGS: CommandSpec = CommandSpec {
+const SQUAD_LOGS: CommandSpec = CommandSpec {
     name: "logs",
     aliases: &[],
-    help: "Show the amie daemon log.",
+    help: "Show the squad daemon log.",
     long_help: None,
     arguments: &[],
     flags: &[FlagSpec {
@@ -1062,17 +1062,17 @@ const AMIE_LOGS: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-const AMIE_ADD: CommandSpec = CommandSpec {
+const SQUAD_ADD: CommandSpec = CommandSpec {
     name: "add",
     aliases: &[],
-    help: "Create an amie condition.",
+    help: "Create a squad task.",
     long_help: None,
     arguments: &[],
     flags: &[
         FlagSpec {
             long: "name",
             short: None,
-            help: "Condition slug.",
+            help: "Task slug.",
             kind: FlagKind::String,
             default: FlagDefault::None,
             frontends: FrontendVisibility::All,
@@ -1083,7 +1083,7 @@ const AMIE_ADD: CommandSpec = CommandSpec {
         FlagSpec {
             long: "description",
             short: None,
-            help: "Condition description.",
+            help: "Task description.",
             kind: FlagKind::String,
             default: FlagDefault::None,
             frontends: FrontendVisibility::All,
@@ -1094,7 +1094,7 @@ const AMIE_ADD: CommandSpec = CommandSpec {
         FlagSpec {
             long: "repo",
             short: None,
-            help: "Repository directory to evaluate.",
+            help: "Legacy synonym for `--workspace <path>`; ignored when `--workspace` is given.",
             kind: FlagKind::Path,
             default: FlagDefault::None,
             frontends: FrontendVisibility::All,
@@ -1105,9 +1105,9 @@ const AMIE_ADD: CommandSpec = CommandSpec {
         FlagSpec {
             long: "interval",
             short: None,
-            help: "Evaluation interval (for example 5m).",
+            help: "Evaluation interval (for example 6h).",
             kind: FlagKind::String,
-            default: FlagDefault::Str("5m"),
+            default: FlagDefault::Str("6h"),
             frontends: FrontendVisibility::All,
             conflicts_with: &[],
             implies: &[],
@@ -1116,7 +1116,7 @@ const AMIE_ADD: CommandSpec = CommandSpec {
         FlagSpec {
             long: "agent",
             short: None,
-            help: "Condition-specific leader agent.",
+            help: "Task-specific leader agent.",
             kind: FlagKind::String,
             default: FlagDefault::None,
             frontends: FrontendVisibility::All,
@@ -1127,7 +1127,7 @@ const AMIE_ADD: CommandSpec = CommandSpec {
         FlagSpec {
             long: "model",
             short: None,
-            help: "Condition-specific leader model.",
+            help: "Task-specific leader model.",
             kind: FlagKind::String,
             default: FlagDefault::None,
             frontends: FrontendVisibility::All,
@@ -1136,9 +1136,35 @@ const AMIE_ADD: CommandSpec = CommandSpec {
             optional: true,
         },
         FlagSpec {
+            long: "workspace",
+            short: None,
+            help: "Task workspace: `default` for the durable per-task workspace, or a folder/repo path. Defaults to `default`.",
+            kind: FlagKind::String,
+            // Deliberately no catalogue default: Dispatch must be able to tell
+            // "not given" from "given as default", because an absent
+            // `--workspace` falls back to the legacy `--repo` before settling
+            // on the durable workspace.
+            default: FlagDefault::None,
+            frontends: FrontendVisibility::All,
+            conflicts_with: &[],
+            implies: &[],
+            optional: true,
+        },
+        FlagSpec {
+            long: "overlay",
+            short: None,
+            help: "Overlay the task's containers get: dir()/ssh()/env()/skill(). Repeatable.",
+            kind: FlagKind::VecString,
+            default: FlagDefault::EmptyVec,
+            frontends: FrontendVisibility::All,
+            conflicts_with: &[],
+            implies: &[],
+            optional: true,
+        },
+        FlagSpec {
             long: "mount-scope",
             short: None,
-            help: "Repository scope mounted for scheduled runs.",
+            help: "Repository scope mounted for scheduled runs (custom git-repo workspaces only).",
             kind: FlagKind::Enum(&["cwd", "gitroot"]),
             default: FlagDefault::Str("gitroot"),
             frontends: FrontendVisibility::All,
@@ -1149,22 +1175,22 @@ const AMIE_ADD: CommandSpec = CommandSpec {
         FlagSpec {
             long: "interview",
             short: None,
-            help: "Collect condition fields interactively.",
+            help: "Collect task fields interactively.",
             kind: FlagKind::Bool,
             default: FlagDefault::Bool(false),
             frontends: FrontendVisibility::CliAndTui,
-            conflicts_with: &[],
+            conflicts_with: &["non-interactive"],
             implies: &[],
             optional: true,
         },
         FlagSpec {
             long: "non-interactive",
             short: Some('n'),
-            help: "Do not prompt for missing fields.",
+            help: "Never prompt: refuse anything needing a confirmation instead of asking.",
             kind: FlagKind::Bool,
             default: FlagDefault::Bool(false),
             frontends: FrontendVisibility::CliAndTui,
-            conflicts_with: &[],
+            conflicts_with: &["interview"],
             implies: &[],
             optional: true,
         },
@@ -1173,10 +1199,10 @@ const AMIE_ADD: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-const AMIE_LIST: CommandSpec = CommandSpec {
+const SQUAD_LIST: CommandSpec = CommandSpec {
     name: "list",
     aliases: &[],
-    help: "List amie conditions.",
+    help: "List squad tasks.",
     long_help: None,
     arguments: &[],
     flags: &[FlagSpec {
@@ -1194,19 +1220,19 @@ const AMIE_LIST: CommandSpec = CommandSpec {
     subcommands: &[],
 };
 
-const AMIE_NAME_ARGUMENT: ArgumentSpec = ArgumentSpec {
+const SQUAD_NAME_ARGUMENT: ArgumentSpec = ArgumentSpec {
     name: "name",
-    help: "Condition name.",
+    help: "Task name.",
     kind: ArgumentKind::String,
     optional: false,
 };
 
-const AMIE_SHOW: CommandSpec = CommandSpec {
+const SQUAD_SHOW: CommandSpec = CommandSpec {
     name: "show",
     aliases: &[],
-    help: "Show an amie condition.",
+    help: "Show a squad task.",
     long_help: None,
-    arguments: &[AMIE_NAME_ARGUMENT],
+    arguments: &[SQUAD_NAME_ARGUMENT],
     flags: &[FlagSpec {
         long: "json",
         short: None,
@@ -1221,12 +1247,12 @@ const AMIE_SHOW: CommandSpec = CommandSpec {
     api_allowed: true,
     subcommands: &[],
 };
-const AMIE_REMOVE: CommandSpec = CommandSpec {
+const SQUAD_REMOVE: CommandSpec = CommandSpec {
     name: "remove",
     aliases: &[],
-    help: "Remove an amie condition.",
+    help: "Remove a squad task.",
     long_help: None,
-    arguments: &[AMIE_NAME_ARGUMENT],
+    arguments: &[SQUAD_NAME_ARGUMENT],
     flags: &[FlagSpec {
         long: "yes",
         short: Some('y'),
@@ -1241,32 +1267,32 @@ const AMIE_REMOVE: CommandSpec = CommandSpec {
     api_allowed: true,
     subcommands: &[],
 };
-const AMIE_PAUSE: CommandSpec = CommandSpec {
+const SQUAD_PAUSE: CommandSpec = CommandSpec {
     name: "pause",
     aliases: &[],
-    help: "Pause an amie condition.",
+    help: "Pause a squad task.",
     long_help: None,
-    arguments: &[AMIE_NAME_ARGUMENT],
+    arguments: &[SQUAD_NAME_ARGUMENT],
     flags: &[],
     api_allowed: true,
     subcommands: &[],
 };
-const AMIE_RESUME: CommandSpec = CommandSpec {
+const SQUAD_RESUME: CommandSpec = CommandSpec {
     name: "resume",
     aliases: &[],
-    help: "Resume an amie condition.",
+    help: "Resume a squad task.",
     long_help: None,
-    arguments: &[AMIE_NAME_ARGUMENT],
+    arguments: &[SQUAD_NAME_ARGUMENT],
     flags: &[],
     api_allowed: true,
     subcommands: &[],
 };
-const AMIE_ATTACH: CommandSpec = CommandSpec {
+const SQUAD_ATTACH: CommandSpec = CommandSpec {
     name: "attach",
     aliases: &[],
-    help: "Attach to a running amie condition container.",
+    help: "Attach to a running squad task container.",
     long_help: None,
-    arguments: &[AMIE_NAME_ARGUMENT],
+    arguments: &[SQUAD_NAME_ARGUMENT],
     flags: &[FlagSpec {
         long: "container",
         short: None,

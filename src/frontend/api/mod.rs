@@ -25,11 +25,11 @@ pub async fn serve(config: ApiServeConfig) -> Result<(), CommandError> {
     let api_paths = ApiPaths::from_process_env().map_err(CommandError::Data)?;
     api_paths.ensure_root().map_err(CommandError::Data)?;
 
-    // The database is shared with the amie daemon and lives under
-    // `<data_home>/data/`. Relocate a pre-amie `<api_root>/awman.db` *before*
-    // any connection is opened, exactly as the amie daemon does — otherwise the
+    // The database is shared with the squad daemon and lives under
+    // `<data_home>/data/`. Relocate a pre-squad `<api_root>/awman.db` *before*
+    // any connection is opened, exactly as the squad daemon does — otherwise the
     // two daemons would open different files and API-mode data would appear to
-    // vanish after amie migrated it.
+    // vanish after squad migrated it.
     let data_paths = api_paths.data_paths();
     let migration = data_paths
         .migrate_legacy_db(api_paths.root())

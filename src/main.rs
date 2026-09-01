@@ -134,8 +134,8 @@ async fn main() -> Result<ExitCode> {
 
     let initial_tab = if matches.subcommand_name().is_none() {
         Some(tui::InitialTab::Normal(tab_session))
-    } else if cli::is_bare_amie_tui_invocation(&matches) {
-        Some(tui::InitialTab::Amie)
+    } else if cli::is_bare_squad_tui_invocation(&matches) {
+        Some(tui::InitialTab::Squad)
     } else {
         None
     };
@@ -214,7 +214,7 @@ fn init_tracing() {
 // ─── Layer 4 routing tests ────────────────────────────────────────────────────
 //
 // `main` is too integrated to call in unit tests (it requires live engines and
-// a real session). Instead we test the **routing logic** directly: the condition
+// a real session). Instead we test the **routing logic** directly: the task
 // `matches.subcommand_name().is_some()` is what drives the cli-vs-tui branch.
 // These tests exercise that predicate with synthetic `ArgMatches`.
 

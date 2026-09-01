@@ -85,9 +85,9 @@ Two JSON files: `<git root>/.awman/config.json` (per-repo, committed) and `~/.aw
 | `awman remote …` | Client for a remote awman server | [10](10-remote-mode.md) |
 
 `awman status` marks ordinary containers as `session`. Containers launched by
-the amie daemon carry an `amie:<condition>` source marker, such as
-`amie:issue-triage`, so background evaluations are identifiable even if you
-have never configured amie.
+the squad daemon carry an `squad:<task>` source marker, such as
+`squad:issue-triage`, so background evaluations are identifiable even if you
+have never configured squad.
 
 ### Key locations
 
