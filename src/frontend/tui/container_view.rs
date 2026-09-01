@@ -31,19 +31,19 @@ use crate::frontend::tui::tabs::{
 /// terminal coords into vt100 cell coords; and temporarily mutates the
 /// vt100 scrollback offset to render the user's chosen scrollback view.
 ///
-/// `workflow_strip_height` is the number of rows occupied by the workflow
-/// strip below the execution window — the container overlay must not
+/// `workflow_overview_height` is the number of rows occupied by the Workflow
+/// Overview below the execution window — the container overlay must not
 /// cover it.
 pub fn render_container_maximized(
     tab: &mut Tab,
     outer_area: Rect,
-    workflow_strip_height: u16,
+    workflow_overview_height: u16,
     frame: &mut Frame,
 ) {
     // 95% of the execution window area (between tab bar and command box).
     // Tab bar = 3 rows at top, status bar + command box + suggestion = 5 rows at bottom.
     let top_reserved: u16 = 3;
-    let bottom_reserved: u16 = 5 + workflow_strip_height;
+    let bottom_reserved: u16 = 5 + workflow_overview_height;
     let exec_height = outer_area
         .height
         .saturating_sub(top_reserved + bottom_reserved);

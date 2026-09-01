@@ -432,13 +432,13 @@ Flags that refer to remote addressing (`--session`, `--remote-addr`, `--api-key`
 
 Closing a remote-bound tab (with **Ctrl+C** when multiple tabs are open) cancels any in-flight command stream and any active workflow polling task. The remote session itself is **not** closed — it continues running on the remote host and can be accessed again later via a new remote-bound tab or the `remote` CLI subcommands.
 
-### Workflow state strip for remote-bound tabs
+### Workflow Overview for remote-bound tabs
 
-When a workflow command is dispatched from a remote-bound tab (`exec workflow`), the workflow state strip appears automatically — exactly as it does for local workflow runs.
+When a workflow command is dispatched from a remote-bound tab (`exec workflow`), the Workflow Overview appears automatically — exactly as it does for local workflow runs.
 
-Starting 5 seconds after the command is dispatched, awman polls `GET /v1/workflows/:command_id` on the remote API server every 5 seconds. As soon as a workflow state is found, the strip renders and continues updating until the workflow reaches a terminal state (`complete` or `error`).
+Starting 5 seconds after the command is dispatched, awman polls `GET /v1/workflows/:command_id` on the remote API server every 5 seconds. As soon as a workflow state is found, the overview renders and continues updating until the workflow reaches a terminal state (`complete` or `error`).
 
-The remote workflow strip is visually identical to the local strip: parallel steps, paused states, running steps, and completion markers all render the same way, and **Ctrl-O** toggles it between the collapsed stage summary and the full per-step overview just as it does locally. No extra configuration is required.
+The remote Workflow Overview is visually identical to the local one: parallel steps, paused states, running steps, and completion markers all render the same way, and **Ctrl-O** minimizes / maximizes it just as it does locally. No extra configuration is required.
 
 **Polling behavior:**
 
@@ -447,7 +447,7 @@ The remote workflow strip is visually identical to the local strip: parallel ste
 | No workflow found (HTTP 404) on first poll | Polling stops silently — the command is not a workflow command |
 | No workflow found (HTTP 404) after a previous 200 | Polling stops — workflow state was removed |
 | Transient network error during polling | Retried on the next 5-second interval; no error shown to the user |
-| Workflow reaches `complete` or `error` | Polling stops; strip reflects the final state |
+| Workflow reaches `complete` or `error` | Polling stops; the overview reflects the final state |
 | Tab closed while polling | Poll task cancelled immediately |
 | New command dispatched from the same tab | Previous poll task cancelled; new poll task starts for the new command |
 
@@ -622,10 +622,10 @@ See [API Mode](09-api-mode.md) for the full HTTP API reference, including sessio
 | Remote-bound tab: tab closed while a command stream is in-flight | SSE stream task and any workflow poll task are cancelled; the remote command continues executing on the server |
 | Remote-bound tab: new command dispatched while workflow polling is active | Previous poll task cancelled; new poll task starts 5 seconds after the new command is dispatched |
 | Remote-bound tab: create-new-session sub-modal — remote dir creation fails | Modal shows error text; no tab created; press **Esc** and retry with **Ctrl+T** |
-| Remote workflow strip: `GET /v1/workflows/:command_id` returns HTTP 404 | Polling stops silently; no error shown; strip does not appear |
-| Remote workflow strip: transient network errors during polling | Retried on next 5-second interval; not surfaced to user |
-| Remote workflow strip: parallel steps | Rendered stacked in the strip, identical to local workflow parallel steps |
-| Remote workflow strip: paused step | Strip shows the paused indicator on the paused step; polling continues since the workflow may resume |
+| Remote Workflow Overview: `GET /v1/workflows/:command_id` returns HTTP 404 | Polling stops silently; no error shown; the overview does not appear |
+| Remote Workflow Overview: transient network errors during polling | Retried on next 5-second interval; not surfaced to user |
+| Remote Workflow Overview: parallel steps | Rendered stacked in the overview, identical to local workflow parallel steps |
+| Remote Workflow Overview: paused step | The overview shows the paused indicator on the paused step; polling continues since the workflow may resume |
 
 ---
 

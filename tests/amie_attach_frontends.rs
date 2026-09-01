@@ -10,15 +10,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use awman::command::dispatch::Engines;
 use awman::command::dispatch::catalogue::CommandCatalogue;
+use awman::command::dispatch::Engines;
 use awman::command::error::CommandError;
-use awman::data::EngineWorkflowStateStore;
 use awman::data::fs::{ApiPaths, AuthPathResolver};
 use awman::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
 use awman::data::session_manager::SessionManager;
 use awman::data::workflow_definition::WorkflowStep;
 use awman::data::workflow_state::{StepState, WorkflowState};
+use awman::data::EngineWorkflowStateStore;
 use awman::engine::agent::AgentEngine;
 use awman::engine::agent_runtime::AgentRuntimeEngine;
 use awman::engine::auth::AuthEngine;
@@ -29,14 +29,14 @@ use awman::frontend::tui::amie_attach::{AmieSlotDriver, SlotAction};
 use awman::frontend::tui::app::App;
 use awman::frontend::tui::tabs::{
     ContainerSlotEvent, SharedContainerSlotEvents, SharedWorkflowViewState, Tab,
-    WorkflowStripState, WorkflowViewState,
+    WorkflowOverviewState, WorkflowViewState,
 };
 use awman::frontend::tui::user_message::SharedStatusLog;
-use awman::frontend::tui::workflow_view::{render_workflow_strip, workflow_state_to_view_state};
+use awman::frontend::tui::workflow_view::{render_workflow_overview, workflow_state_to_view_state};
 use awman::frontend::tui::{RemoteWorkflowPoller, WorkflowStateSource};
-use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
+use ratatui::Terminal;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -291,7 +291,7 @@ fn slot_fingerprint(tab: &Tab) -> Vec<(String, String, String)> {
 }
 
 #[test]
-fn workflow_phase_attach_matches_the_in_process_workflow_slot_and_strip_state() {
+fn workflow_phase_attach_matches_the_in_process_workflow_slot_and_overview_state() {
     let state = workflow_state(&[
         ("done", &[], StepState::Succeeded, Some("claude"), None),
         (
@@ -399,7 +399,7 @@ fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
 }
 
 #[tokio::test]
-async fn poller_driven_strip_uses_existing_grouping_and_shows_every_sibling() {
+async fn poller_driven_overview_uses_existing_grouping_and_shows_every_sibling() {
     let state = workflow_state(&[
         ("first", &[], StepState::Succeeded, None, None),
         ("second", &[], StepState::Succeeded, None, None),
@@ -427,12 +427,12 @@ async fn poller_driven_strip_uses_existing_grouping_and_shows_every_sibling() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
-            render_workflow_strip(
+            render_workflow_overview(
                 &published,
                 Rect::new(0, 0, 70, 9),
                 frame,
                 0,
-                WorkflowStripState::Expanded,
+                WorkflowOverviewState::Maximized,
             )
         })
         .unwrap();
@@ -455,7 +455,7 @@ async fn poller_driven_strip_uses_existing_grouping_and_shows_every_sibling() {
 }
 
 #[tokio::test]
-async fn daemon_failure_freezes_poller_strip_and_preserves_live_slots() {
+async fn daemon_failure_freezes_poller_overview_and_preserves_live_slots() {
     let initial = workflow_state(&[(
         "live",
         &[],
@@ -516,14 +516,14 @@ async fn daemon_failure_freezes_poller_strip_and_preserves_live_slots() {
     app.tick_all_tabs();
     assert_eq!(
         app.status_bar.text,
-        "amie daemon not reachable — strip frozen; attached containers still live",
-        "the frozen-strip indicator appears without tearing down direct-runtime slots"
+        "amie daemon not reachable — workflow overview frozen; attached containers still live",
+        "the frozen-overview indicator appears without tearing down direct-runtime slots"
     );
     stop_poller(cancel, task).await;
 }
 
 #[test]
-fn attaching_mid_workflow_keeps_completed_steps_in_the_existing_strip() {
+fn attaching_mid_workflow_keeps_completed_steps_in_the_existing_overview() {
     let state = workflow_state(&[
         ("already-done", &[], StepState::Succeeded, None, None),
         (

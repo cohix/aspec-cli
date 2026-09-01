@@ -423,15 +423,17 @@ A single container is just the one-container case of the same display: Maximized
 
 ---
 
-## The workflow state strip — Ctrl-O
+## The Workflow Overview — Ctrl-O
 
-While a workflow runs, the **workflow state strip** sits between the container area and the status bar, showing one rounded box per stage of the workflow with arrows joining the stages. Each box carries the step's status glyph and colour, its name, and — when the step overrides them — its `agent/model` label on the top border. See [Workflow strip and step status](05-workflows.md#workflow-strip-and-step-status) for what each glyph and colour means.
+While a workflow runs, the **Workflow Overview** sits between the container area and the status bar, showing one rounded box per stage of the workflow with arrows joining the stages. Each box carries the step's status glyph and colour, its name, and — when the step overrides them — its `agent/model` label on the top border. See [Workflow Overview and step status](05-workflows.md#workflow-overview-and-step-status) for what each glyph and colour means.
 
-The strip has two sizes. Press **Ctrl-O** (*o* for "overview") to switch between them.
+The overview has two sizes. Press **Ctrl-O** (*o* for "overview") to minimize or maximize it. The status bar advertises whichever direction it can currently go — `ctrl-o maximize workflow overview` while it is minimized, `ctrl-o minimize workflow overview` while it is maximized.
 
-### Collapsed — the default
+**Ctrl-O and Ctrl-M are independent.** The Workflow Overview and the container window each have their own minimized/maximized state, and neither key touches the other's. You can maximize both at once, minimize both, or any combination — see [Sharing the screen with the container window](#sharing-the-screen-with-the-container-window) for how the two split the available rows.
 
-Every stage is a single box, so the strip is always 3 rows tall and leaves the rest of the screen to your agents. A stage with one step shows that step's normal box. A stage that fans out into parallel steps shows a step count instead:
+### Minimized — the default
+
+Every stage is a single box, so the overview is always 3 rows tall and leaves the rest of the screen to your agents. A stage with one step shows that step's normal box. A stage that fans out into parallel steps shows a step count instead:
 
 ```
 ╭─────────────────╮   ╭─────────────────╮   ╭─────────────────╮
@@ -441,9 +443,7 @@ Every stage is a single box, so the strip is always 3 rows tall and leaves the r
 
 The summary box takes the colour of the group as a whole: red if any step failed, magenta while a step is being remediated, blue while any step is running, green once every step succeeded.
 
-Containers behave exactly as described above while the strip is collapsed — the focused container keeps its maximized window and the others keep their status bars.
-
-### Expanded — the full overview
+### Maximized — every step
 
 Every step of every stage gets its own box, so you can see the whole fan-out at once:
 
@@ -461,11 +461,15 @@ Every step of every stage gets its own box, so you can see the whole fan-out at 
 
 Finished steps are never rolled up into a summary — each keeps its own box, name, agent label, and colour for the whole run.
 
-Expanding the strip takes over the screen:
+### Sharing the screen with the container window
 
-- **No container window is shown.** Every running container drops to its status bar, including the focused one, so nothing covers the strip. Your **Ctrl-M** choice is remembered: collapse the strip again and the container window comes straight back.
-- **The strip gets the space it needs.** It grows to fill whatever sits between the tab bar and the command box. If there isn't room for both the strip and every container status bar, the strip wins and the bars are truncated to as many as fit.
-- **Very large fan-outs scroll.** When a stage has more steps than the frame can show even at full height, the last box reads `+ N more…`; scroll the **mouse wheel** over the strip to reach the rest.
+A maximized Workflow Overview never puts the container window away, and maximizing a container never shrinks the overview back down. The two share the rows between the tab bar and the command box:
+
+- **With no container window maximized**, the overview grows to fill everything between the tab bar and the command box. If there isn't room for both the overview and every container status bar, the overview wins and the bars are truncated to as many as fit.
+- **With a container window maximized too**, the overview takes at most half of that space (never less than one box row) and the container PTY keeps the rest, so both stay readable.
+- **Very large fan-outs scroll.** When a stage has more steps than the overview can show at its current height, the last box reads `+ N more…`; scroll the **mouse wheel** over the overview to reach the rest.
+
+Press **Ctrl-M** to minimize the container if you want the overview to have the whole body, and **Ctrl-O** to minimize the overview back to its 3-row summary if you want the PTY to have it.
 
 ---
 
@@ -583,9 +587,9 @@ the yolo countdown, since those are live signals about a run in progress.
 
 When `remote.defaultAddr` is set in `~/.awman/config.json`, opening a new tab with **Ctrl+T** offers an option to bind the tab to a remote API session. A **remote-bound tab** forwards every command you type to the remote host via the API — no extra flags or session arguments needed.
 
-Remote-bound tabs are **purple** in the tab bar. The tab label shows `host:port` of the remote host instead of the local directory name. When a workflow runs on the remote session, the workflow state strip appears automatically and updates every 5 seconds.
+Remote-bound tabs are **purple** in the tab bar. The tab label shows `host:port` of the remote host instead of the local directory name. When a workflow runs on the remote session, the Workflow Overview appears automatically and updates every 5 seconds.
 
-For full details on creating remote-bound tabs, the create-session sub-modal, and workflow strip behavior, see [Remote Mode: Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs).
+For full details on creating remote-bound tabs, the create-session sub-modal, and Workflow Overview behavior, see [Remote Mode: Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs).
 
 ### The amie tab
 
@@ -613,7 +617,7 @@ exactly as it does on any other tab — you can type `amie <subcommand> ...`
 directly into it. The one difference is what fills the execution window
 above the command box: amie's condition list instead of plain command
 output, and, once you attach to a running condition, the same
-container/workflow-strip view a regular workflow tab shows. **Ctrl-G** (the
+container / Workflow Overview view a regular workflow tab shows. **Ctrl-G** (the
 git sidebar) is a no-op here, since the tab has no repository to show.
 
 See [amie](16-amie.md) for what conditions are, the amie tab's key
@@ -646,7 +650,7 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 | **Ctrl+D** | Switch to the next tab |
 | **Ctrl+G** | Toggle Git Sidebar (live view of repository changes) |
 | **Ctrl+M** | Toggle container window between maximized, minimized, and hidden |
-| **Ctrl+O** | Toggle the workflow state strip between its collapsed stage summary and the full per-step overview |
+| **Ctrl+O** | Minimize / maximize the Workflow Overview (independent of Ctrl+M) |
 | **Ctrl+S** | Switch focus to the next running container (only when [multiple parallel containers](#parallel-containers) are running; otherwise passed to the container's PTY) |
 | **Ctrl+W** | Open workflow control board (between steps or mid-step while running) |
 | **Ctrl+,** | Open / close the configuration dialog |
@@ -687,7 +691,7 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 | **Tab / Shift+Tab** | Forward to the agent |
 | Type | Forward input directly to the agent |
 | **Ctrl+M** | Minimize the container window |
-| **Ctrl+O** | Toggle the workflow state strip (intercepted before the agent, like Ctrl+M) |
+| **Ctrl+O** | Minimize / maximize the Workflow Overview (intercepted before the agent, like Ctrl+M) |
 | Mouse scroll | Scroll terminal scrollback history (5 lines per tick) |
 | Mouse drag | Select text in the terminal (highlighted with inverted colors) |
 | **Ctrl+Y** | Copy selected text to clipboard (ANSI codes stripped) |
@@ -705,11 +709,11 @@ For workflow tabs, awman goes further: the [workflow control board](05-workflows
 | **Ctrl+W** | Escalate from lightweight dialog to full control board (while dialog is open) |
 | **Esc** | Dismiss without changing anything (mid-step: step keeps running) |
 
-### Workflow strip
+### Workflow Overview
 
 | Key | Action |
 |-----|--------|
-| **Ctrl+O** | Toggle between the collapsed stage summary and the full per-step overview |
+| **Ctrl+O** | Minimize / maximize the Workflow Overview |
 | Mouse wheel (scroll up) | Scroll an oversized parallel stage upward (reveal hidden steps) |
 | Mouse wheel (scroll down) | Scroll an oversized parallel stage downward |
 

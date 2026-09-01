@@ -12,9 +12,10 @@ pub enum Action {
     NextTab,
     CloseTabOrQuit,
     CycleContainerWindow,
-    /// Ctrl-O ("overview"): toggle the workflow state strip between its
-    /// collapsed one-box-per-stage view and the expanded every-step view.
-    ToggleWorkflowStrip,
+    /// Ctrl-O ("overview"): toggle the Workflow Overview between its minimized
+    /// one-box-per-stage view and its maximized every-step view. Independent of
+    /// `CycleContainerWindow` (Ctrl-M) — neither min/max affects the other.
+    ToggleWorkflowOverview,
     OpenConfigShow,
     WorkflowControl,
     ToggleGitSidebar,
@@ -109,7 +110,7 @@ pub fn map_key(key: KeyEvent, ctx: FocusContext) -> Action {
             // ContainerMaximized, before the ForwardToPty path below — so the
             // workflow overview is always one keystroke away.
             KeyCode::Char('o') if ctx != FocusContext::Dialog => {
-                return Action::ToggleWorkflowStrip
+                return Action::ToggleWorkflowOverview
             }
             KeyCode::Char('w') => return Action::WorkflowControl,
             // Ctrl-G (BEL, 0x07) is rarely used by terminal programs, so we
@@ -428,10 +429,10 @@ mod tests {
         );
     }
 
-    // ── Ctrl-O / workflow strip overview ───────────────────────────────────
+    // ── Ctrl-O / Workflow Overview ───────────────────────────────────
 
     #[test]
-    fn ctrl_o_toggles_workflow_strip_in_all_non_dialog_contexts() {
+    fn ctrl_o_toggles_workflow_overview_in_all_non_dialog_contexts() {
         for ctx in [
             FocusContext::CommandBox,
             FocusContext::ExecutionWindow,
@@ -441,8 +442,8 @@ mod tests {
             let action = map_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL), ctx);
             assert_eq!(
                 action,
-                Action::ToggleWorkflowStrip,
-                "Ctrl-O must toggle the workflow strip in {ctx:?}"
+                Action::ToggleWorkflowOverview,
+                "Ctrl-O must toggle the Workflow Overview in {ctx:?}"
             );
         }
     }
@@ -451,7 +452,7 @@ mod tests {
     fn ctrl_o_in_maximized_container_is_not_forwarded_to_pty() {
         let k = key(KeyCode::Char('o'), KeyModifiers::CONTROL);
         let action = map_key(k, FocusContext::ContainerMaximized);
-        assert_eq!(action, Action::ToggleWorkflowStrip);
+        assert_eq!(action, Action::ToggleWorkflowOverview);
         assert_ne!(action, Action::ForwardToPty(k));
     }
 
@@ -463,8 +464,8 @@ mod tests {
         );
         assert_ne!(
             action,
-            Action::ToggleWorkflowStrip,
-            "Ctrl-O must not toggle the workflow strip while a dialog is open"
+            Action::ToggleWorkflowOverview,
+            "Ctrl-O must not toggle the Workflow Overview while a dialog is open"
         );
     }
 

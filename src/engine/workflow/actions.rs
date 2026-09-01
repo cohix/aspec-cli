@@ -159,7 +159,7 @@ pub struct WorkflowStepProgressInfo {
     pub has_step_override: bool,
     pub status: WorkflowStepStatus,
     /// Steps this one depends on. Drives the topological column grouping in
-    /// the workflow strip renderer.
+    /// the Workflow Overview renderer.
     pub depends_on: Vec<String>,
     /// Effective workflow concurrency cap. `None` means unlimited.
     pub max_concurrent: Option<usize>,

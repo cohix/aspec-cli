@@ -240,15 +240,16 @@ pub(super) fn handle_key_event(app: &mut App, key: crossterm::event::KeyEvent) {
                 resize_slots_to_terminal(tab);
             }
         }
-        Action::ToggleWorkflowStrip => {
+        Action::ToggleWorkflowOverview => {
             let tab = app.active_tab_mut();
-            tab.workflow_strip_state = tab.workflow_strip_state.toggle();
-            // The strip always opens at the top of the stage; a stale offset
-            // from a previous expansion would hide the first steps.
-            tab.workflow_strip_scroll_offset = 0;
-            // Expanding puts the container overlay away and collapsing brings
-            // it back at a different height, so any selection anchored in it
-            // no longer means anything.
+            tab.workflow_overview_state = tab.workflow_overview_state.toggle();
+            // The overview always opens at the top of the stage; a stale
+            // offset from a previous maximization would hide the first steps.
+            tab.workflow_overview_scroll_offset = 0;
+            // Ctrl-O never touches `container_window_state` — the container
+            // PTY's min/max is Ctrl-M's business alone. It does change the
+            // height the PTY overlay is drawn at, so any selection anchored in
+            // it no longer means anything.
             tab.mouse_selection = None;
             if tab.container_window_state != ContainerWindowState::Hidden {
                 resize_slots_to_terminal(tab);

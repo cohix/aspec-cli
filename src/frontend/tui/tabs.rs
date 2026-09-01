@@ -55,36 +55,38 @@ impl ContainerWindowState {
     }
 }
 
-/// Workflow state strip display mode.
+/// Workflow Overview display mode.
 ///
-/// The strip defaults to `Collapsed`: exactly one 3-row box per topological
+/// The overview defaults to `Minimized`: exactly one 3-row box per topological
 /// stage, so it never costs the execution window more than 3 rows. A stage
 /// with a single step draws that step's normal box; a parallel stage draws a
 /// `N steps…` summary box in the stage's aggregate status colour.
 ///
-/// `Expanded` draws every step of every stage as its own box — full name,
-/// agent/model label, status colour, nothing rolled up. It grows to whatever
-/// the frame can spare between the tab bar and the command box, and it wins
-/// that space ahead of the execution window and the container status bars.
+/// `Maximized` draws every step of every stage as its own box — full name,
+/// agent/model label, status colour, nothing rolled up. It grows into the
+/// space the frame can spare between the tab bar and the command box, ahead of
+/// the execution window and the container status bars — but it never displaces
+/// a maximized container PTY, which keeps its own share of the body.
 ///
-/// Toggled with `Ctrl-O` ("overview").
+/// Toggled with `Ctrl-O` ("overview"), independently of the container PTY's
+/// own `Ctrl-M` min/max ([`ContainerWindowState`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WorkflowStripState {
+pub enum WorkflowOverviewState {
     #[default]
-    Collapsed,
-    Expanded,
+    Minimized,
+    Maximized,
 }
 
-impl WorkflowStripState {
+impl WorkflowOverviewState {
     pub fn toggle(self) -> Self {
         match self {
-            Self::Collapsed => Self::Expanded,
-            Self::Expanded => Self::Collapsed,
+            Self::Minimized => Self::Maximized,
+            Self::Maximized => Self::Minimized,
         }
     }
 
-    pub fn is_expanded(self) -> bool {
-        matches!(self, Self::Expanded)
+    pub fn is_maximized(self) -> bool {
+        matches!(self, Self::Maximized)
     }
 }
 
@@ -95,7 +97,7 @@ pub struct WorkflowViewState {
     pub current_step: Option<String>,
     /// Effective `maxConcurrentAgents` for the running workflow (WI-0096 §11),
     /// set by the frontend when the engine reports a parallel group start.
-    /// `None` means unlimited — the strip caps parallel rows at the legacy 3
+    /// `None` means unlimited — the overview caps parallel rows at the legacy 3
     /// and renders no "queued" markers, so behavior is unchanged.
     pub max_concurrent: Option<usize>,
 }
@@ -108,7 +110,7 @@ pub struct WorkflowStepView {
     pub agent: Option<String>,
     /// Optional resolved model.
     pub model: Option<String>,
-    /// Steps this one waits on. Drives the column-grouping in the strip
+    /// Steps this one waits on. Drives the column-grouping in the overview
     /// renderer (steps with the same sorted `depends_on` set sit in the
     /// same topological column).
     pub depends_on: Vec<String>,
@@ -387,11 +389,7 @@ impl ContainerSlot {
     /// (no PTY stream feeds them); the window renders from `state` instead.
     /// `state` is the same handle the ACP frontend appends updates to, so the
     /// caller shares one `Arc` between the slot and the frontend.
-    pub fn new_acp(
-        step_name: String,
-        agent_display_name: String,
-        state: SharedAcpState,
-    ) -> Self {
+    pub fn new_acp(step_name: String, agent_display_name: String, state: SharedAcpState) -> Self {
         let mut slot = Self::new(step_name, agent_display_name, 0);
         slot.kind = AgentWindowKind::Acp(state);
         slot
@@ -517,7 +515,7 @@ pub struct Tab {
     pub exec_window_grid: Vec<Vec<String>>,
     /// Shared workflow view state. The engine's `WorkflowFrontend` impl
     /// writes here on `report_workflow_progress` / `report_step_status`;
-    /// the renderer reads from here when drawing the workflow strip.
+    /// the renderer reads from here when drawing the Workflow Overview.
     pub workflow_state: SharedWorkflowViewState,
     /// Shared yolo countdown state. Updated by `yolo_countdown_tick` on the
     /// engine side; rendered as a non-modal overlay (avoids the dialog-spam
@@ -530,11 +528,12 @@ pub struct Tab {
     pub status_log_collapsed: bool,
     pub status_dashboard: SharedStatusDashboard,
     pub scroll_offset: usize,
-    pub workflow_strip_scroll_offset: usize,
-    /// Whether the workflow strip shows one box per stage (the default) or
-    /// every parallel step of every stage. Toggled with `Ctrl-O`.
-    pub workflow_strip_state: WorkflowStripState,
-    pub last_strip_rect: Option<Rect>,
+    pub workflow_overview_scroll_offset: usize,
+    /// Whether the Workflow Overview shows one box per stage (the default) or
+    /// every parallel step of every stage. Toggled with `Ctrl-O`, independently
+    /// of the container PTY's `Ctrl-M` min/max.
+    pub workflow_overview_state: WorkflowOverviewState,
+    pub last_overview_rect: Option<Rect>,
     pub mouse_selection: Option<TextSelection>,
     pub workflow_agent_fallbacks: HashMap<String, String>,
     pub is_remote: bool,
@@ -682,9 +681,9 @@ impl Tab {
             status_log_collapsed: false,
             status_dashboard: Arc::new(Mutex::new(None)),
             scroll_offset: 0,
-            workflow_strip_scroll_offset: 0,
-            workflow_strip_state: WorkflowStripState::Collapsed,
-            last_strip_rect: None,
+            workflow_overview_scroll_offset: 0,
+            workflow_overview_state: WorkflowOverviewState::Minimized,
+            last_overview_rect: None,
             mouse_selection: None,
             workflow_agent_fallbacks: HashMap::new(),
             is_remote: false,

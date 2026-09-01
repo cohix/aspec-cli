@@ -339,13 +339,13 @@ impl App {
         }
         tab.scroll_offset = 0;
 
-        // Clear previous workflow state so the strip resets for the new command.
-        // Also clear the strip hit-test rect so stale rects from a previous
+        // Clear previous workflow state so the overview resets for the new command.
+        // Also clear the overview hit-test rect so stale rects from a previous
         // workflow don't intercept mouse-scroll events meant for the container.
         if let Ok(mut guard) = tab.workflow_state.lock() {
             *guard = None;
         }
-        tab.last_strip_rect = None;
+        tab.last_overview_rect = None;
         if let Ok(mut guard) = tab.yolo_state.lock() {
             *guard = None;
         }
@@ -578,7 +578,7 @@ impl App {
 
             // TUI-4: keep every slot's parser and PTY in lockstep with the
             // actual rendered overlay dimensions. The overlay size varies
-            // with workflow strip height and other dynamic chrome; the
+            // with Workflow Overview height and other dynamic chrome; the
             // initial `compute_container_inner_size` estimate may not match.
             // All slots render into the same maximized overlay when focused,
             // so they all track the same size; syncing the background slots
@@ -838,7 +838,7 @@ impl App {
         }
 
         // WI 0102: while an attach session owns the amie tab and the daemon is
-        // unreachable, surface the frozen-strip indicator (the attached
+        // unreachable, surface the frozen-overview indicator (the attached
         // container slots keep streaming from their direct runtime connections).
         if let Some(state) = self.tabs[active].amie.as_ref() {
             if state.attached_condition.is_some()
@@ -847,7 +847,7 @@ impl App {
                     .load(std::sync::atomic::Ordering::Relaxed)
             {
                 self.status_bar.text =
-                    "amie daemon not reachable — strip frozen; attached containers still live"
+                    "amie daemon not reachable — workflow overview frozen; attached containers still live"
                         .to_string();
             }
         }

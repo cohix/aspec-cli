@@ -38,18 +38,18 @@ pub const ACP_BORDER_COLOR: Color = Color::Rgb(147, 51, 234);
 ///
 /// Geometry matches `render_container_maximized` exactly (a centered overlay
 /// covering ~95% of the execution-window area), so switching a slot between
-/// stdio and ACP never moves the window. `workflow_strip_height` is the number
-/// of rows reserved below the overlay for the workflow strip and minimized
-/// bars; the overlay must not cover them.
+/// stdio and ACP never moves the window. `workflow_overview_height` is the
+/// number of rows reserved below the overlay for the Workflow Overview and
+/// minimized bars; the overlay must not cover them.
 pub fn render_acp_maximized(
     tab: &mut Tab,
     outer_area: Rect,
-    workflow_strip_height: u16,
+    workflow_overview_height: u16,
     frame: &mut Frame,
 ) {
     // Identical sizing to render_container_maximized.
     let top_reserved: u16 = 3;
-    let bottom_reserved: u16 = 5 + workflow_strip_height;
+    let bottom_reserved: u16 = 5 + workflow_overview_height;
     let exec_height = outer_area
         .height
         .saturating_sub(top_reserved + bottom_reserved);

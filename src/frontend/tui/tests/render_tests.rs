@@ -338,11 +338,13 @@ fn push_acp_slot(app: &mut App, agent: &str) -> crate::frontend::tui::tabs::Shar
     use crate::frontend::tui::tabs::{AcpSlotState, ContainerSlot};
     let state: crate::frontend::tui::tabs::SharedAcpState =
         std::sync::Arc::new(std::sync::Mutex::new(AcpSlotState::default()));
-    app.active_tab_mut().container_slots.push(ContainerSlot::new_acp(
-        String::new(),
-        agent.to_string(),
-        state.clone(),
-    ));
+    app.active_tab_mut()
+        .container_slots
+        .push(ContainerSlot::new_acp(
+            String::new(),
+            agent.to_string(),
+            state.clone(),
+        ));
     state
 }
 
@@ -428,10 +430,7 @@ fn acp_permission_request_modal_renders_through_the_dialog_framework() {
         title: "ACP Permission Request".to_string(),
         body: "The agent wants to run:\n\n  Write config.json (edit)\n\nAllow this action?"
             .to_string(),
-        keys: vec![
-            ('1', "Allow once".to_string()),
-            ('2', "Reject".to_string()),
-        ],
+        keys: vec![('1', "Allow once".to_string()), ('2', "Reject".to_string())],
     });
     let buf = render_app(&mut app, 80, 24);
     let text = buffer_text(&buf);
@@ -453,7 +452,7 @@ fn acp_permission_request_modal_renders_through_the_dialog_framework() {
     );
 }
 
-// ─── Workflow state strip: collapsed / expanded ───────────────────────────
+// ─── Workflow Overview: minimized / maximized ───────────────────────────
 
 /// Publish a parallel workflow of `n` sibling steps into the active tab.
 fn set_parallel_workflow(app: &App, n: usize) {
@@ -474,26 +473,26 @@ fn set_parallel_workflow(app: &App, n: usize) {
 }
 
 #[test]
-fn frame_strip_defaults_to_collapsed_and_ctrl_o_expands_it() {
+fn frame_overview_defaults_to_minimized_and_ctrl_o_maximizes_it() {
     let mut app = make_app();
     set_parallel_workflow(&app, 4);
 
-    let collapsed = buffer_text(&render_app(&mut app, 80, 40));
+    let minimized = buffer_text(&render_app(&mut app, 80, 40));
     assert!(
-        collapsed.contains("4 steps\u{2026}"),
-        "the default strip summarizes a parallel stage: {collapsed}"
+        minimized.contains("4 steps\u{2026}"),
+        "the default overview summarizes a parallel stage: {minimized}"
     );
     assert!(
-        !collapsed.contains("step-0"),
-        "the collapsed strip names no individual step: {collapsed}"
+        !minimized.contains("step-0"),
+        "the minimized overview names no individual step: {minimized}"
     );
 
     press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
-    let expanded = buffer_text(&render_app(&mut app, 80, 40));
+    let maximized = buffer_text(&render_app(&mut app, 80, 40));
     for i in 0..4 {
         assert!(
-            expanded.contains(&format!("step-{i}")),
-            "the expanded strip names every parallel step: {expanded}"
+            maximized.contains(&format!("step-{i}")),
+            "the maximized overview names every parallel step: {maximized}"
         );
     }
 }
@@ -511,66 +510,130 @@ fn push_stdio_slot(app: &mut App, container_name: &str) {
 }
 
 #[test]
-fn expanded_strip_puts_the_container_overlay_away_and_leaves_status_bars() {
-    use crate::frontend::tui::tabs::ContainerWindowState;
+fn ctrl_o_and_ctrl_m_min_max_independently() {
+    use crate::frontend::tui::tabs::{ContainerWindowState, WorkflowOverviewState};
     let mut app = make_app();
     set_parallel_workflow(&app, 3);
     push_stdio_slot(&mut app, "awman-only");
     app.active_tab_mut().container_window_state = ContainerWindowState::Maximized;
 
-    // Maximized: the single slot owns the PTY overlay. `container_inner_area`
-    // is published by the renderer exactly when it draws that overlay.
+    // Maximized container: the single slot owns the PTY overlay.
+    // `container_inner_area` is published by the renderer exactly when it
+    // draws that overlay.
     render_app(&mut app, 80, 40);
     assert!(
         app.active_tab().container_inner_area.is_some(),
-        "a maximized slot draws its PTY overlay while the strip is collapsed"
+        "a maximized slot draws its PTY overlay while the overview is minimized"
     );
 
+    // Ctrl-O maximizes the overview. The PTY overlay stays up: the two
+    // windows share the body rather than displacing each other.
     app.active_tab_mut().container_inner_area = None;
     press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
-    let expanded = buffer_text(&render_app(&mut app, 80, 40));
-    assert!(
-        app.active_tab().container_inner_area.is_none(),
-        "an expanded strip shows no container PTY: {expanded}"
-    );
-    assert!(
-        app.active_tab().container_rendered,
-        "output withheld by the user's own Ctrl-O is not 'unseen' output — it \
-         must not be replayed into the status log when the container exits"
-    );
-    assert!(
-        expanded.contains("awman-only"),
-        "every active container falls back to its status bar: {expanded}"
+    let both_max = buffer_text(&render_app(&mut app, 80, 40));
+    assert_eq!(
+        app.active_tab().workflow_overview_state,
+        WorkflowOverviewState::Maximized
     );
     assert_eq!(
         app.active_tab().container_window_state,
         ContainerWindowState::Maximized,
-        "the user's own Ctrl-M choice is untouched — the strip only overrides the display"
+        "Ctrl-O must not touch the container's own min/max"
+    );
+    assert!(
+        app.active_tab().container_inner_area.is_some(),
+        "a maximized overview must not put the PTY overlay away: {both_max}"
+    );
+    for i in 0..3 {
+        assert!(
+            both_max.contains(&format!("step-{i}")),
+            "the maximized overview names every parallel step: {both_max}"
+        );
+    }
+
+    // Ctrl-M minimizes the container. The overview stays maximized.
+    press_key(&mut app, KeyCode::Char('m'), KeyModifiers::CONTROL);
+    app.active_tab_mut().container_inner_area = None;
+    let overview_only = buffer_text(&render_app(&mut app, 80, 40));
+    assert_eq!(
+        app.active_tab().workflow_overview_state,
+        WorkflowOverviewState::Maximized,
+        "Ctrl-M must not touch the overview's own min/max"
+    );
+    assert!(
+        app.active_tab().container_inner_area.is_none(),
+        "a minimized container draws no PTY overlay: {overview_only}"
+    );
+    assert!(
+        overview_only.contains("awman-only"),
+        "the minimized container falls back to its status bar: {overview_only}"
+    );
+    assert!(overview_only.contains("step-2"), "{overview_only}");
+
+    // Ctrl-O minimizes the overview. The container stays minimized.
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let both_min = buffer_text(&render_app(&mut app, 80, 40));
+    assert_eq!(
+        app.active_tab().container_window_state,
+        ContainerWindowState::Minimized
+    );
+    assert!(
+        both_min.contains("3 steps\u{2026}") && !both_min.contains("step-2"),
+        "the overview is back to its one-box-per-stage summary: {both_min}"
     );
 }
 
 #[test]
-fn expanded_strip_wins_space_and_truncates_the_container_status_bars() {
-    use crate::frontend::tui::tabs::{ContainerWindowState, WorkflowStripState};
+fn maximized_overview_leaves_the_pty_overlay_its_share_of_the_body() {
+    use crate::frontend::tui::tabs::{ContainerWindowState, WorkflowOverviewState};
+    let mut app = make_app();
+    // 40 parallel steps want 120 rows — far more than the frame has.
+    set_parallel_workflow(&app, 40);
+    push_stdio_slot(&mut app, "awman-only");
+    app.active_tab_mut().container_window_state = ContainerWindowState::Maximized;
+    app.active_tab_mut().workflow_overview_state = WorkflowOverviewState::Maximized;
+
+    // 40 rows: 3 tab bar + 5 bottom chrome leaves 32 for the body. With the
+    // PTY overlay on screen the overview may take at most half of that (16 →
+    // 5 whole boxes), so the overlay keeps the rest.
+    let text = buffer_text(&render_app(&mut app, 80, 40));
+    assert!(
+        text.contains("+ 36 more\u{2026}"),
+        "the overview is capped at half the body and says what it hides: {text}"
+    );
+    let inner = app
+        .active_tab()
+        .container_inner_area
+        .expect("the PTY overlay is still drawn alongside a maximized overview");
+    assert!(
+        inner.height >= 10,
+        "the PTY overlay keeps a usable share of the body, got {inner:?}"
+    );
+}
+
+#[test]
+fn maximized_overview_wins_space_and_truncates_the_container_status_bars() {
+    use crate::frontend::tui::tabs::{ContainerWindowState, WorkflowOverviewState};
     let mut app = make_app();
     set_parallel_workflow(&app, 6);
     for i in 0..6 {
         push_stdio_slot(&mut app, &format!("awman-c{i}"));
     }
     app.active_tab_mut().container_window_state = ContainerWindowState::Minimized;
-    app.active_tab_mut().workflow_strip_state = WorkflowStripState::Expanded;
+    app.active_tab_mut().workflow_overview_state = WorkflowOverviewState::Maximized;
 
-    // 30 rows: 3 tab bar + 5 bottom chrome leaves 22 for the body. The strip
-    // asks for 18 (6 boxes) and is served first; the execution window keeps
-    // its 5-row floor out of the 4 left, so no container bar fits at all.
+    // 30 rows: 3 tab bar + 5 bottom chrome leaves 22 for the body. No PTY
+    // overlay is up, so the overview gets the whole body: it asks for 18 (6
+    // boxes) and is served first; the execution window keeps its 5-row floor
+    // out of the 4 left, so no container bar fits at all.
     let text = buffer_text(&render_app(&mut app, 80, 30));
     assert!(
         text.contains("step-5"),
-        "the strip is served its full height first: {text}"
+        "the overview is served its full height first: {text}"
     );
     assert!(
         !text.contains("awman-c0"),
-        "container status bars are truncated into whatever the strip leaves: {text}"
+        "container status bars are truncated into whatever the overview leaves: {text}"
     );
 
     // Given room for both, the bars come back.
@@ -580,11 +643,11 @@ fn expanded_strip_wins_space_and_truncates_the_container_status_bars() {
 }
 
 #[test]
-fn expanded_strip_never_grows_past_the_space_between_tab_bar_and_command_box() {
-    use crate::frontend::tui::tabs::WorkflowStripState;
+fn maximized_overview_never_grows_past_the_space_between_tab_bar_and_command_box() {
+    use crate::frontend::tui::tabs::WorkflowOverviewState;
     let mut app = make_app();
     set_parallel_workflow(&app, 40);
-    app.active_tab_mut().workflow_strip_state = WorkflowStripState::Expanded;
+    app.active_tab_mut().workflow_overview_state = WorkflowOverviewState::Maximized;
 
     // 40 steps want 120 rows; the frame has 24 - 3 - 5 = 16 to give, which is
     // 5 whole boxes. The command box must still render at the bottom.

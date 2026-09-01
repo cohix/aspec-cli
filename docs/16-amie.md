@@ -204,15 +204,15 @@ attach again later.
 
 Pressing **a** in the amie tab attaches to every running container for the
 selected condition at once, reproducing the same view you'd get from
-`awman exec workflow --dynamic`: the workflow state strip across the
+`awman exec workflow --dynamic`: the Workflow Overview across the
 bottom, one container maximized and the rest as minimized bars, and
 **Ctrl-S** to cycle focus between them. If the condition is still in its
 evaluation phase (no workflow yet), you instead see the single evaluation
-container with no strip.
+container with no Workflow Overview.
 
 While attached, the daemon dying doesn't interrupt anything already
 streaming — those are direct connections to the container runtime, not
-proxied through the daemon — but the workflow strip freezes and the tab
+proxied through the daemon — but the Workflow Overview freezes and the tab
 shows a "daemon not reachable" indicator until the daemon comes back.
 
 ---

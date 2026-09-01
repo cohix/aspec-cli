@@ -212,9 +212,9 @@ fn resize_slots(tab: &mut tabs::Tab, inner_cols: u16, inner_rows: u16) {
 /// accounting for the 95% sizing within the execution window area and the
 /// 2-cell border subtraction. The container window lives between the tab
 /// bar (3 rows) and the bottom chrome (5 rows: status bar + command box +
-/// suggestion row), plus any workflow strip or extra bar below.
+/// suggestion row), plus any Workflow Overview or extra bar below.
 ///
-/// `extra_bottom` accounts for the workflow strip height and the
+/// `extra_bottom` accounts for the Workflow Overview height and the
 /// minimized/summary bar (3 rows each when present). Callers that don't
 /// know the exact extra height can pass 0 for a best-effort estimate.
 pub(super) fn compute_container_inner_size(term_cols: u16, term_rows: u16) -> (u16, u16) {

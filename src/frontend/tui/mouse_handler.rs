@@ -1,4 +1,4 @@
-//! Mouse event routing: workflow-strip scroll, container/PTY scroll
+//! Mouse event routing: Workflow Overview scroll, container/PTY scroll
 //! forwarding, and click-drag text selection in the execution window and
 //! container overlay.
 
@@ -12,19 +12,19 @@ pub(super) fn handle_mouse_event(app: &mut App, mouse: crossterm::event::MouseEv
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
             let is_up = matches!(mouse.kind, MouseEventKind::ScrollUp);
 
-            // Workflow strip scroll takes priority.
-            if let Some(strip_rect) = app.active_tab().last_strip_rect {
-                if mouse.row >= strip_rect.y
-                    && mouse.row < strip_rect.y + strip_rect.height
-                    && mouse.column >= strip_rect.x
-                    && mouse.column < strip_rect.x + strip_rect.width
+            // Workflow Overview scroll takes priority.
+            if let Some(overview_rect) = app.active_tab().last_overview_rect {
+                if mouse.row >= overview_rect.y
+                    && mouse.row < overview_rect.y + overview_rect.height
+                    && mouse.column >= overview_rect.x
+                    && mouse.column < overview_rect.x + overview_rect.width
                 {
                     let tab = app.active_tab_mut();
                     if is_up {
-                        tab.workflow_strip_scroll_offset =
-                            tab.workflow_strip_scroll_offset.saturating_sub(1);
+                        tab.workflow_overview_scroll_offset =
+                            tab.workflow_overview_scroll_offset.saturating_sub(1);
                     } else {
-                        tab.workflow_strip_scroll_offset += 1;
+                        tab.workflow_overview_scroll_offset += 1;
                     }
                     return;
                 }

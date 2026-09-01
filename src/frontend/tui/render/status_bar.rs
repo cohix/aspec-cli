@@ -120,13 +120,13 @@ pub(super) fn render_status_bar(app: &App, area: Rect, frame: &mut Frame, sideba
         )],
     };
 
-    // A live workflow always has a strip on screen, so advertise the toggle
-    // between its one-box-per-stage summary and the full per-step overview.
+    // A live workflow always has the Workflow Overview on screen, so advertise
+    // the Ctrl-O min/max in whichever direction it can currently go.
     if workflow_active {
-        let label = if tab.workflow_strip_state.is_expanded() {
-            " \u{00b7} ctrl-o collapse steps "
+        let label = if tab.workflow_overview_state.is_maximized() {
+            " \u{00b7} ctrl-o minimize workflow overview "
         } else {
-            " \u{00b7} ctrl-o step overview "
+            " \u{00b7} ctrl-o maximize workflow overview "
         };
         spans.push(Span::styled(label, Style::default().fg(Color::DarkGray)));
     }

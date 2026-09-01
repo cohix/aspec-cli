@@ -1,6 +1,6 @@
 //! Tests for `key_handler`: autocomplete, focus switching, non-dialog text
 //! input, WorkflowControlBoard arrow-key handling, command-box locking,
-//! Ctrl+W escalation, container-window/workflow-strip resize behavior, and
+//! Ctrl+W escalation, container-window/Workflow-Overview resize behavior, and
 //! panic-log path resolution.
 
 use super::*;
@@ -94,40 +94,40 @@ fn l_in_execution_window_toggles_status_log() {
     assert_ne!(app.tabs[app.active_tab].status_log_collapsed, initial);
 }
 
-// ─── Ctrl-O / workflow strip overview ─────────────────────────────────────
+// ─── Ctrl-O / Workflow Overview ─────────────────────────────────────
 
 #[test]
-fn workflow_strip_starts_collapsed_and_ctrl_o_toggles_it() {
-    use crate::frontend::tui::tabs::WorkflowStripState;
+fn workflow_overview_starts_minimized_and_ctrl_o_toggles_it() {
+    use crate::frontend::tui::tabs::WorkflowOverviewState;
 
     let mut app = make_app();
     assert_eq!(
-        app.active_tab().workflow_strip_state,
-        WorkflowStripState::Collapsed,
-        "the strip must default to the collapsed one-box-per-stage view"
+        app.active_tab().workflow_overview_state,
+        WorkflowOverviewState::Minimized,
+        "the overview must default to the minimized one-box-per-stage view"
     );
 
     press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
     assert_eq!(
-        app.active_tab().workflow_strip_state,
-        WorkflowStripState::Expanded
+        app.active_tab().workflow_overview_state,
+        WorkflowOverviewState::Maximized
     );
 
     press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
     assert_eq!(
-        app.active_tab().workflow_strip_state,
-        WorkflowStripState::Collapsed
+        app.active_tab().workflow_overview_state,
+        WorkflowOverviewState::Minimized
     );
 }
 
 #[test]
-fn ctrl_o_resets_the_strip_scroll_offset() {
-    // A stale offset from a previous expansion would otherwise hide the first
-    // steps of the stage the next time the strip opens.
+fn ctrl_o_resets_the_overview_scroll_offset() {
+    // A stale offset from a previous maximization would otherwise hide the first
+    // steps of the stage the next time the overview opens.
     let mut app = make_app();
-    app.active_tab_mut().workflow_strip_scroll_offset = 4;
+    app.active_tab_mut().workflow_overview_scroll_offset = 4;
     press_key(&mut app, KeyCode::Char('o'), KeyModifiers::CONTROL);
-    assert_eq!(app.active_tab().workflow_strip_scroll_offset, 0);
+    assert_eq!(app.active_tab().workflow_overview_scroll_offset, 0);
 }
 
 // ─── WorkflowControlBoard arrow keys ─────────────────────────────────────
@@ -542,7 +542,7 @@ fn cycle_to_hidden_does_not_send_resize() {
     );
 }
 
-// ─── Workflow strip scroll ────────────────────────────────────────────────
+// ─── Workflow Overview scroll ────────────────────────────────────────────────
 
 #[test]
 fn scroll_down_reveals_hidden_parallel_steps() {
@@ -552,7 +552,7 @@ fn scroll_down_reveals_hidden_parallel_steps() {
 
     let mut app = make_app();
 
-    // Seed a workflow with many parallel steps so the strip would have overflow.
+    // Seed a workflow with many parallel steps so the overview would overflow.
     let view = WorkflowViewState {
         steps: (0..6)
             .map(|i| WorkflowStepView {
@@ -568,26 +568,26 @@ fn scroll_down_reveals_hidden_parallel_steps() {
     };
     *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
 
-    // Simulate the renderer having recorded a strip rect.
-    let strip_rect = Rect::new(0, 30, 80, 9);
-    app.active_tab_mut().last_strip_rect = Some(strip_rect);
+    // Simulate the renderer having recorded an overview rect.
+    let overview_rect = Rect::new(0, 30, 80, 9);
+    app.active_tab_mut().last_overview_rect = Some(overview_rect);
 
-    assert_eq!(app.active_tab().workflow_strip_scroll_offset, 0);
+    assert_eq!(app.active_tab().workflow_overview_scroll_offset, 0);
 
-    // Mouse scroll-down inside the strip rect increments the offset.
+    // Mouse scroll-down inside the overview rect increments the offset.
     crate::frontend::tui::mouse_handler::handle_mouse_event(
         &mut app,
         MouseEvent {
             kind: MouseEventKind::ScrollDown,
             column: 10,
-            row: 32, // inside strip_rect
+            row: 32, // inside overview_rect
             modifiers: KeyModifiers::NONE,
         },
     );
     assert_eq!(
-        app.active_tab().workflow_strip_scroll_offset,
+        app.active_tab().workflow_overview_scroll_offset,
         1,
-        "scroll down inside strip must increment workflow_strip_scroll_offset"
+        "scroll down inside the overview must increment workflow_overview_scroll_offset"
     );
 }
 
@@ -611,8 +611,8 @@ fn scroll_clamped_at_bounds() {
     };
     *app.active_tab_mut().workflow_state.lock().unwrap() = Some(view);
 
-    let strip_rect = Rect::new(0, 30, 80, 3);
-    app.active_tab_mut().last_strip_rect = Some(strip_rect);
+    let overview_rect = Rect::new(0, 30, 80, 3);
+    app.active_tab_mut().last_overview_rect = Some(overview_rect);
 
     // Scroll up when already at 0 → offset stays at 0 (no underflow).
     crate::frontend::tui::mouse_handler::handle_mouse_event(
@@ -625,7 +625,7 @@ fn scroll_clamped_at_bounds() {
         },
     );
     assert_eq!(
-        app.active_tab().workflow_strip_scroll_offset,
+        app.active_tab().workflow_overview_scroll_offset,
         0,
         "scrolling up at offset=0 must not underflow"
     );

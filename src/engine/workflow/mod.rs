@@ -372,7 +372,7 @@ impl WorkflowEngine {
 
     /// The resolved per-workflow concurrency cap (`None` = unlimited). Resolved
     /// once at construction from `effective_max_concurrent_agents()`. Frontends
-    /// read this to size the workflow strip / parallel UX.
+    /// read this to size the Workflow Overview / parallel UX.
     pub fn max_concurrent(&self) -> Option<usize> {
         self.max_concurrent
     }

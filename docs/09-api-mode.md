@@ -1221,9 +1221,9 @@ while true; do
 done
 ```
 
-If the endpoint returns HTTP 404 on the first poll, the command either has not started yet or is not a workflow command — treat 404 as "no workflow" and skip the strip. If 404 is returned after a non-404 response, the workflow was removed; stop polling.
+If the endpoint returns HTTP 404 on the first poll, the command either has not started yet or is not a workflow command — treat 404 as "no workflow" and skip the Workflow Overview. If 404 is returned after a non-404 response, the workflow was removed; stop polling.
 
-The [Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs) feature uses this endpoint internally to render the workflow state strip for commands running on a remote API server.
+The [Remote-bound TUI tabs](10-remote-mode.md#remote-bound-tui-tabs) feature uses this endpoint internally to render the Workflow Overview for commands running on a remote API server.
 
 ---
 

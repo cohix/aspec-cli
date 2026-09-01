@@ -1,4 +1,4 @@
-//! Workflow status strip — horizontal display of workflow step progression.
+//! Workflow Overview — horizontal display of workflow step progression.
 //!
 //! Layout:
 //! - Steps are grouped into **topological columns** ("stages") by sorted
@@ -9,49 +9,50 @@
 //! - **Inter-column `→` arrows** sit on the middle row of the first row of
 //!   boxes, joining adjacent columns.
 //!
-//! The strip has two display modes ([`WorkflowStripState`], toggled with
-//! `Ctrl-O`):
-//! - **Collapsed** (default) — one box per stage, 3 rows total. A
+//! The overview has two display modes ([`WorkflowOverviewState`], toggled with
+//! `Ctrl-O` — independently of the container PTY's own `Ctrl-M` min/max):
+//! - **Minimized** (default) — one box per stage, 3 rows total. A
 //!   single-step stage draws that step's normal box; a parallel stage draws
 //!   a `N steps…` summary in the stage's aggregate status colour.
-//! - **Expanded** — every step of every stage gets its own box, stacked
+//! - **Maximized** — every step of every stage gets its own box, stacked
 //!   vertically at the same indent. Nothing is ever rolled up: completed
 //!   parallel siblings keep their own box, name, agent label, and colour.
-//!   The strip grows to whatever vertical space the frame can spare between
-//!   the tab bar and the command box; when even that is not enough, the last
-//!   visible row becomes a `+ N more…` overflow box and the mouse wheel
-//!   scrolls the stage.
+//!   The overview grows into the vertical space the frame can spare between
+//!   the tab bar and the command box (the caller's `max_height`, which the
+//!   renderer halves while a maximized container PTY is also on screen); when
+//!   even that is not enough, the last visible row becomes a `+ N more…`
+//!   overflow box and the mouse wheel scrolls the stage.
 
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 
 use crate::data::workflow_state::{PhaseStepStatus, StepState, WorkflowState};
-use crate::frontend::tui::tabs::{WorkflowStepView, WorkflowStripState, WorkflowViewState};
+use crate::frontend::tui::tabs::{WorkflowOverviewState, WorkflowStepView, WorkflowViewState};
 
 /// Rows occupied by one step box (rounded border + one content row).
 pub const STEP_BOX_HEIGHT: u16 = 3;
 
-/// Compute the rows the workflow strip wants, clamped to `max_height`.
+/// Compute the rows the Workflow Overview wants, clamped to `max_height`.
 ///
-/// - Collapsed → one box row (3 rows), whatever the shape of the workflow.
-/// - Expanded → one box row per step in the widest stage, with **no** cap
-///   other than `max_height` (the space the frame can spare between the tab
-///   bar and the command box). The result is always a whole number of box
-///   rows, so a box is never clipped mid-border.
+/// - Minimized → one box row (3 rows), whatever the shape of the workflow.
+/// - Maximized → one box row per step in the widest stage, with **no** cap
+///   other than `max_height` (the share of the body the caller is willing to
+///   give up). The result is always a whole number of box rows, so a box is
+///   never clipped mid-border.
 ///
 /// Returns 0 when `state` has no steps, or when `max_height` cannot fit even
 /// a single box.
-pub fn workflow_strip_height(
+pub fn workflow_overview_height(
     state: &WorkflowViewState,
-    strip_state: WorkflowStripState,
+    overview_state: WorkflowOverviewState,
     max_height: u16,
 ) -> u16 {
     if state.steps.is_empty() {
         return 0;
     }
-    let rows = match strip_state {
-        WorkflowStripState::Collapsed => 1u16,
-        WorkflowStripState::Expanded => {
+    let rows = match overview_state {
+        WorkflowOverviewState::Minimized => 1u16,
+        WorkflowOverviewState::Maximized => {
             let columns = build_workflow_columns(state);
             columns.iter().map(|c| c.len()).max().unwrap_or(1).max(1) as u16
         }
@@ -61,13 +62,13 @@ pub fn workflow_strip_height(
     desired.min(cap)
 }
 
-/// Render the workflow status strip into the given area.
-pub fn render_workflow_strip(
+/// Render the Workflow Overview into the given area.
+pub fn render_workflow_overview(
     state: &WorkflowViewState,
     area: Rect,
     frame: &mut Frame,
     scroll_offset: usize,
-    strip_state: WorkflowStripState,
+    overview_state: WorkflowOverviewState,
 ) {
     if area.width == 0 || area.height == 0 || state.steps.is_empty() {
         return;
@@ -84,16 +85,16 @@ pub fn render_workflow_strip(
     let box_space = area.width.saturating_sub(arrow_chars);
     let base_col_w = (box_space / num_cols as u16).max(4);
 
-    // The number of vertical slots for parallel steps in this strip. Collapsed
-    // mode always draws exactly one row per stage.
-    let visible_rows = if strip_state.is_expanded() {
+    // The number of vertical slots for parallel steps in this overview. The
+    // minimized mode always draws exactly one row per stage.
+    let visible_rows = if overview_state.is_maximized() {
         (area.height / STEP_BOX_HEIGHT).max(1) as usize
     } else {
         1
     };
     // Scrolling only means something when the stage does not fit; the
-    // collapsed strip is always exactly one row tall.
-    let scroll_offset = if strip_state.is_expanded() {
+    // minimized overview is always exactly one row tall.
+    let scroll_offset = if overview_state.is_maximized() {
         scroll_offset
     } else {
         0
@@ -101,20 +102,20 @@ pub fn render_workflow_strip(
 
     let mut col_x = area.x;
     for (col_idx, col_steps) in columns.iter().enumerate() {
-        // Last column absorbs the remainder so the strip fills the area.
+        // Last column absorbs the remainder so the overview fills the area.
         let this_col_w = if col_idx + 1 == num_cols {
             area.x + area.width - col_x
         } else {
             base_col_w
         };
 
-        // Build the display rows for this stage. Expanded gives every step
+        // Build the display rows for this stage. Maximized gives every step
         // its own row (steps beyond `max_concurrent` are marked queued);
-        // collapsed gives the stage a single row.
-        let column_rows = if strip_state.is_expanded() {
+        // minimized gives the stage a single row.
+        let column_rows = if overview_state.is_maximized() {
             build_column_rows(col_steps, state.max_concurrent)
         } else {
-            vec![build_collapsed_row(col_steps)]
+            vec![build_minimized_row(col_steps)]
         };
         // When the stage does not fit, the last visible slot is spent on the
         // `+ N more…` marker rather than on a step box — so that slot's step
@@ -196,7 +197,7 @@ pub fn render_workflow_strip(
         }
 
         // Overflow indicator below the last drawn box when there are hidden
-        // steps under the fold. Scrolling the strip reveals them.
+        // steps under the fold. Scrolling the overview reveals them.
         if hidden > 0 {
             let row_y = area.y + rows_to_show.len() as u16 * STEP_BOX_HEIGHT;
             if row_y + STEP_BOX_HEIGHT <= area.y + area.height {
@@ -219,7 +220,7 @@ pub fn render_workflow_strip(
     }
 }
 
-/// A single rendered row in a workflow-strip column.
+/// A single rendered row in a Workflow Overview column.
 enum ColumnRow<'a> {
     /// One step's box. `queued` steps (beyond `max_concurrent`) get a `·`
     /// name prefix.
@@ -227,7 +228,7 @@ enum ColumnRow<'a> {
         step: &'a WorkflowStepView,
         queued: bool,
     },
-    /// The collapsed-mode summary of a multi-step stage: `N steps…`, drawn in
+    /// The minimized-mode summary of a multi-step stage: `N steps…`, drawn in
     /// the stage's aggregate status colour.
     Stage { count: usize, status: &'static str },
 }
@@ -237,7 +238,7 @@ fn is_completed_status(status: &str) -> bool {
     matches!(status, "done" | "cancelled" | "skipped")
 }
 
-/// Build the ordered display rows for one strip stage in **expanded** mode.
+/// Build the ordered display rows for one stage in **maximized** mode.
 ///
 /// Every step keeps its own row, in workflow-definition order, for the whole
 /// life of the run — completed siblings are never rolled up, and a step never
@@ -264,11 +265,11 @@ fn build_column_rows<'a>(
         .collect()
 }
 
-/// Build the single **collapsed**-mode row for one stage.
+/// Build the single **minimized**-mode row for one stage.
 ///
 /// A one-step stage renders that step's normal box (name, agent/model title,
 /// status colour). A parallel stage renders a `N steps…` summary instead.
-fn build_collapsed_row<'a>(col: &[&'a WorkflowStepView]) -> ColumnRow<'a> {
+fn build_minimized_row<'a>(col: &[&'a WorkflowStepView]) -> ColumnRow<'a> {
     if col.len() == 1 {
         return ColumnRow::Step {
             step: col[0],
@@ -584,77 +585,77 @@ mod tests {
 
     const ROOMY: u16 = 200;
 
-    fn expanded_height(v: &WorkflowViewState, max: u16) -> u16 {
-        workflow_strip_height(v, WorkflowStripState::Expanded, max)
+    fn maximized_height(v: &WorkflowViewState, max: u16) -> u16 {
+        workflow_overview_height(v, WorkflowOverviewState::Maximized, max)
     }
 
-    fn collapsed_height(v: &WorkflowViewState, max: u16) -> u16 {
-        workflow_strip_height(v, WorkflowStripState::Collapsed, max)
+    fn minimized_height(v: &WorkflowViewState, max: u16) -> u16 {
+        workflow_overview_height(v, WorkflowOverviewState::Minimized, max)
     }
 
     #[test]
-    fn workflow_strip_height_is_zero_when_no_steps() {
+    fn workflow_overview_height_is_zero_when_no_steps() {
         let v = view(vec![]);
-        assert_eq!(expanded_height(&v, ROOMY), 0);
-        assert_eq!(collapsed_height(&v, ROOMY), 0);
+        assert_eq!(maximized_height(&v, ROOMY), 0);
+        assert_eq!(minimized_height(&v, ROOMY), 0);
     }
 
     #[test]
-    fn workflow_strip_height_3_when_sequential() {
+    fn workflow_overview_height_3_when_sequential() {
         let v = view(vec![
             step("a", "done", vec![]),
             step("b", "running", vec!["a"]),
         ]);
-        assert_eq!(expanded_height(&v, ROOMY), 3);
+        assert_eq!(maximized_height(&v, ROOMY), 3);
     }
 
     #[test]
-    fn workflow_strip_height_grows_with_parallel_group() {
+    fn workflow_overview_height_grows_with_parallel_group() {
         let v = view(vec![
             step("a", "done", vec![]),
             step("b", "done", vec![]),
             step("c", "running", vec![]),
         ]);
         // 3 parallel steps → 3 * 3 = 9 rows.
-        assert_eq!(expanded_height(&v, ROOMY), 9);
+        assert_eq!(maximized_height(&v, ROOMY), 9);
     }
 
     #[test]
-    fn workflow_strip_height_expanded_has_no_cap_but_the_frame() {
+    fn workflow_overview_height_maximized_has_no_cap_but_the_budget() {
         let steps: Vec<WorkflowStepView> = (0..40)
             .map(|i| step(&format!("s{i}"), "running", vec![]))
             .collect();
         let v = view(steps);
         // No concurrency cap and no legacy row cap: 40 parallel siblings each
         // get their own box when the frame is tall enough.
-        assert_eq!(expanded_height(&v, ROOMY), 120);
+        assert_eq!(maximized_height(&v, ROOMY), 120);
     }
 
     #[test]
-    fn workflow_strip_height_expanded_is_capped_to_available_space() {
+    fn workflow_overview_height_maximized_is_capped_to_available_space() {
         let steps: Vec<WorkflowStepView> = (0..40)
             .map(|i| step(&format!("s{i}"), "running", vec![]))
             .collect();
         let v = view(steps);
-        // 20 rows of space → 6 whole boxes (18 rows); the strip never returns
+        // 20 rows of space → 6 whole boxes (18 rows); the overview never returns
         // a height that would clip a box mid-border.
-        assert_eq!(expanded_height(&v, 20), 18);
+        assert_eq!(maximized_height(&v, 20), 18);
     }
 
     #[test]
-    fn workflow_strip_height_collapsed_is_one_box_whatever_the_shape() {
+    fn workflow_overview_height_minimized_is_one_box_whatever_the_shape() {
         let steps: Vec<WorkflowStepView> = (0..40)
             .map(|i| step(&format!("s{i}"), "running", vec![]))
             .collect();
         let v = view(steps);
-        assert_eq!(collapsed_height(&v, ROOMY), 3);
+        assert_eq!(minimized_height(&v, ROOMY), 3);
     }
 
     #[test]
-    fn workflow_strip_height_is_zero_when_not_even_one_box_fits() {
+    fn workflow_overview_height_is_zero_when_not_even_one_box_fits() {
         let v = view(vec![step("a", "running", vec![])]);
-        assert_eq!(collapsed_height(&v, 2), 0);
-        assert_eq!(expanded_height(&v, 2), 0);
+        assert_eq!(minimized_height(&v, 2), 0);
+        assert_eq!(maximized_height(&v, 2), 0);
     }
 
     // ── step_box_label_and_style ──────────────────────────────────────────────
@@ -743,7 +744,7 @@ mod tests {
         assert!(label.contains('\u{2026}'));
     }
 
-    // ── WI-0096 §11 parallel strip rendering ────────────────────────────────
+    // ── WI-0096 §11 parallel overview rendering ────────────────────────────────
 
     #[test]
     fn parallel_siblings_share_one_column_no_row_indent() {
@@ -787,26 +788,26 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_row_for_single_step_stage_is_the_step_itself() {
-        // A one-step stage is not a parallel group, so the collapsed strip
+    fn minimized_row_for_single_step_stage_is_the_step_itself() {
+        // A one-step stage is not a parallel group, so the minimized overview
         // draws its normal box — name, agent label, and all.
         let steps = [step("only", "running", vec![])];
         let col: Vec<&WorkflowStepView> = steps.iter().collect();
         assert!(matches!(
-            build_collapsed_row(&col),
+            build_minimized_row(&col),
             ColumnRow::Step { step, queued: false } if step.name == "only"
         ));
     }
 
     #[test]
-    fn collapsed_row_for_parallel_stage_counts_the_steps() {
+    fn minimized_row_for_parallel_stage_counts_the_steps() {
         let steps = [
             step("a", "done", vec![]),
             step("b", "running", vec![]),
             step("c", "pending", vec![]),
         ];
         let col: Vec<&WorkflowStepView> = steps.iter().collect();
-        match build_collapsed_row(&col) {
+        match build_minimized_row(&col) {
             ColumnRow::Stage { count, status } => {
                 assert_eq!(count, 3);
                 // One sibling is still running, so the stage reads as running.
@@ -834,24 +835,24 @@ mod tests {
         assert_eq!(s(&waiting), "pending");
     }
 
-    // ── strip renders agent/model title on the box border ───────────────────
+    // ── overview renders agent/model title on the box border ───────────────────
 
-    fn render_strip_text(v: &WorkflowViewState, width: u16, height: u16) -> String {
-        render_strip_text_in(v, width, height, WorkflowStripState::Expanded)
+    fn render_overview_text(v: &WorkflowViewState, width: u16, height: u16) -> String {
+        render_overview_text_in(v, width, height, WorkflowOverviewState::Maximized)
     }
 
-    fn render_strip_text_in(
+    fn render_overview_text_in(
         v: &WorkflowViewState,
         width: u16,
         height: u16,
-        strip_state: WorkflowStripState,
+        overview_state: WorkflowOverviewState,
     ) -> String {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| render_workflow_strip(v, frame.area(), frame, 0, strip_state))
+            .draw(|frame| render_workflow_overview(v, frame.area(), frame, 0, overview_state))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         let area = *buf.area();
@@ -866,12 +867,12 @@ mod tests {
     }
 
     #[test]
-    fn strip_shows_agent_model_title_for_overridden_step() {
+    fn overview_shows_agent_model_title_for_overridden_step() {
         let mut s = step("build", "running", vec![]);
         s.agent = Some("claude".into());
         s.model = Some("opus-4-8".into());
         let v = view(vec![s]);
-        let text = render_strip_text(&v, 40, 3);
+        let text = render_overview_text(&v, 40, 3);
         assert!(
             text.contains("claude/opus-4-8"),
             "expected agent/model title on the box border, got:\n{text}"
@@ -879,10 +880,10 @@ mod tests {
     }
 
     #[test]
-    fn strip_omits_title_for_default_step() {
+    fn overview_omits_title_for_default_step() {
         // Neither agent nor model declared → box carries no agent/model title.
         let v = view(vec![step("build", "running", vec![])]);
-        let text = render_strip_text(&v, 40, 3);
+        let text = render_overview_text(&v, 40, 3);
         assert!(
             !text.contains('/'),
             "default step should have no agent/model title, got:\n{text}"
@@ -890,13 +891,13 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_strip_shows_step_count_for_a_parallel_stage() {
+    fn minimized_overview_shows_step_count_for_a_parallel_stage() {
         let v = view(vec![
             step("alpha", "running", vec![]),
             step("beta", "running", vec![]),
             step("gamma", "pending", vec![]),
         ]);
-        let text = render_strip_text_in(&v, 40, 3, WorkflowStripState::Collapsed);
+        let text = render_overview_text_in(&v, 40, 3, WorkflowOverviewState::Minimized);
         assert!(
             text.contains("3 steps\u{2026}"),
             "collapsed parallel stage must summarize as \"3 steps…\", got:\n{text}"
@@ -908,20 +909,20 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_strip_shows_the_normal_box_for_a_single_step_stage() {
+    fn minimized_overview_shows_the_normal_box_for_a_single_step_stage() {
         let v = view(vec![
             step("build", "running", vec![]),
             step("test", "pending", vec!["build"]),
         ]);
-        let text = render_strip_text_in(&v, 60, 3, WorkflowStripState::Collapsed);
+        let text = render_overview_text_in(&v, 60, 3, WorkflowOverviewState::Minimized);
         assert!(text.contains("build"), "got:\n{text}");
         assert!(text.contains("test"), "got:\n{text}");
         assert!(!text.contains("steps\u{2026}"), "got:\n{text}");
     }
 
     #[test]
-    fn expanded_strip_names_every_completed_parallel_sibling() {
-        // The old strip rolled completed siblings into "(+N completed)". Now
+    fn maximized_overview_names_every_completed_parallel_sibling() {
+        // The old overview rolled completed siblings into "(+N completed)". Now
         // each keeps its own named box.
         let v = view(vec![
             step("alpha", "done", vec![]),
@@ -929,37 +930,37 @@ mod tests {
             step("gamma", "done", vec![]),
             step("delta", "running", vec![]),
         ]);
-        let text = render_strip_text_in(&v, 40, 12, WorkflowStripState::Expanded);
+        let text = render_overview_text_in(&v, 40, 12, WorkflowOverviewState::Maximized);
         for name in ["alpha", "beta", "gamma", "delta"] {
             assert!(
                 text.contains(name),
-                "expected {name} in strip, got:\n{text}"
+                "expected {name} in overview, got:\n{text}"
             );
         }
         assert!(!text.contains("completed)"), "got:\n{text}");
     }
 
     #[test]
-    fn expanded_strip_keeps_the_agent_label_on_completed_siblings() {
+    fn maximized_overview_keeps_the_agent_label_on_completed_siblings() {
         let mut a = step("alpha", "done", vec![]);
         a.agent = Some("claude".into());
         let mut b = step("beta", "done", vec![]);
         b.agent = Some("codex".into());
         let v = view(vec![a, b]);
-        let text = render_strip_text_in(&v, 40, 6, WorkflowStripState::Expanded);
+        let text = render_overview_text_in(&v, 40, 6, WorkflowOverviewState::Maximized);
         assert!(text.contains("claude"), "got:\n{text}");
         assert!(text.contains("codex"), "got:\n{text}");
     }
 
     #[test]
-    fn expanded_strip_overflows_into_a_more_box_when_the_frame_is_too_short() {
+    fn maximized_overview_overflows_into_a_more_box_when_the_frame_is_too_short() {
         let steps: Vec<WorkflowStepView> = (0..6)
             .map(|i| step(&format!("s{i}"), "running", vec![]))
             .collect();
         let v = view(steps);
         // 9 rows fit 3 boxes; the third becomes the overflow marker for the
         // 4 steps it hides.
-        let text = render_strip_text_in(&v, 40, 9, WorkflowStripState::Expanded);
+        let text = render_overview_text_in(&v, 40, 9, WorkflowOverviewState::Maximized);
         assert!(
             text.contains("+ 4 more\u{2026}"),
             "expected an overflow box, got:\n{text}"

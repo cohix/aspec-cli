@@ -1,5 +1,5 @@
 //! `RemoteCommandFrontend` impl for the TUI, plus `RemoteWorkflowPoller`
-//! for live workflow strip updates from either remote service.
+//! for live Workflow Overview updates from either remote service.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

@@ -40,7 +40,7 @@ awman exec workflow --dynamic --work-item 42
 
 Use `exec workflow` to run any workflow file. If you don't want to write a workflow file yourself, see [Dynamic Workflows](13-dynamic-workflows.md) — `--dynamic` launches a leader agent that designs a purpose-built workflow for your work item and then executes it automatically. The work item is optional — associate one with `--work-item` if you want template variable substitution, or with `--issue` to use a GitHub issue directly. See [API Mode](09-api-mode.md) for usage in CI and scripting contexts. For more on GitHub integration, see [GitHub Integration](11-github-integration.md).
 
-The TUI shows a **workflow status strip** between the execution window and the command box, with one coloured box per step. After each step completes, a confirmation dialog appears — press **Enter** to advance, **q** to pause. State is saved to disk so you can resume later.
+The TUI shows the **Workflow Overview** between the execution window and the command box, with one coloured box per step. After each step completes, a confirmation dialog appears — press **Enter** to advance, **q** to pause. State is saved to disk so you can resume later.
 
 ---
 
@@ -928,7 +928,7 @@ Per-step `model` values are persisted in the workflow state file. On resume, the
 exec workflow aspec/workflows/implement-hard.toml --work-item 0027
 ```
 
-A **workflow status strip** appears, showing each step as a coloured box:
+The **Workflow Overview** appears, showing each step as a coloured box:
 
 | Colour | Status |
 |--------|--------|
@@ -1063,9 +1063,9 @@ Ctrl+W works at any time when a workflow is active in the current tab — there 
 
 ---
 
-## Workflow strip and step status
+## Workflow Overview and step status
 
-The **workflow status strip** shows the state of every step in the workflow:
+The **Workflow Overview** shows the state of every step in the workflow:
 
 ```
 Running: plan     ┃  ● implement    ✓ review    ⚠️ docs
@@ -1098,7 +1098,7 @@ When a setup or teardown step fails and has an `on_failure` block, the step stat
 
 ### Stuck steps
 
-When a step produces no output for more than 30 seconds, it is marked as stuck in the strip. Stuck steps show a warning indicator (⚠️) both in the strip box and in the tab label.
+When a step produces no output for more than 30 seconds, it is marked as stuck in the overview. Stuck steps show a warning indicator (⚠️) both in the overview box and in the tab label.
 
 Stuck steps trigger automatic behavior depending on the mode:
 - In **yolo mode**: the engine starts a 60-second countdown. When it expires, the step is auto-advanced. If the user cancels (Esc) and the step re-stucks, the countdown restarts from 60 seconds with no backoff.
@@ -1111,12 +1111,12 @@ You can always open the control board manually via **Ctrl+W** regardless of stuc
 
 Steps that share the same dependencies form a **parallel group** and run concurrently, each in its own container, up to the [`maxConcurrentAgents`](07-configuration.md#reference) cap (unlimited by default).
 
-The strip shows a parallel group in one of two ways, toggled with **Ctrl-O**:
+The overview shows a parallel group in one of two ways, toggled with **Ctrl-O**:
 
-- **Collapsed** (the default) — the whole group is one box reading `3 steps…`, coloured by the group's overall state (a failed step colours the box red, otherwise a running step colours it blue, and so on). The strip stays 3 rows tall no matter how wide the workflow fans out.
-- **Expanded** — every step in the group gets its own box, stacked vertically at the same indent, keeping its full name, its `agent/model` label, and its own status colour for the whole run. Completed steps are never rolled up or hidden behind finished siblings.
+- **Minimized** (the default) — the whole group is one box reading `3 steps…`, coloured by the group's overall state (a failed step colours the box red, otherwise a running step colours it blue, and so on). The overview stays 3 rows tall no matter how wide the workflow fans out.
+- **Maximized** — every step in the group gets its own box, stacked vertically at the same indent, keeping its full name, its `agent/model` label, and its own status colour for the whole run. Completed steps are never rolled up or hidden behind finished siblings.
 
-The expanded strip grows to fill whatever vertical space sits between the tab bar and the command box, so most groups fit whole. If a group is larger than even that, the last box becomes a `+ N more…` marker — use the **mouse wheel** over the strip to scroll through the rest.
+The maximized overview grows to fill the vertical space between the tab bar and the command box — half of it when a container window is maximized too, since **Ctrl-O** and **Ctrl-M** are independent and neither puts the other away. If a group is larger than the overview's height, the last box becomes a `+ N more…` marker — use the **mouse wheel** over the overview to scroll through the rest.
 
 In the TUI, running steps beyond the concurrency cap wait their turn with a `·` prefix on their name until a slot frees up.
 
@@ -1213,7 +1213,7 @@ Start it over (s) or skip to next step (n)? [s/n]:
 
 ## Parallel groups
 
-Steps that share the same `Depends-on` set form a **parallel group** and run concurrently, each in its own container, up to the configured [`maxConcurrentAgents`](07-configuration.md#reference) cap. In the TUI the group reads as a single `N steps…` box until you press **Ctrl-O**, which expands it into one box per step stacked vertically at the same indent. See [Parallel Workflows](15-parallel-workflows.md) for details.
+Steps that share the same `Depends-on` set form a **parallel group** and run concurrently, each in its own container, up to the configured [`maxConcurrentAgents`](07-configuration.md#reference) cap. In the TUI the group reads as a single `N steps…` box until you press **Ctrl-O**, which maximizes the Workflow Overview into one box per step stacked vertically at the same indent. See [Parallel Workflows](15-parallel-workflows.md) for details.
 
 ---
 
@@ -1284,9 +1284,9 @@ Steps that share the same `Depends-on` set form a **parallel group** and run con
 | Work item file not found | Error before loading the workflow |
 | Workflow file not found / unreadable | Clear error with the file path |
 | Agent failure mid-workflow | Step marked Error; user prompted to retry or abort |
-| Very long step names | Truncated to 12 characters with `…` in the TUI strip |
+| Very long step names | Truncated to 12 characters with `…` in the TUI Workflow Overview |
 | Large number of parallel steps | Capped at 3 visible rows; extra shown as `+ N more…` |
-| Large number of sequential steps | `+ N more…` box at the far right of the strip |
+| Large number of sequential steps | `+ N more…` box at the far right of the Workflow Overview |
 | **d** pressed; auto-popup suppressed | Auto-open skipped until workflow advances; Ctrl+W still works |
 | Container window maximized (auto-open) | Dialog opens over the maximized terminal; input routes to dialog |
 | Another dialog already open | Both Ctrl+W and auto-open suppressed until open dialog is dismissed |
