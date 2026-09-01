@@ -21,7 +21,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::data::fs::auth_paths::AuthPathResolver;
 use crate::data::session::AgentName;
-use crate::engine::auth::credential::{CredentialFile, CredentialFingerprint, CredentialReadError};
+use crate::engine::auth::credential::{
+    CredentialBinding, CredentialFile, CredentialFingerprint, CredentialReadError,
+};
 use crate::engine::auth::keychain::refreshable_spec_for;
 use crate::engine::auth::RefreshableCredentialDelivery;
 use crate::engine::ready::{refresh_host_credential, HostRefreshOutcome};
@@ -103,7 +105,7 @@ struct AgentState {
 pub struct CredentialRefreshMonitor {
     config: MonitorConfig,
     registry: LeaseRegistry,
-    resolver: AuthPathResolver,
+    binding: CredentialBinding,
     state: Mutex<HashMap<String, AgentState>>,
     /// Serializes host-refresh operations so the single-use refresh token is
     /// never raced by the tick loop and a concurrent `refresh_now` (INV-4).
@@ -118,14 +120,26 @@ impl CredentialRefreshMonitor {
         Self::with_resolver(config, resolver)
     }
 
-    /// Construct a monitor bound to an explicit credential resolver instead of
-    /// the process HOME/keychain. Used by tests so the tick loop never reads a
-    /// developer's real credential nor spawns a real host ping (F3).
+    /// Construct a monitor rooted at an explicit home directory, still reading
+    /// whichever credential store the platform uses natively.
+    ///
+    /// NOTE for tests: on macOS the Claude descriptor reads the Keychain and
+    /// ignores the home directory, so this alone does NOT isolate a test from
+    /// the developer's real credential. Use [`Self::with_binding`] with
+    /// [`CredentialBinding::to_file`] for an isolation that holds on every
+    /// platform.
     pub fn with_resolver(config: MonitorConfig, resolver: AuthPathResolver) -> Arc<Self> {
+        Self::with_binding(config, CredentialBinding::platform_default(resolver))
+    }
+
+    /// Construct a monitor bound to an explicit credential source, so the tick
+    /// loop never reads a developer's real credential nor spawns a real host
+    /// ping (F3) — on any platform.
+    pub fn with_binding(config: MonitorConfig, binding: CredentialBinding) -> Arc<Self> {
         Arc::new(Self {
             config,
             registry: LeaseRegistry::new(),
-            resolver,
+            binding,
             state: Mutex::new(HashMap::new()),
             refresh_gate: tokio::sync::Mutex::new(()),
             thread_started: std::sync::Once::new(),
@@ -289,7 +303,7 @@ impl CredentialRefreshMonitor {
                 reason: CredentialReadError::Unsupported,
             };
         };
-        let source = (spec.source)(&self.resolver);
+        let source = self.binding.source_for(spec);
 
         let snapshot = match (spec.read)(&source) {
             Ok(snapshot) => snapshot,
@@ -325,7 +339,7 @@ impl CredentialRefreshMonitor {
         // its last-known-good file — loudly, never silently.
         let mut stale_remediation: Option<String> = None;
         let snapshot = if near_expiry {
-            match refresh_host_credential(spec, &self.resolver).await {
+            match refresh_host_credential(spec, &self.binding).await {
                 HostRefreshOutcome::Advanced { .. } => match (spec.read)(&source) {
                     Ok(fresh) => fresh,
                     Err(reason) => {
@@ -631,14 +645,6 @@ mod tests {
     /// HIGH-7 / INV-7 defense 3: the monitor never RECREATES a staged file that
     /// a live lease's container has deleted — a missing target is a skip, not a
     /// write. Only present-but-drifted files are repaired.
-    ///
-    /// Not run on macOS. `claude_source` branches on `cfg!(target_os =
-    /// "macos")`, so the host credential there is the Keychain and the resolver
-    /// is ignored entirely — a credential planted under a temp HOME is never
-    /// read, and the fixture cannot be built (the setup read returns
-    /// `NotFound`). The reconciliation logic under test is platform
-    /// independent; only the source of the host credential is not.
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn reconcile_skips_missing_target_instead_of_recreating() {
         let home = tempfile::tempdir().unwrap();
@@ -654,21 +660,25 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = AuthPathResolver::at_home(home.path());
+        // Bind the credential source to the planted FILE, not to the platform
+        // default: on macOS the default is the Keychain, which would ignore
+        // this temp HOME and read the developer's real credential.
+        let binding =
+            CredentialBinding::to_file(AuthPathResolver::at_home(home.path()), &host_file);
         let spec = refreshable_spec_for(&AgentName::new("claude").unwrap()).unwrap();
-        let snapshot = (spec.read)(&(spec.source)(&resolver)).unwrap();
+        let snapshot = (spec.read)(&binding.source_for(spec)).unwrap();
         let fingerprint = CredentialFingerprint::of(&snapshot);
 
         let staged = tempfile::tempdir().unwrap();
         let staged_path = staged.path().join(".credentials.json");
         // Deliberately do NOT create the staged file: the container "deleted" it.
 
-        let monitor = CredentialRefreshMonitor::with_resolver(
+        let monitor = CredentialRefreshMonitor::with_binding(
             MonitorConfig {
                 refresh_threshold: Duration::from_secs(60),
                 tick_interval: Duration::from_secs(3600),
             },
-            resolver,
+            binding,
         );
         let delivery = RefreshableCredentialDelivery {
             agent: AgentName::new("claude").unwrap(),
@@ -696,10 +706,6 @@ mod tests {
     /// unchanged (same fingerprint). The monitor no longer skips the write just
     /// because the host fingerprint matches `last_materialized`.
     ///
-    /// Not run on macOS, for the same reason as
-    /// [`reconcile_skips_missing_target_instead_of_recreating`]: the host
-    /// credential there comes from the Keychain, not from the resolver's HOME.
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn reconcile_repairs_drifted_staged_file_when_host_unchanged() {
         let home = tempfile::tempdir().unwrap();
@@ -718,9 +724,11 @@ mod tests {
         .unwrap();
 
         let spec = refreshable_spec_for(&AgentName::new("claude").unwrap()).unwrap();
-        let resolver = AuthPathResolver::at_home(home.path());
-        let source = (spec.source)(&resolver);
-        let snapshot = (spec.read)(&source).unwrap();
+        // Explicit file binding, so this fixture means the same thing on macOS
+        // as it does on Linux (see the sibling test).
+        let binding =
+            CredentialBinding::to_file(AuthPathResolver::at_home(home.path()), &host_file);
+        let snapshot = (spec.read)(&binding.source_for(spec)).unwrap();
         let fingerprint = CredentialFingerprint::of(&snapshot);
         let file = (spec.materialize)(&snapshot);
 
@@ -730,12 +738,12 @@ mod tests {
 
         // Use a long tick so only our explicit refresh_now reconciles (the
         // background thread stays parked between our call and the assertion).
-        let monitor = CredentialRefreshMonitor::with_resolver(
+        let monitor = CredentialRefreshMonitor::with_binding(
             MonitorConfig {
                 refresh_threshold: Duration::from_secs(60),
                 tick_interval: Duration::from_secs(3600),
             },
-            resolver,
+            binding,
         );
         let delivery = RefreshableCredentialDelivery {
             agent: AgentName::new("claude").unwrap(),
@@ -764,12 +772,18 @@ mod tests {
 
     #[test]
     fn register_seeds_state_and_counts_lease() {
-        // A per-test temp HOME, so nothing here can touch the developer's real
-        // file-backed credential and no two tests share a home directory.
+        // A per-test temp HOME bound as an explicit FILE source, so nothing
+        // here can touch the developer's real credential on ANY platform and no
+        // two tests share a home directory. The file is deliberately absent:
+        // the tick thread's read is a guaranteed miss rather than, on macOS, a
+        // Keychain hit on whatever the developer happens to be logged into.
         let home = tempfile::tempdir().unwrap();
-        let monitor = CredentialRefreshMonitor::with_resolver(
+        let monitor = CredentialRefreshMonitor::with_binding(
             MonitorConfig::default(),
-            AuthPathResolver::at_home(home.path()),
+            CredentialBinding::to_file(
+                AuthPathResolver::at_home(home.path()),
+                home.path().join(".claude/.credentials.json"),
+            ),
         );
         let staged = tempfile::tempdir().unwrap();
         let agent = AgentName::new("claude").unwrap();
@@ -785,9 +799,8 @@ mod tests {
         // Seeding is asserted through the `seed_state` call `register` itself
         // makes, BEFORE any monitor thread exists. Asserting it after
         // `register` would race that thread's first tick, which reads the host
-        // credential (a keychain lookup on macOS, so a temp HOME does not make
-        // it a guaranteed miss) and then legitimately rewrites either the
-        // failure counter or `last_materialized`.
+        // credential and then legitimately rewrites either the failure counter
+        // or `last_materialized`.
         monitor.seed_state(&delivery);
         assert_eq!(
             monitor

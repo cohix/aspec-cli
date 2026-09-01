@@ -177,9 +177,9 @@ const HOST_REFRESH_REMEDIATION: &str = "run `claude` on the host / check login";
 /// file; it is never promoted to an engine error.
 pub async fn refresh_host_credential(
     spec: &RefreshableCredentialSpec,
-    resolver: &crate::data::fs::auth_paths::AuthPathResolver,
+    binding: &crate::engine::auth::credential::CredentialBinding,
 ) -> HostRefreshOutcome {
-    let source = (spec.source)(resolver);
+    let source = binding.source_for(spec);
     let before = match (spec.read)(&source) {
         Ok(snapshot) => (spec.expiry)(&snapshot),
         Err(reason) => {

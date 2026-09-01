@@ -183,6 +183,64 @@ pub enum HostCredentialSource {
     HostFile { path: PathBuf },
 }
 
+/// Where one process should read host credentials from.
+///
+/// Production binds only a home directory and lets each descriptor pick the
+/// platform's native store — for Claude that is the Keychain on macOS and
+/// `~/.claude/.credentials.json` everywhere else.
+///
+/// The reason this type exists rather than every caller invoking
+/// `(spec.source)(resolver)` directly: [`claude_source`] branches on
+/// `cfg!(target_os = "macos")` and, on that branch, ignores the resolver
+/// entirely. A caller that rebinds the home directory to isolate itself
+/// therefore isolates nothing on macOS and silently reads the developer's real
+/// Keychain. Binding the source explicitly with [`CredentialBinding::to_file`]
+/// makes that isolation hold on every platform instead of on two out of three.
+///
+/// [`claude_source`]: fn@claude_source
+#[derive(Clone, Debug)]
+pub struct CredentialBinding {
+    resolver: AuthPathResolver,
+    /// When set, used verbatim in place of the descriptor's platform default.
+    explicit: Option<HostCredentialSource>,
+}
+
+impl CredentialBinding {
+    /// Bind a home directory and let each descriptor choose the platform's
+    /// native credential store. The production constructor.
+    pub fn platform_default(resolver: AuthPathResolver) -> Self {
+        Self {
+            resolver,
+            explicit: None,
+        }
+    }
+
+    /// Bind an explicit host credential FILE, overriding the platform default.
+    ///
+    /// This is what makes a temp-HOME fixture mean the same thing on macOS as
+    /// it does on Linux. It reads the file and never mounts it (INV-2), exactly
+    /// as the non-macOS platform default does.
+    pub fn to_file(resolver: AuthPathResolver, path: impl Into<PathBuf>) -> Self {
+        Self {
+            resolver,
+            explicit: Some(HostCredentialSource::HostFile { path: path.into() }),
+        }
+    }
+
+    /// The home directory this binding resolves agent paths against.
+    pub fn resolver(&self) -> &AuthPathResolver {
+        &self.resolver
+    }
+
+    /// The source `spec` should read from under this binding.
+    pub fn source_for(&self, spec: &RefreshableCredentialSpec) -> HostCredentialSource {
+        match &self.explicit {
+            Some(source) => source.clone(),
+            None => (spec.source)(&self.resolver),
+        }
+    }
+}
+
 /// How to cause the HOST to rotate its own credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostRefreshAction {
