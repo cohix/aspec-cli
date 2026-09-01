@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::engine::auth::RefreshableCredentialDelivery;
+
 /// A reference to a container image (e.g. `awman-myproj-claude:latest`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageRef(pub String);
@@ -162,6 +164,9 @@ pub enum ContainerOption {
     AgentCredentials {
         env_vars: Vec<(String, String)>,
     },
+    /// A refreshable credential already planted in a staged settings overlay.
+    /// It carries paths and an opaque fingerprint only — never secret bytes.
+    RefreshableCredential(RefreshableCredentialDelivery),
     DisallowedTools(Vec<String>),
     AllowedTools(Vec<String>),
     Model {
@@ -302,6 +307,98 @@ pub(crate) fn dedup_credentials_by_declared_env(
     });
 }
 
+/// Apply the same declared-env service coverage rule to staged credential
+/// files as to env-delivered credentials. A file that loses dedup is removed
+/// before the overlay can be mounted, so an explicit API-key configuration
+/// never also exposes an OAuth credential file.
+pub(crate) fn dedup_refreshable_by_declared_env(
+    refreshable: &mut Vec<RefreshableCredentialDelivery>,
+    env_passthrough: &[EnvVar],
+    env_literal: &[EnvLiteral],
+    lookup_env: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), ResolveError> {
+    let covered_services = covered_credential_services(env_passthrough, env_literal, lookup_env);
+    if covered_services.is_empty() {
+        return Ok(());
+    }
+
+    let mut kept: Vec<RefreshableCredentialDelivery> = Vec::with_capacity(refreshable.len());
+    for credential in std::mem::take(refreshable) {
+        let service = crate::engine::auth::service_for_credential(credential.credential_env_key);
+        let covered = service
+            .map(|s| covered_services.contains(&s))
+            .unwrap_or(false);
+        if !covered {
+            kept.push(credential);
+            continue;
+        }
+        // A declared env var covers this service, so the staged OAuth file must
+        // not be mounted. Suppression is FAIL CLOSED (MEDIUM-8): if the file
+        // cannot be unlinked, neutralize it in place (overwrite with an empty
+        // 0600 payload) so the mount carries no secret; only if BOTH fail do we
+        // abort the launch rather than silently mount the OAuth credential
+        // alongside the user's chosen API key.
+        neutralize_suppressed_credential(&credential.staged_path).map_err(|error| {
+            ResolveError::CredentialSuppression(format!(
+                "could not suppress staged OAuth credential {} that is superseded by a declared \
+                 env var (service {:?}): {error}",
+                credential.staged_path.display(),
+                service
+            ))
+        })?;
+        tracing::warn!(
+            credential_env_key = credential.credential_env_key,
+            ?service,
+            "dropping staged refreshable credential because a declared env var covers the same service"
+        );
+    }
+    *refreshable = kept;
+    Ok(())
+}
+
+/// Ensure a suppressed staged credential file carries no secret in the mount.
+/// Prefers unlink; on failure overwrites the file with an empty 0600 JSON
+/// object. Returns the last error only when neither could be done.
+fn neutralize_suppressed_credential(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(unlink_error) => {
+            // Fall back to overwriting the contents in place: unlink needs write
+            // permission on the parent directory, but truncating the file itself
+            // only needs write permission on the file.
+            #[cfg(unix)]
+            let overwrite = {
+                use std::io::Write as _;
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(path)
+                    .and_then(|mut f| f.write_all(b"{}"))
+            };
+            #[cfg(not(unix))]
+            let overwrite = std::fs::write(path, b"{}");
+            overwrite.map_err(|_| unlink_error)
+        }
+    }
+}
+
+fn covered_credential_services(
+    env_passthrough: &[EnvVar],
+    env_literal: &[EnvLiteral],
+    lookup_env: &dyn Fn(&str) -> Option<String>,
+) -> Vec<&'static str> {
+    env_passthrough
+        .iter()
+        .filter(|v| lookup_env(v.0.as_str()).is_some_and(|val| !val.is_empty()))
+        .map(|v| v.0.as_str())
+        .chain(env_literal.iter().map(|l| l.key.as_str()))
+        .filter_map(crate::engine::auth::service_for_credential)
+        .collect()
+}
+
 /// Resolved option bag — all options merged into a single struct that the
 /// backend consumes. Conflicting options are detected here.
 #[derive(Debug, Clone, Default)]
@@ -332,6 +429,8 @@ pub struct ResolvedContainerOptions {
     pub memory: Option<MemoryLimit>,
     pub agent_settings: Option<AgentSettings>,
     pub agent_credentials: Vec<(String, String)>,
+    /// File-delivered credentials that the refresh monitor will later lease.
+    pub refreshable_credentials: Vec<RefreshableCredentialDelivery>,
     pub disallowed_tools: Vec<String>,
     pub allowed_tools: Vec<String>,
     pub model: Option<ModelFlagForm>,
@@ -374,6 +473,12 @@ impl ResolvedContainerOptions {
             &r.env_literal,
             &|name| std::env::var(name).ok(),
         );
+        dedup_refreshable_by_declared_env(
+            &mut r.refreshable_credentials,
+            &r.env_passthrough,
+            &r.env_literal,
+            &|name| std::env::var(name).ok(),
+        )?;
         r.validate()?;
         Ok(r)
     }
@@ -400,6 +505,9 @@ impl ResolvedContainerOptions {
             ContainerOption::AgentSettingsPassthrough(v) => self.agent_settings = Some(v),
             ContainerOption::AgentCredentials { env_vars } => {
                 self.agent_credentials.extend(env_vars);
+            }
+            ContainerOption::RefreshableCredential(credential) => {
+                self.refreshable_credentials.push(credential);
             }
             ContainerOption::DisallowedTools(v) => self.disallowed_tools.extend(v),
             ContainerOption::AllowedTools(v) => self.allowed_tools.extend(v),
@@ -454,12 +562,17 @@ impl ResolvedContainerOptions {
 pub enum ResolveError {
     #[error("conflicting container options: {0}")]
     Conflict(String),
+    #[error("could not suppress a superseded credential: {0}")]
+    CredentialSuppression(String),
 }
 
 impl From<ResolveError> for crate::engine::error::EngineError {
     fn from(e: ResolveError) -> Self {
         match e {
             ResolveError::Conflict(msg) => {
+                crate::engine::error::EngineError::ConflictingOptions(msg)
+            }
+            ResolveError::CredentialSuppression(msg) => {
                 crate::engine::error::EngineError::ConflictingOptions(msg)
             }
         }
@@ -755,6 +868,86 @@ mod tests {
             creds.iter().any(|(k, _)| k == "OPENAI_API_KEY"),
             "openai credential must be retained (covers service 'openai', not declared); \
              got: {creds:?}"
+        );
+    }
+
+    // ─── WI-0107: refreshable (file) dedup — INV-9 + MEDIUM-8 fail-closed ─────
+
+    fn refreshable_delivery(staged_root: &std::path::Path) -> RefreshableCredentialDelivery {
+        let staged_path = staged_root.join(".credentials.json");
+        std::fs::write(&staged_path, br#"{"claudeAiOauth":{"accessToken":"sk-oat"}}"#).unwrap();
+        RefreshableCredentialDelivery {
+            agent: crate::data::session::AgentName::new("claude").unwrap(),
+            spec_agent: "claude",
+            credential_env_key: "CLAUDE_CODE_OAUTH_TOKEN",
+            staged_path,
+            staged_root: staged_root.to_path_buf(),
+            initial_fingerprint:
+                crate::engine::auth::credential::CredentialFingerprint::zeroed(),
+        }
+    }
+
+    /// INV-9: a declared + host-resolvable `ANTHROPIC_API_KEY` drops the
+    /// refreshable delivery AND removes the staged file from disk.
+    #[test]
+    fn dedup_refreshable_drops_delivery_and_removes_file_when_covered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut refreshable = vec![refreshable_delivery(tmp.path())];
+        let staged_path = refreshable[0].staged_path.clone();
+        let pt = vec![EnvVar("ANTHROPIC_API_KEY".into())];
+        let lookup = |name: &str| -> Option<String> {
+            (name == "ANTHROPIC_API_KEY").then(|| "sk-ant".into())
+        };
+        dedup_refreshable_by_declared_env(&mut refreshable, &pt, &[], &lookup).unwrap();
+        assert!(refreshable.is_empty(), "covered delivery must be dropped");
+        assert!(
+            !staged_path.exists(),
+            "staged OAuth file must be removed from disk so it is never mounted"
+        );
+    }
+
+    /// INV-9 counter-case: a declared-but-unset passthrough drops nothing and
+    /// leaves the staged file in place.
+    #[test]
+    fn dedup_refreshable_retains_delivery_when_declared_but_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut refreshable = vec![refreshable_delivery(tmp.path())];
+        let staged_path = refreshable[0].staged_path.clone();
+        let pt = vec![EnvVar("ANTHROPIC_API_KEY".into())];
+        let lookup = |_: &str| -> Option<String> { None };
+        dedup_refreshable_by_declared_env(&mut refreshable, &pt, &[], &lookup).unwrap();
+        assert_eq!(refreshable.len(), 1, "unset passthrough must not dedup");
+        assert!(staged_path.exists(), "staged file must remain");
+    }
+
+    /// MEDIUM-8: suppression is fail-closed. Even when the staged file cannot be
+    /// unlinked (parent dir read-only), it is neutralized in place so the mount
+    /// carries no secret; the delivery is still dropped and resolve succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn dedup_refreshable_neutralizes_file_when_unlink_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let mut refreshable = vec![refreshable_delivery(&locked)];
+        let staged_path = refreshable[0].staged_path.clone();
+        // Make the parent directory non-writable so unlink fails, but the file
+        // itself is still writable (so overwrite-in-place succeeds).
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let pt = vec![EnvVar("ANTHROPIC_API_KEY".into())];
+        let lookup = |name: &str| -> Option<String> {
+            (name == "ANTHROPIC_API_KEY").then(|| "sk-ant".into())
+        };
+        let result = dedup_refreshable_by_declared_env(&mut refreshable, &pt, &[], &lookup);
+        // Restore perms so the TempDir can be cleaned up.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_ok(), "in-place neutralization must succeed: {result:?}");
+        assert!(refreshable.is_empty(), "covered delivery must be dropped");
+        let contents = std::fs::read_to_string(&staged_path).unwrap();
+        assert!(
+            !contents.contains("sk-oat"),
+            "neutralized file must carry no secret; got {contents:?}"
         );
     }
 }

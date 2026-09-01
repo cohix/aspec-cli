@@ -6,8 +6,13 @@
 //! All tests here run under `make test-fast` because they don't need Docker.
 //! Tests that need a real server or real git include those keywords.
 
+mod awman_binary;
 #[path = "../helpers/mod.rs"]
 mod helpers;
+
+pub(crate) fn awman_bin() -> std::path::PathBuf {
+    awman_binary::awman_bin()
+}
 
 mod antigravity_0083;
 mod clean_command;

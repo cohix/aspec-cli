@@ -9,7 +9,7 @@
 //! The engine is the single source of truth for ALL workflow state.
 //! No workflow execution state lives in the frontend — zero, none.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -207,6 +207,10 @@ pub struct WorkflowEngine {
     yolo: bool,
     abort_on_failure_triggered: bool,
     last_exit_info: Option<AgentExitInfo>,
+    /// Automatic credential refresh/retry is permitted once per workflow step.
+    /// Kept independently of an individual container slot so a relaunch cannot
+    /// reset the guard.
+    auth_retries_used: HashSet<String>,
     engine_rx: Option<tokio::sync::mpsc::UnboundedReceiver<EngineRequest>>,
 }
 
@@ -362,6 +366,7 @@ impl WorkflowEngine {
             yolo: false,
             abort_on_failure_triggered: false,
             last_exit_info: None,
+            auth_retries_used: HashSet::new(),
             engine_rx: Some(rx),
         })
     }
@@ -541,6 +546,7 @@ impl WorkflowEngine {
             yolo: false,
             abort_on_failure_triggered: false,
             last_exit_info: None,
+            auth_retries_used: HashSet::new(),
             engine_rx: Some(rx),
         })
     }
@@ -631,6 +637,13 @@ impl WorkflowEngine {
         if let WorkflowStepStatus::Failed { exit_code } = outcome.status {
             let progress = self.workflow_progress_info();
             self.frontend.report_workflow_progress(&progress);
+
+            if self.recover_auth_failure(&outcome.step_name)? {
+                self.state
+                    .set_status(&outcome.step_name, StepState::Pending);
+                self.persist()?;
+                return Ok(IterationOutcome::Continue);
+            }
 
             let step = self.find_step(&outcome.step_name)?;
 
@@ -810,11 +823,14 @@ impl WorkflowEngine {
                     // Persist the buffered output on a genuine failure before the
                     // slot (which owns the tail + container name) is removed.
                     self.maybe_dump_step_failure(&name, exit.exit_code);
+                    let auth_recovered = exit.exit_code != 0 && self.recover_auth_failure(&name)?;
                     self.remove_active_step(&name);
                     self.last_exit_info = Some(exit.clone());
 
                     let (status, step_state) = if exit.exit_code == 0 {
                         (WorkflowStepStatus::Succeeded, StepState::Succeeded)
+                    } else if auth_recovered {
+                        (WorkflowStepStatus::Running, StepState::Pending)
                     } else {
                         (
                             WorkflowStepStatus::Failed { exit_code: exit.exit_code },
@@ -829,7 +845,17 @@ impl WorkflowEngine {
                     let progress = self.workflow_progress_info();
                     self.frontend.report_workflow_progress(&progress);
 
-                    if let WorkflowStepStatus::Failed { exit_code } = status {
+                    if auth_recovered {
+                        // Put the same step back at the head of this parallel
+                        // batch. `auth_retries_used` ensures this automatic
+                        // relaunch can happen only once.
+                        queue.push_front(step);
+                        if self.active_steps.len() < slot_cap {
+                            if let Some(next) = queue.pop_front() {
+                                self.launch_parallel_step(next, &mut waits, &stuck_tx, true)?;
+                            }
+                        }
+                    } else if let WorkflowStepStatus::Failed { exit_code } = status {
                         if step.abort_on_failure {
                             self.msg_warning(format!(
                                 "Step '{}' failed (abort_on_failure); aborting parallel group",
@@ -989,6 +1015,45 @@ impl WorkflowEngine {
 
     fn remove_active_step(&mut self, name: &str) {
         self.active_steps.retain(|s| s.step_name != name);
+    }
+
+    /// Delegate auth-failure recognition and refresh to the command-layer
+    /// factory. Generic workflow code never knows an agent's signatures.
+    ///
+    /// The guard is recorded before the recovery attempt: even if the host
+    /// refresh cannot advance, a matching failed step may be relaunched at most
+    /// once during this workflow invocation.
+    fn recover_auth_failure(&mut self, step_name: &str) -> Result<bool, EngineError> {
+        if self.auth_retries_used.contains(step_name) {
+            return Ok(false);
+        }
+        let Some((agent, output_tail)) = self
+            .active_steps
+            .iter()
+            .find(|s| s.step_name == step_name)
+            .map(|s| {
+                (
+                    s.agent.clone(),
+                    s.output_tail
+                        .as_ref()
+                        .map(|tail| tail.snapshot_text())
+                        .unwrap_or_default(),
+                )
+            })
+        else {
+            return Ok(false);
+        };
+        if !self
+            .agent_factory
+            .recover_auth_failure(&agent, &output_tail)?
+        {
+            return Ok(false);
+        }
+        self.auth_retries_used.insert(step_name.to_string());
+        self.msg_warning(format!(
+            "Step '{step_name}' failed authentication; refreshed credentials and retrying once"
+        ));
+        Ok(true)
     }
 
     /// Handle a per-step stuck/unstuck transition inside a parallel group.

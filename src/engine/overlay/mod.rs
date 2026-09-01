@@ -12,6 +12,7 @@ use crate::data::fs::auth_paths::AuthPathResolver;
 use crate::data::fs::overlay_paths::OverlayPathResolver;
 use crate::data::fs::skill_library::read_library_meta;
 use crate::data::session::{AgentName, Session};
+use crate::engine::auth::credential::{CredentialFile, CredentialFingerprint};
 use crate::engine::container::options::{OverlayPermission, OverlaySpec};
 use crate::engine::error::EngineError;
 
@@ -29,7 +30,47 @@ pub const CLAUDE_DENYLIST: &[&str] = &[
     "ide",
     "shell-snapshots",
     "paste-cache",
+    // The host copy contains the refresh token.  Containers receive only the
+    // awman-authored, refresh-token-free replacement planted below. The
+    // case-insensitive, every-depth guard in `is_denied_credential_name` is the
+    // real enforcement (INV-2); this entry keeps the exact top-level name in the
+    // single-source list.
+    ".credentials.json",
 ];
+
+/// Credential filenames that must NEVER be copied into a staged Claude settings
+/// overlay at ANY recursion depth, matched case-insensitively so
+/// `.Credentials.json` (or any other case variant) cannot smuggle a copy of the
+/// host refresh token into the read-write `~/.claude` bind mount (INV-2).
+const CLAUDE_CREDENTIAL_DENYLIST: &[&str] = &[".credentials.json"];
+
+/// True when `name` is a host-credential filename we must never mount. Compared
+/// with `eq_ignore_ascii_case`, so case variants are rejected too.
+fn is_denied_credential_name(name: &str) -> bool {
+    CLAUDE_CREDENTIAL_DENYLIST
+        .iter()
+        .any(|denied| name.eq_ignore_ascii_case(denied))
+}
+
+/// Opaque filesystem identity used to reject a hard link or alias that points
+/// at the very same inode as the host `.credentials.json`, regardless of the
+/// name it wears. On unix this is `(dev, ino)`; elsewhere the canonical path.
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(unix))]
+type FileIdentity = PathBuf;
+
+#[cfg(unix)]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    // `metadata` follows symlinks intentionally: an alias pointing at the host
+    // credential resolves to the same (dev, ino) as the credential itself.
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+#[cfg(not(unix))]
+fn file_identity(path: &Path) -> Option<FileIdentity> {
+    std::fs::canonicalize(path).ok()
+}
 
 /// Scope for a context overlay — lives here in Layer 1 so both the engine
 /// (Layer 1) and command (Layer 2) layers can reference it without an
@@ -69,6 +110,11 @@ pub struct OverlayRequest {
     pub container_home: Option<String>,
     /// Context-directory overlays (global/repo/workflow).
     pub context_overlays: Vec<ContextOverlay>,
+    /// Plant refreshable credential files into the staged agent-settings
+    /// overlay. This is enabled only for file-delivered container credentials;
+    /// passthrough/none auth modes must never cause host credentials to be
+    /// copied into a mount.
+    pub materialize_credentials: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,12 +140,30 @@ pub type AgentSecretFilesProvider = std::sync::Arc<
     dyn Fn(&AgentName) -> Vec<crate::engine::auth::keychain::AgentSecretFile> + Send + Sync,
 >;
 
+/// Test-injectable source of refreshable credential files. The production
+/// implementation reads the descriptor's host source and materializes its
+/// refresh-token-free container file; tests can replace it without touching a
+/// developer's keychain or host credential file.
+pub type AgentCredentialFileProvider =
+    std::sync::Arc<dyn Fn(&AgentName) -> Option<CredentialFile> + Send + Sync>;
+
+/// A credential file planted in one retained staged settings directory.
+/// Contains no secret material: only the path and a non-reversible fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedCredentialFile {
+    pub agent: AgentName,
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub fingerprint: CredentialFingerprint,
+}
+
 pub struct OverlayEngine {
     auth_resolver: AuthPathResolver,
     /// Source of file-form host-keychain artifacts to plant into agent
     /// settings overlays (e.g. `~/.gemini/antigravity-cli/...`). Injectable
     /// for testability; defaults to the real host-keychain reader.
     secret_files_provider: AgentSecretFilesProvider,
+    credential_provider: AgentCredentialFileProvider,
     /// Sanitized temp directories that back agent-settings overlays. Held
     /// here so the directories live as long as this engine instance and are
     /// removed on `Drop` (RAII via `tempfile::TempDir`). This prevents the
@@ -120,17 +184,21 @@ impl std::fmt::Debug for OverlayEngine {
 impl OverlayEngine {
     pub fn new(_session: &Session) -> Result<Self, EngineError> {
         let auth_resolver = AuthPathResolver::from_process_env().map_err(EngineError::Data)?;
+        let credential_provider = default_credential_provider(auth_resolver.clone());
         Ok(Self {
             auth_resolver,
             secret_files_provider: default_secret_files_provider(),
+            credential_provider,
             sanitized: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     pub fn with_auth_resolver(auth_resolver: AuthPathResolver) -> Self {
+        let credential_provider = default_credential_provider(auth_resolver.clone());
         Self {
             auth_resolver,
             secret_files_provider: default_secret_files_provider(),
+            credential_provider,
             sanitized: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -140,6 +208,13 @@ impl OverlayEngine {
     /// reads a developer's real credentials.
     pub fn with_secret_files_provider(mut self, provider: AgentSecretFilesProvider) -> Self {
         self.secret_files_provider = provider;
+        self
+    }
+
+    /// Replace the refreshable-credential source. Tests use this to avoid any
+    /// host credential read while exercising staging behaviour.
+    pub fn with_credential_provider(mut self, provider: AgentCredentialFileProvider) -> Self {
+        self.credential_provider = provider;
         self
     }
 
@@ -160,7 +235,20 @@ impl OverlayEngine {
         session: &Session,
         request: &OverlayRequest,
     ) -> Result<Vec<OverlaySpec>, EngineError> {
+        self.build_overlays_with_credentials(session, request)
+            .map(|(overlays, _)| overlays)
+    }
+
+    /// Build overlays and report the refreshable credential files planted in
+    /// staged settings directories. `build_overlays` remains the compatible
+    /// convenience wrapper for callers that do not need the file metadata.
+    pub fn build_overlays_with_credentials(
+        &self,
+        session: &Session,
+        request: &OverlayRequest,
+    ) -> Result<(Vec<OverlaySpec>, Vec<StagedCredentialFile>), EngineError> {
         let mut by_key: HashMap<String, OverlaySpec> = HashMap::new();
+        let mut staged_credentials = Vec::new();
 
         // 1. User-supplied directory overlays.
         for spec in &request.directories {
@@ -178,12 +266,15 @@ impl OverlayEngine {
         //    and the request's container_home so settings paths agree with
         //    user-supplied overlays.
         if let Some(agent) = &request.agent {
-            for spec in self.agent_settings_overlays_with(
+            let (agent_overlays, staged) = self.agent_settings_overlays_with_credentials(
                 agent,
                 request.yolo,
                 session.git_root(),
                 request.container_home.as_deref(),
-            )? {
+                request.materialize_credentials,
+            )?;
+            staged_credentials.extend(staged);
+            for spec in agent_overlays {
                 let key = OverlayPathResolver::conflict_key(&spec.host_path);
                 insert_or_merge(&mut by_key, key, spec);
             }
@@ -218,7 +309,7 @@ impl OverlayEngine {
 
         let mut out: Vec<OverlaySpec> = by_key.into_values().collect();
         out.sort_by(|a, b| a.host_path.cmp(&b.host_path));
-        Ok(out)
+        Ok((out, staged_credentials))
     }
 
     /// Resolve a single user-supplied overlay spec into its canonical form.
@@ -288,9 +379,28 @@ impl OverlayEngine {
         git_root: &Path,
         container_home_override: Option<&str>,
     ) -> Result<Vec<OverlaySpec>, EngineError> {
+        self.agent_settings_overlays_with_credentials(
+            agent,
+            yolo,
+            git_root,
+            container_home_override,
+            false,
+        )
+        .map(|(overlays, _)| overlays)
+    }
+
+    fn agent_settings_overlays_with_credentials(
+        &self,
+        agent: &AgentName,
+        yolo: bool,
+        git_root: &Path,
+        container_home_override: Option<&str>,
+        materialize_credentials: bool,
+    ) -> Result<(Vec<OverlaySpec>, Vec<StagedCredentialFile>), EngineError> {
         let home = self.auth_resolver.home();
         let paths = self.auth_resolver.resolve(agent.as_str());
         let mut out = Vec::new();
+        let mut staged_credentials = Vec::new();
         let container_home = container_home_override
             .map(|s| s.to_string())
             .or_else(|| detect_container_home(home, agent.as_str(), git_root))
@@ -346,25 +456,41 @@ impl OverlayEngine {
                     .unwrap_or(false);
                 if has_settings_dir {
                     let dir = paths.settings_dir.as_ref().unwrap();
-                    let host_path = match sanitize_claude_settings_dir(dir, yolo) {
-                        Ok((tmp, path)) => {
-                            let _retained = self.retain_tempdir(tmp);
-                            path
-                        }
-                        Err(_) => dir.clone(),
-                    };
-                    out.push(OverlaySpec {
-                        host_path,
-                        container_path: PathBuf::from(format!("{container_home}/.claude")),
-                        permission: OverlayPermission::ReadWrite,
+                    let staged = sanitize_claude_settings_dir(dir, yolo).or_else(|error| {
+                        tracing::warn!(
+                            path = %dir.display(),
+                            %error,
+                            "could not sanitize Claude settings; using an empty safe overlay"
+                        );
+                        synthesize_minimal_claude_settings_dir(yolo)
                     });
+                    if let Ok((tmp, path)) = staged {
+                        self.plant_credential_file(
+                            agent,
+                            &path,
+                            materialize_credentials,
+                            &mut staged_credentials,
+                        )?;
+                        let host_path = self.retain_tempdir(tmp);
+                        out.push(OverlaySpec {
+                            host_path,
+                            container_path: PathBuf::from(format!("{container_home}/.claude")),
+                            permission: OverlayPermission::ReadWrite,
+                        });
+                    }
                 } else {
                     // First-time user: no ~/.claude/ on host. Synthesize a
                     // minimal settings dir with LSP suppression.
                     if let Ok((tmp, path)) = synthesize_minimal_claude_settings_dir(yolo) {
-                        let _retained = self.retain_tempdir(tmp);
+                        self.plant_credential_file(
+                            agent,
+                            &path,
+                            materialize_credentials,
+                            &mut staged_credentials,
+                        )?;
+                        let host_path = self.retain_tempdir(tmp);
                         out.push(OverlaySpec {
-                            host_path: path,
+                            host_path,
                             container_path: PathBuf::from(format!("{container_home}/.claude")),
                             permission: OverlayPermission::ReadWrite,
                         });
@@ -472,7 +598,35 @@ impl OverlayEngine {
             _ => {}
         }
 
-        Ok(out)
+        Ok((out, staged_credentials))
+    }
+
+    fn plant_credential_file(
+        &self,
+        agent: &AgentName,
+        staged_root: &Path,
+        materialize_credentials: bool,
+        staged: &mut Vec<StagedCredentialFile>,
+    ) -> Result<(), EngineError> {
+        if !materialize_credentials {
+            return Ok(());
+        }
+        let Some(file) = (self.credential_provider)(agent) else {
+            return Ok(());
+        };
+        write_credential_file_atomic(staged_root, &file)
+            .map_err(|error| EngineError::io(staged_root, error))?;
+        // The descriptor's materialized Claude JSON has the same deliberately
+        // refresh-token-free shape as the source parser accepts. Parse only the
+        // access token/expiry fields to create the monitor's opaque identity.
+        let fingerprint = credential_fingerprint_for_file(&file)?;
+        staged.push(StagedCredentialFile {
+            agent: agent.clone(),
+            path: staged_root.join(&file.relative_path),
+            root: staged_root.to_path_buf(),
+            fingerprint,
+        });
+        Ok(())
     }
 
     /// Build overlay specs for the global skills directory, mapping it to the
@@ -668,21 +822,40 @@ fn sanitize_claude_settings_dir(
         .prefix("awman-claude-dir-")
         .tempdir()?;
     let tmp_root = tmp.path().to_path_buf();
-    // Mirror only the entries that are not on the denylist.
+    // Mirror only the entries that are not on the denylist. The credential
+    // guard is applied fail-closed: the top-level noise denylist is exact, but
+    // the credential name is matched case-insensitively, symlinks and other
+    // non-regular entries are never copied, and any file sharing the host
+    // credential's inode identity is skipped at every depth (INV-2, BLOCKING-1).
     let denylist: std::collections::HashSet<&str> = CLAUDE_DENYLIST.iter().copied().collect();
+    let host_credential = file_identity(&src.join(".credentials.json"));
     if let Ok(entries) = std::fs::read_dir(src) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if denylist.contains(name_str.as_ref()) {
+            if denylist.contains(name_str.as_ref()) || is_denied_credential_name(&name_str) {
+                continue;
+            }
+            let src_path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&src_path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                // A symlink in ~/.claude being mounted RW would let the copy
+                // follow an alias to the host credential (or any host path).
                 continue;
             }
             let dest = tmp_root.join(&name);
-            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                copy_dir_all(&entry.path(), &dest)?;
-            } else {
-                std::fs::copy(entry.path(), dest)?;
+            if meta.is_dir() {
+                copy_claude_tree_secure(&src_path, &dest, &host_credential)?;
+            } else if meta.is_file() {
+                if file_identity(&src_path).is_some() && file_identity(&src_path) == host_credential
+                {
+                    continue;
+                }
+                std::fs::copy(&src_path, dest)?;
             }
+            // Any other file type (fifo, socket, device) is never mounted.
         }
     }
     // Inject (or update) settings.json to suppress LSP banner and optionally
@@ -844,12 +1017,108 @@ fn write_secret_file(
     Ok(())
 }
 
+/// Atomically replace a credential file in a staged settings directory.
+///
+/// The temporary file is deliberately created in `staged_root`: same-directory
+/// `rename` is atomic and is visible through both Docker and Apple Containers'
+/// existing RW bind mount. A missing staged root is a normal monitor race and
+/// is reported as `Ok(false)`, never as a partial write to a recycled path.
+pub fn write_credential_file_atomic(
+    staged_root: &Path,
+    file: &CredentialFile,
+) -> std::io::Result<bool> {
+    if !staged_root.is_dir() {
+        return Ok(false);
+    }
+    if file.relative_path.is_absolute()
+        || file
+            .relative_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "credential path must be relative to staged root",
+        ));
+    }
+    let target = staged_root.join(&file.relative_path);
+    let Some(parent) = target.parent() else {
+        return Ok(false);
+    };
+    if !parent.is_dir() {
+        return Ok(false);
+    }
+
+    use std::io::Write as _;
+    let mut temp = tempfile::NamedTempFile::new_in(staged_root)?;
+    temp.write_all(&file.contents)?;
+    temp.flush()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(file.mode))?;
+    }
+    // `persist` is a same-filesystem rename. It replaces an existing target
+    // without ever truncating that target in place.
+    temp.persist(&target)
+        .map_err(|error| error.error)
+        .map(|_| true)
+}
+
+/// Derive the initial monitor fingerprint from the descriptor's materialized
+/// Claude file without ever accepting a refresh-token field. This mirrors the
+/// credential-model parser's allow-list shape.
+fn credential_fingerprint_for_file(
+    file: &CredentialFile,
+) -> Result<CredentialFingerprint, EngineError> {
+    #[derive(serde::Deserialize)]
+    struct MaterializedClaudeCredential {
+        #[serde(rename = "claudeAiOauth")]
+        oauth: MaterializedClaudeOauth,
+    }
+    #[derive(serde::Deserialize)]
+    struct MaterializedClaudeOauth {
+        #[serde(rename = "accessToken")]
+        access_token: String,
+        #[serde(rename = "expiresAt", default)]
+        expires_at: Option<u64>,
+    }
+
+    let parsed: MaterializedClaudeCredential =
+        serde_json::from_slice(&file.contents).map_err(|_| {
+            EngineError::Other(
+                "refreshable credential materialization was not valid Claude JSON".into(),
+            )
+        })?;
+    let expires_at = parsed
+        .oauth
+        .expires_at
+        .map(|milliseconds| std::time::UNIX_EPOCH + std::time::Duration::from_millis(milliseconds));
+    Ok(CredentialFingerprint::of(
+        &crate::engine::auth::credential::CredentialSnapshot {
+            secret: crate::engine::auth::credential::SecretString::new(parsed.oauth.access_token),
+            expires_at,
+            extra: Default::default(),
+        },
+    ))
+}
+
 /// Production binding for `AgentSecretFilesProvider`: reads file-form
 /// keychain artifacts from the host OS keychain via
 /// `engine::auth::keychain::agent_keychain_files`.
 fn default_secret_files_provider() -> AgentSecretFilesProvider {
     std::sync::Arc::new(|agent: &AgentName| {
         crate::engine::auth::keychain::agent_keychain_files(agent)
+    })
+}
+
+fn default_credential_provider(auth_resolver: AuthPathResolver) -> AgentCredentialFileProvider {
+    std::sync::Arc::new(move |agent: &AgentName| {
+        let spec = crate::engine::auth::keychain::refreshable_spec_for(agent)?;
+        let source = (spec.source)(&auth_resolver);
+        let snapshot = (spec.read)(&source).ok()?;
+        Some((spec.materialize)(&snapshot))
     })
 }
 
@@ -863,6 +1132,48 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
             } else {
                 std::fs::copy(entry.path(), target)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Recursively copy a subtree of the host `~/.claude` into a staged overlay
+/// while applying the credential guard at EVERY depth (INV-2, BLOCKING-1):
+/// files whose name matches the credential denylist (case-insensitively),
+/// symlinks and other non-regular entries, and any file sharing the host
+/// credential's inode identity are all skipped. Unlike `copy_dir_all` this
+/// never follows a symlink and never copies a nested `.credentials.json`.
+fn copy_claude_tree_secure(
+    src: &Path,
+    dst: &Path,
+    host_credential: &Option<FileIdentity>,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    if let Ok(entries) = std::fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if is_denied_credential_name(&name_str) {
+                continue;
+            }
+            let src_path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&src_path) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            let target = dst.join(&name);
+            if meta.is_dir() {
+                copy_claude_tree_secure(&src_path, &target, host_credential)?;
+            } else if meta.is_file() {
+                let identity = file_identity(&src_path);
+                if identity.is_some() && identity == *host_credential {
+                    continue;
+                }
+                std::fs::copy(&src_path, &target)?;
+            }
+            // Any other file type is never mounted.
         }
     }
     Ok(())
@@ -1561,6 +1872,7 @@ mod tests {
             yolo: false,
             container_home: None,
             context_overlays: vec![],
+            materialize_credentials: false,
         };
         let overlays = engine.build_overlays(&session, &request).unwrap();
         // The two entries sharing the same canonicalized host path must collapse.
@@ -2341,6 +2653,7 @@ mod tests {
             yolo: false,
             container_home: None,
             context_overlays: vec![],
+            materialize_credentials: false,
         };
 
         let overlays = engine.build_overlays(&session, &request).unwrap();
@@ -2524,6 +2837,301 @@ mod tests {
             crate::engine::container::options::OverlayPermission::ReadOnly,
             "ReadOnly must win over ReadWrite (most-restrictive); got {:?}",
             matching[0].permission
+        );
+    }
+
+    // ─── WI-0107: refresh-token denylist + credential-file staging ───────────
+
+    /// Build an engine with an explicit stub for the refreshable-credential
+    /// source. `None` means "no credential to plant" — the default for tests
+    /// that don't exercise materialization. Never touches a developer's real
+    /// host credential file or keychain.
+    fn make_engine_with_credential(home: &Path, file: Option<CredentialFile>) -> OverlayEngine {
+        OverlayEngine::with_auth_resolver(AuthPathResolver::at_home(home))
+            .with_secret_files_provider(std::sync::Arc::new(|_| Vec::new()))
+            .with_credential_provider(std::sync::Arc::new(move |_| file.clone()))
+    }
+
+    /// INV-2 checkable: a host `.credentials.json` (always present on Linux,
+    /// and on macOS whenever a keychain write failed) must never be copied
+    /// into the staged overlay, even though the source dir is otherwise
+    /// mirrored verbatim.
+    #[test]
+    fn sanitize_claude_settings_dir_denylists_host_credentials_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-HOST","refreshToken":"SENTINEL-REFRESH-MUST-NOT-LEAK"}}"#,
+        )
+        .unwrap();
+        std::fs::write(claude_dir.join("allowed.json"), r#"{"foo":"bar"}"#).unwrap();
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let overlays = engine.agent_settings_overlays(&agent, tmp.path()).unwrap();
+        let dir_overlay = overlays
+            .iter()
+            .find(|o| o.container_path.to_string_lossy().ends_with("/.claude"))
+            .expect("must have .claude dir overlay");
+
+        let staged_credentials_file = dir_overlay.host_path.join(".credentials.json");
+        assert!(
+            !staged_credentials_file.exists(),
+            "host .credentials.json must never be copied into the staged overlay"
+        );
+        assert!(
+            dir_overlay.host_path.join("allowed.json").exists(),
+            "non-denylisted files must still be mirrored"
+        );
+    }
+
+    /// BLOCKING-1 (INV-2): the denylist must not be bypassable by a symlink
+    /// alias, a case variant, a nested copy, or a hard link to the host
+    /// `.credentials.json`. The refresh-token sentinel must appear in NO file of
+    /// the staged tree, at any depth.
+    #[test]
+    fn sanitize_claude_settings_dir_denies_symlink_case_and_nested_credential_variants() {
+        const SENTINEL: &str = "SENTINEL-REFRESH-MUST-NOT-LEAK";
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        let host_credential = claude_dir.join(".credentials.json");
+        std::fs::write(
+            &host_credential,
+            format!(
+                r#"{{"claudeAiOauth":{{"accessToken":"sk-ant-oat-HOST","refreshToken":"{SENTINEL}"}}}}"#
+            ),
+        )
+        .unwrap();
+        // Case variant of the credential filename.
+        std::fs::write(
+            claude_dir.join(".Credentials.json"),
+            format!(r#"{{"refreshToken":"{SENTINEL}"}}"#),
+        )
+        .unwrap();
+        // Nested copy in a non-denylisted subdirectory.
+        let nested = claude_dir.join("safe-subdir");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join(".credentials.json"),
+            format!(r#"{{"refreshToken":"{SENTINEL}"}}"#),
+        )
+        .unwrap();
+        // A benign file that MUST still be mirrored.
+        std::fs::write(claude_dir.join("allowed.json"), r#"{"foo":"bar"}"#).unwrap();
+        #[cfg(unix)]
+        {
+            // Symlink alias pointing straight at the host credential, plus a
+            // hard link under an innocuous name.
+            std::os::unix::fs::symlink(&host_credential, claude_dir.join("innocent-cache.json"))
+                .unwrap();
+            std::fs::hard_link(&host_credential, claude_dir.join("backup.json")).unwrap();
+        }
+
+        let engine = make_engine(tmp.path());
+        let agent = AgentName::new("claude").unwrap();
+        let overlays = engine.agent_settings_overlays(&agent, tmp.path()).unwrap();
+        let dir_overlay = overlays
+            .iter()
+            .find(|o| o.container_path.to_string_lossy().ends_with("/.claude"))
+            .expect("must have .claude dir overlay");
+
+        // Walk the whole staged tree; no file may contain the sentinel.
+        fn assert_no_sentinel(dir: &Path) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                assert!(
+                    !meta.file_type().is_symlink(),
+                    "staged overlay must contain no symlinks; found {}",
+                    path.display()
+                );
+                if meta.is_dir() {
+                    assert_no_sentinel(&path);
+                } else if let Ok(contents) = std::fs::read_to_string(&path) {
+                    assert!(
+                        !contents.contains(SENTINEL),
+                        "refresh-token sentinel leaked into staged file {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert_no_sentinel(&dir_overlay.host_path);
+        assert!(
+            dir_overlay.host_path.join("allowed.json").exists(),
+            "non-credential files must still be mirrored"
+        );
+    }
+
+    /// The awman-authored, refresh-token-free credential file is planted in
+    /// the staged dir when `materialize_credentials` is requested and the
+    /// (stubbed) descriptor has a credential to offer — even though the host
+    /// dir's own `.credentials.json` was denylisted above.
+    #[test]
+    fn materialize_credentials_plants_awman_authored_file_present_and_0600() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        // The host copy still carries a real (sentinel) refresh token; it must
+        // be denylisted while the awman-authored file (below) lands instead.
+        std::fs::write(
+            claude_dir.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-HOST","refreshToken":"SENTINEL-REFRESH-MUST-NOT-LEAK"}}"#,
+        )
+        .unwrap();
+
+        let materialized = CredentialFile {
+            relative_path: PathBuf::from(".credentials.json"),
+            contents: br#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-AWMAN"}}"#.to_vec(),
+            mode: 0o600,
+        };
+        let engine = make_engine_with_credential(tmp.path(), Some(materialized.clone()));
+        let agent = AgentName::new("claude").unwrap();
+        let session = make_session(tmp.path());
+
+        let request = OverlayRequest {
+            agent: Some(agent),
+            materialize_credentials: true,
+            ..Default::default()
+        };
+        let (overlays, staged) = engine
+            .build_overlays_with_credentials(&session, &request)
+            .unwrap();
+        let dir_overlay = overlays
+            .iter()
+            .find(|o| o.container_path.to_string_lossy().ends_with("/.claude"))
+            .expect("must have .claude dir overlay");
+
+        let planted_path = dir_overlay.host_path.join(".credentials.json");
+        let contents = std::fs::read_to_string(&planted_path).expect("planted file must exist");
+        assert!(contents.contains("sk-ant-oat-AWMAN"));
+        assert!(
+            !contents.contains("SENTINEL-REFRESH-MUST-NOT-LEAK"),
+            "the awman-authored file must have replaced the host's, not merged with it"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&planted_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "staged credential file must be mode 0600");
+        }
+
+        assert_eq!(staged.len(), 1, "exactly one credential file was planted");
+        assert_eq!(staged[0].path, planted_path);
+        assert_eq!(staged[0].root, dir_overlay.host_path);
+    }
+
+    /// Without `materialize_credentials`, no credential file is planted even
+    /// though the (stubbed) descriptor has one to offer — the flag is the
+    /// only gate.
+    #[test]
+    fn materialize_credentials_false_plants_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+
+        let materialized = CredentialFile {
+            relative_path: PathBuf::from(".credentials.json"),
+            contents: br#"{"claudeAiOauth":{"accessToken":"sk-ant-oat-AWMAN"}}"#.to_vec(),
+            mode: 0o600,
+        };
+        let engine = make_engine_with_credential(tmp.path(), Some(materialized));
+        let agent = AgentName::new("claude").unwrap();
+        let session = make_session(tmp.path());
+
+        let request = OverlayRequest {
+            agent: Some(agent),
+            materialize_credentials: false,
+            ..Default::default()
+        };
+        let (overlays, staged) = engine
+            .build_overlays_with_credentials(&session, &request)
+            .unwrap();
+        let dir_overlay = overlays
+            .iter()
+            .find(|o| o.container_path.to_string_lossy().ends_with("/.claude"))
+            .expect("must have .claude dir overlay");
+
+        assert!(
+            !dir_overlay.host_path.join(".credentials.json").exists(),
+            "no credential file must be planted when materialize_credentials is false"
+        );
+        assert!(staged.is_empty());
+    }
+
+    // ─── write_credential_file_atomic ─────────────────────────────────────────
+
+    /// INV-7 (path check, the third independent defense): a staged root that
+    /// no longer exists is a skip (`Ok(false)`), never an `Err` — the monitor
+    /// treats this as a normal dropped-lease race.
+    #[test]
+    fn write_credential_file_atomic_missing_staged_root_is_a_skip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_root = tmp.path().join("never-created");
+        let file = CredentialFile {
+            relative_path: PathBuf::from(".credentials.json"),
+            contents: b"irrelevant".to_vec(),
+            mode: 0o600,
+        };
+        let result = write_credential_file_atomic(&missing_root, &file);
+        assert!(
+            matches!(result, Ok(false)),
+            "a missing staged root must be a skip, not an error: {result:?}"
+        );
+    }
+
+    /// INV-3: an injected writer failure must never leave the target
+    /// truncated or partially written — the previous complete content stays
+    /// exactly as it was. Simulated by making the staged directory
+    /// unwritable, so the temp file used for the atomic rename can never even
+    /// be created.
+    #[test]
+    #[cfg(unix)]
+    fn write_credential_file_atomic_failure_leaves_target_byte_identical() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let staged_root = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged_root).unwrap();
+        let target = staged_root.join(".credentials.json");
+        let original = b"ORIGINAL-COMPLETE-CREDENTIAL".to_vec();
+        std::fs::write(&target, &original).unwrap();
+
+        // Revoke write permission on the staged dir so NamedTempFile::new_in
+        // (the writer this call injects) fails before touching the target.
+        let mut perms = std::fs::metadata(&staged_root).unwrap().permissions();
+        perms.set_mode(0o500);
+        std::fs::set_permissions(&staged_root, perms).unwrap();
+
+        let file = CredentialFile {
+            relative_path: PathBuf::from(".credentials.json"),
+            contents: b"NEW-CONTENT-MUST-NOT-LAND".to_vec(),
+            mode: 0o600,
+        };
+        let result = write_credential_file_atomic(&staged_root, &file);
+
+        // Restore permissions so the TempDir can clean itself up.
+        let mut restore = std::fs::metadata(&staged_root).unwrap().permissions();
+        restore.set_mode(0o700);
+        std::fs::set_permissions(&staged_root, restore).unwrap();
+
+        assert!(
+            result.is_err(),
+            "the injected writer failure must surface as Err, not a silent skip"
+        );
+        let remaining = std::fs::read(&target).unwrap();
+        assert_eq!(
+            remaining, original,
+            "target must retain its previous complete content on write failure, \
+             never a truncated or partial file"
         );
     }
 }

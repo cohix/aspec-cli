@@ -12,6 +12,7 @@ use crate::data::image_tags::{agent_image_tag, project_image_tag};
 use crate::data::repo_dockerfile_paths::RepoDockerfilePaths;
 use crate::data::session::{AgentName, Session};
 use crate::engine::agent_runtime::{AgentRuntimeEngine, ResolvedAgentOptions};
+use crate::engine::auth::{AgentCredentials, CredentialDelivery, RefreshableCredentialDelivery};
 use crate::engine::container::options::{
     ContainerOption, EnvLiteral, EnvVar, ImageRef, PlanMode, YoloMode,
 };
@@ -194,6 +195,19 @@ impl AgentEngine {
         session: &Session,
         agent: &AgentName,
         run: &AgentRunOptions,
+    ) -> Result<Vec<ContainerOption>, EngineError> {
+        self.build_options_with_credentials(session, agent, run, &AgentCredentials::default())
+    }
+
+    /// Build container options while carrying a resolved credential delivery.
+    /// The ordinary `build_options` wrapper deliberately remains credential-free
+    /// for existing callers that only prepare a command preview.
+    pub fn build_options_with_credentials(
+        &self,
+        session: &Session,
+        agent: &AgentName,
+        run: &AgentRunOptions,
+        credentials: &AgentCredentials,
     ) -> Result<Vec<ContainerOption>, EngineError> {
         let matrix = agent_matrix::matrix_for(agent.as_str())?;
 
@@ -386,9 +400,38 @@ impl AgentEngine {
             yolo: matches!(run.yolo, Some(YoloMode::Enabled)),
             container_home: container_home.clone(),
             context_overlays: run.context_overlays.clone(),
+            materialize_credentials: false,
         };
-        for spec in self.overlay_engine.build_overlays(session, &request)? {
+        let (overlays, staged_credentials) =
+            if matches!(&credentials.delivery, CredentialDelivery::File(_)) {
+                let mut request = request;
+                request.materialize_credentials = true;
+                self.overlay_engine
+                    .build_overlays_with_credentials(session, &request)?
+            } else {
+                (
+                    self.overlay_engine.build_overlays(session, &request)?,
+                    Vec::new(),
+                )
+            };
+        for spec in overlays {
             options.push(ContainerOption::Overlay(spec));
+        }
+        for staged in staged_credentials {
+            let Some(spec) = crate::engine::auth::keychain::refreshable_spec_for(&staged.agent)
+            else {
+                continue;
+            };
+            options.push(ContainerOption::RefreshableCredential(
+                RefreshableCredentialDelivery {
+                    agent: staged.agent,
+                    spec_agent: spec.agent,
+                    credential_env_key: spec.credential_env_key,
+                    staged_path: staged.path,
+                    staged_root: staged.root,
+                    initial_fingerprint: staged.fingerprint,
+                },
+            ));
         }
 
         // System prompt delivery (context overlays).
@@ -428,22 +471,25 @@ impl AgentEngine {
         session: &Session,
         agent: &AgentName,
         run: &AgentRunOptions,
-        credential_env_vars: &[(String, String)],
+        credentials: &AgentCredentials,
         runtime: &dyn AgentRuntimeEngine,
     ) -> Result<ResolvedAgentOptions, EngineError> {
         if runtime.capabilities().kit_declarative {
             let mut options = self.build_sandbox_options(session, agent, run)?;
-            if !credential_env_vars.is_empty() {
+            if !credentials.env_vars.is_empty() {
                 options.push(SandboxOption::AgentCredentials {
-                    env_vars: credential_env_vars.to_vec(),
+                    env_vars: credentials.env_vars.clone(),
                 });
             }
             Ok(ResolvedAgentOptions::sandbox(options))
         } else {
-            let mut options = self.build_options(session, agent, run)?;
-            if !credential_env_vars.is_empty() {
+            let mut options =
+                self.build_options_with_credentials(session, agent, run, credentials)?;
+            if matches!(&credentials.delivery, CredentialDelivery::Env)
+                && !credentials.env_vars.is_empty()
+            {
                 options.push(ContainerOption::AgentCredentials {
-                    env_vars: credential_env_vars.to_vec(),
+                    env_vars: credentials.env_vars.clone(),
                 });
             }
             ResolvedAgentOptions::container(options)
@@ -2431,7 +2477,7 @@ mod tests {
             &session,
             &agent,
             &AgentRunOptions::default(),
-            &[],
+            &AgentCredentials::default(),
             &fake_sbx,
         );
         assert!(
@@ -2455,7 +2501,7 @@ mod tests {
             &session,
             &agent,
             &AgentRunOptions::default(),
-            &[],
+            &AgentCredentials::default(),
             &fake_container,
         );
         assert!(
@@ -2474,12 +2520,16 @@ mod tests {
         let agent = crate::data::session::AgentName::new("claude").unwrap();
         let fake_sbx = FakeRuntime::sandbox();
         let creds = vec![("ANTHROPIC_API_KEY".to_string(), "sk-secret".to_string())];
+        let credentials = AgentCredentials {
+            env_vars: creds,
+            ..Default::default()
+        };
         let result = engine
             .resolve_agent_options(
                 &session,
                 &agent,
                 &AgentRunOptions::default(),
-                &creds,
+                &credentials,
                 &fake_sbx,
             )
             .unwrap();
@@ -2503,6 +2553,10 @@ mod tests {
         let agent = crate::data::session::AgentName::new("claude").unwrap();
         let fake_sbx = FakeRuntime::sandbox();
         let creds = vec![("ANTHROPIC_API_KEY".to_string(), "sk-secret".to_string())];
+        let credentials = AgentCredentials {
+            env_vars: creds,
+            ..Default::default()
+        };
         let run = AgentRunOptions {
             // Put the same key in env_passthrough — it must still only end up in
             // agent_credentials, not in env_passthrough in the resolved bag.
@@ -2510,7 +2564,7 @@ mod tests {
             ..Default::default()
         };
         let result = engine
-            .resolve_agent_options(&session, &agent, &run, &creds, &fake_sbx)
+            .resolve_agent_options(&session, &agent, &run, &credentials, &fake_sbx)
             .unwrap();
         if let crate::engine::agent_runtime::ResolvedAgentOptions::Sandbox(resolved) = result {
             // Credentials from `creds` must not appear as EnvPassthrough env var
@@ -2546,10 +2600,22 @@ mod tests {
         };
 
         let sbx_result = engine
-            .resolve_agent_options(&session, &agent, &run, &[], &FakeRuntime::sandbox())
+            .resolve_agent_options(
+                &session,
+                &agent,
+                &run,
+                &AgentCredentials::default(),
+                &FakeRuntime::sandbox(),
+            )
             .unwrap();
         let ctr_result = engine
-            .resolve_agent_options(&session, &agent, &run, &[], &FakeRuntime::container())
+            .resolve_agent_options(
+                &session,
+                &agent,
+                &run,
+                &AgentCredentials::default(),
+                &FakeRuntime::container(),
+            )
             .unwrap();
 
         // Both must successfully build.
@@ -2611,7 +2677,13 @@ mod tests {
             ..Default::default()
         };
         let result = engine
-            .resolve_agent_options(&session, &agent, &run, &[], &FakeRuntime::sandbox())
+            .resolve_agent_options(
+                &session,
+                &agent,
+                &run,
+                &AgentCredentials::default(),
+                &FakeRuntime::sandbox(),
+            )
             .unwrap();
         if let crate::engine::agent_runtime::ResolvedAgentOptions::Sandbox(resolved) = result {
             assert_eq!(

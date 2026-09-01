@@ -276,7 +276,7 @@ impl Command for ExecPromptCommand {
             level: MessageLevel::Info,
             text: "Resolving agent credentials…".into(),
         });
-        let credentials = match self
+        let resolved_credentials = match self
             .engines
             .auth_engine
             .resolve_agent_auth(&session, &agent)
@@ -289,6 +289,17 @@ impl Command for ExecPromptCommand {
                 });
                 return Err(CommandError::from(e));
             }
+        };
+        // File delivery is container-only; preserve sbx's existing env-only
+        // Claude credential path without touching its auth implementation.
+        let credentials = if self.engines.runtime.capabilities().kit_declarative
+            && matches!(
+                resolved_credentials.delivery,
+                crate::engine::auth::CredentialDelivery::File(_)
+            ) {
+            self.engines.auth_engine.agent_env_credentials(&agent)?
+        } else {
+            resolved_credentials
         };
 
         let (context_overlays, system_prompt) = resolve_context_overlays(
@@ -334,7 +345,7 @@ impl Command for ExecPromptCommand {
             &session,
             &agent,
             &run_opts,
-            &credentials.env_vars,
+            &credentials,
             self.engines.runtime.as_ref(),
         ) {
             Ok(o) => o,

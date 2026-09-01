@@ -12,6 +12,7 @@ use crate::engine::container::backend::ContainerBackend;
 use crate::engine::container::docker::build_run_argv;
 use crate::engine::container::instance::{handle_now, ContainerId};
 use crate::engine::container::options::{ContainerName, ImageRef, ResolvedContainerOptions};
+use crate::engine::credential_refresh::{register_container_leases, CredentialLease};
 use crate::engine::error::EngineError;
 
 const AWMAN_LABEL: &str = "awman=true";
@@ -188,11 +189,16 @@ impl ContainerBackend for AppleBackend {
         let name = options.name.clone().unwrap_or_else(|| {
             ContainerName::new(crate::engine::container::naming::generate_container_name())
         });
+        // Register a refresh lease for every file-delivered credential BEFORE
+        // the container is built and its child spawned — the single choke point
+        // (INV-6). No-op for every launch that carries no such credential.
+        let leases = register_container_leases(&options, &name.0);
         Ok(Box::new(AppleContainerInstance {
             id: ContainerId::new(name.0.clone()),
             name,
             image,
             options,
+            leases,
         }))
     }
 
@@ -396,6 +402,11 @@ struct AppleContainerInstance {
     name: ContainerName,
     image: ImageRef,
     options: ResolvedContainerOptions,
+    /// Credential-refresh leases, one per file-delivered credential. Moved into
+    /// the `AppleExecution` by each spawn fn so the lease's lifetime brackets
+    /// the child process exactly (this instance box is dropped before the spawn
+    /// fn returns).
+    leases: Vec<CredentialLease>,
 }
 
 impl AgentInstance for AppleContainerInstance {
@@ -480,7 +491,7 @@ fn bridge_config_for(
 /// the PTY master to the frontend's `AgentIo` channels via the shared
 /// I/O bridge.
 fn spawn_pty_bridged_apple(
-    instance: Box<AppleContainerInstance>,
+    mut instance: Box<AppleContainerInstance>,
     io: crate::engine::agent_runtime::frontend::AgentIo,
     argv: Vec<String>,
     _seeded: Option<String>,
@@ -489,6 +500,11 @@ fn spawn_pty_bridged_apple(
     bridge_cfg: crate::engine::container::io_bridge::BridgeConfig,
 ) -> Result<AgentExecution, EngineError> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    // Move the credential leases out of the instance (dropped before this fn
+    // returns) and into the execution backend, so each lease brackets the child
+    // process it credentials.
+    let leases = std::mem::take(&mut instance.leases);
 
     let (cols, rows) = io.initial_size.expect("PTY path requires initial_size");
     let pty_system = native_pty_system();
@@ -512,6 +528,16 @@ fn spawn_pty_bridged_apple(
         cmd.env(k, v);
     }
 
+    // INV-6: a credentialed container must hold its lease before the child is
+    // spawned. This closes the startup race where a token could expire between
+    // staging and the container's first request.
+    debug_assert!(
+        instance.options.refreshable_credentials.is_empty()
+            || !leases.is_empty()
+            || crate::engine::credential_refresh::global().is_none(),
+        "file-delivered credential spawned without a lease"
+    );
+
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -532,6 +558,7 @@ fn spawn_pty_bridged_apple(
         stdin_injector: Some(bridge.stdin_injector),
         container_name: instance.name.0.clone(),
         started_at,
+        leases,
     };
     Ok(AgentExecution::new(
         handle,
@@ -543,7 +570,7 @@ fn spawn_pty_bridged_apple(
 
 /// Spawn `container run` with piped stdio and bridge through `AgentIo`.
 fn spawn_piped_apple(
-    instance: Box<AppleContainerInstance>,
+    mut instance: Box<AppleContainerInstance>,
     io: crate::engine::agent_runtime::frontend::AgentIo,
     argv: Vec<String>,
     seeded: Option<String>,
@@ -562,6 +589,15 @@ fn spawn_piped_apple(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+
+    // Move leases into the backend; assert one exists before spawn (INV-6).
+    let leases = std::mem::take(&mut instance.leases);
+    debug_assert!(
+        instance.options.refreshable_credentials.is_empty()
+            || !leases.is_empty()
+            || crate::engine::credential_refresh::global().is_none(),
+        "file-delivered credential spawned without a lease"
+    );
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -593,6 +629,7 @@ fn spawn_piped_apple(
         stdin_injector: None,
         container_name: instance.name.0.clone(),
         started_at,
+        leases,
     };
     Ok(AgentExecution::new(
         handle,
@@ -623,7 +660,7 @@ fn spawn_piped_apple(
 /// the stdio pipes `-i` already wires up. No ports, no `--network`, no new
 /// mounts (see `aspec/architecture/security.md`).
 fn spawn_piped_interactive_apple(
-    instance: Box<AppleContainerInstance>,
+    mut instance: Box<AppleContainerInstance>,
     io: crate::engine::agent_runtime::frontend::AgentIo,
     argv: Vec<String>,
     _seeded: Option<String>,
@@ -642,6 +679,15 @@ fn spawn_piped_interactive_apple(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+
+    // Move leases into the backend; assert one exists before spawn (INV-6).
+    let leases = std::mem::take(&mut instance.leases);
+    debug_assert!(
+        instance.options.refreshable_credentials.is_empty()
+            || !leases.is_empty()
+            || crate::engine::credential_refresh::global().is_none(),
+        "file-delivered credential spawned without a lease"
+    );
 
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -666,6 +712,7 @@ fn spawn_piped_interactive_apple(
         stdin_injector: Some(bridge.stdin_injector),
         container_name: instance.name.0.clone(),
         started_at,
+        leases,
     };
     Ok(AgentExecution::new(
         handle,
@@ -687,6 +734,13 @@ struct AppleExecution {
     stdin_injector: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
     container_name: String,
     started_at: chrono::DateTime<chrono::Utc>,
+    /// Credential-refresh leases held for the container's whole life. Dropped
+    /// (deregistering each lease) when this backend is consumed by
+    /// `wait_blocking` on child exit, or when the execution is dropped unwaited.
+    /// The monitor stops writing this container's staged file the moment these
+    /// drop. Not read directly — held purely for its `Drop`.
+    #[allow(dead_code)]
+    leases: Vec<CredentialLease>,
 }
 
 impl ExecutionBackend for AppleExecution {

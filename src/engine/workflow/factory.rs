@@ -43,4 +43,16 @@ pub trait AgentExecutionFactory: Send + Sync {
         execution: &AgentExecution,
         prompt: &str,
     ) -> Result<Option<()>, EngineError>;
+
+    /// Give the command layer a chance to recover a descriptor-recognised
+    /// authentication failure. The default deliberately does nothing so the
+    /// workflow engine remains agent-agnostic and existing factories retain
+    /// their current behaviour.
+    fn recover_auth_failure(
+        &self,
+        _agent: &AgentName,
+        _output_tail: &str,
+    ) -> Result<bool, EngineError> {
+        Ok(false)
+    }
 }

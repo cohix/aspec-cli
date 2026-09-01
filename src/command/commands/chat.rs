@@ -226,7 +226,7 @@ impl Command for ChatCommand {
             level: MessageLevel::Info,
             text: "Resolving agent credentials…".into(),
         });
-        let credentials = match self
+        let resolved_credentials = match self
             .engines
             .auth_engine
             .resolve_agent_auth(&session, &agent)
@@ -239,6 +239,17 @@ impl Command for ChatCommand {
                 });
                 return Err(CommandError::from(e));
             }
+        };
+        // File delivery is container-only. Keep sbx on its legacy env-only
+        // keychain path without changing dsbx itself.
+        let credentials = if self.engines.runtime.capabilities().kit_declarative
+            && matches!(
+                resolved_credentials.delivery,
+                crate::engine::auth::CredentialDelivery::File(_)
+            ) {
+            self.engines.auth_engine.agent_env_credentials(&agent)?
+        } else {
+            resolved_credentials
         };
 
         // 5. Resolve context overlays.
@@ -285,7 +296,7 @@ impl Command for ChatCommand {
             &session,
             &agent,
             &run_opts,
-            &credentials.env_vars,
+            &credentials,
             self.engines.runtime.as_ref(),
         ) {
             Ok(o) => o,

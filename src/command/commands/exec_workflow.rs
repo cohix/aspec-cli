@@ -26,7 +26,9 @@ use crate::data::workflow_prompt_template::{substitute_prompt, WorkItemContext};
 use crate::engine::agent::AgentRunOptions;
 use crate::engine::agent_runtime::execution::AgentExitInfo;
 use crate::engine::agent_runtime::frontend::AgentFrontend;
+use crate::engine::auth::keychain::refreshable_spec_for;
 use crate::engine::container::options::{AutoMode, PlanMode, YoloMode};
+use crate::engine::credential_refresh::{global as credential_refresh_monitor, RefreshOutcome};
 use crate::engine::error::EngineError;
 use crate::engine::workflow::actions::{
     AvailableActions, NextAction, ResumeMismatch, StepFailureChoice, StepOutput, WorkflowOutcome,
@@ -551,6 +553,46 @@ struct CommandLayerFactory {
     launch_modes: Arc<HashMap<String, crate::data::config::repo::LaunchMode>>,
 }
 
+/// A workflow launch must never wait indefinitely for a host credential
+/// refresh. The monitor applies this timeout internally; this helper also
+/// keeps the synchronous `AgentExecutionFactory` boundary free of runtime
+/// assumptions by driving the wait on a short-lived current-thread runtime.
+const CREDENTIAL_REFRESH_WAIT: Duration = Duration::from_secs(30);
+
+fn refresh_credential_blocking(
+    monitor: Arc<crate::engine::credential_refresh::CredentialRefreshMonitor>,
+    agent: crate::data::session::AgentName,
+) -> RefreshOutcome {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| ())?;
+                Ok::<_, ()>(runtime.block_on(monitor.refresh_now(&agent, CREDENTIAL_REFRESH_WAIT)))
+            })
+            .join()
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| RefreshOutcome::Stale {
+                remediation: "credential refresh worker stopped unexpectedly".to_string(),
+            })
+    })
+}
+
+fn refresh_warning(outcome: &RefreshOutcome) -> Option<String> {
+    match outcome {
+        RefreshOutcome::Stale { remediation } => {
+            Some(format!("credential refresh did not advance; {remediation}"))
+        }
+        RefreshOutcome::Unavailable { reason } => {
+            Some(format!("credential refresh unavailable: {reason}"))
+        }
+        RefreshOutcome::NotNeeded { .. } | RefreshOutcome::Refreshed { .. } => None,
+    }
+}
+
 impl AgentExecutionFactory for CommandLayerFactory {
     fn execution_for_step(
         &self,
@@ -653,18 +695,65 @@ impl AgentExecutionFactory for CommandLayerFactory {
         // Mirrors the same step in `chat` and `exec_prompt`. The centralized
         // builder folds them into the paradigm-appropriate option (container
         // env vars, or — under sbx — `sbx secret set` registration).
-        let credential_env_vars = self
+        let resolved_credentials = self
             .engines
             .auth_engine
             .resolve_agent_auth(session, &runtime.step_agent)
-            .map(|c| c.env_vars)
             .unwrap_or_default();
+        // A file-delivered credential is deliberately refreshed before the
+        // container options are built when it is on the edge of expiry. The
+        // refresh is bounded and advisory: a stale host credential must not
+        // make an otherwise runnable workflow step fail to launch.
+        if !self.engines.runtime.capabilities().kit_declarative
+            && matches!(
+                resolved_credentials.delivery,
+                crate::engine::auth::CredentialDelivery::File(_)
+            )
+        {
+            let settings = session.effective_config().auth_refresh();
+            let near_expiry = self
+                .engines
+                .auth_engine
+                .list_agent_credentials(&runtime.step_agent)
+                .ok()
+                .and_then(|status| status.expires_at)
+                .map(
+                    |expires_at| match expires_at.duration_since(std::time::SystemTime::now()) {
+                        Ok(remaining) => remaining < settings.threshold,
+                        Err(_) => true,
+                    },
+                )
+                .unwrap_or(false);
+            if near_expiry {
+                if let Some(monitor) = credential_refresh_monitor() {
+                    let outcome = refresh_credential_blocking(monitor, runtime.step_agent.clone());
+                    if let Some(warning) = refresh_warning(&outcome) {
+                        self.shared.lock().unwrap().write_message(UserMessage {
+                            level: MessageLevel::Warning,
+                            text: format!("workflow step '{}': {warning}", step.name),
+                        });
+                    }
+                }
+            }
+        }
+        let credentials = if self.engines.runtime.capabilities().kit_declarative
+            && matches!(
+                resolved_credentials.delivery,
+                crate::engine::auth::CredentialDelivery::File(_)
+            ) {
+            self.engines
+                .auth_engine
+                .agent_env_credentials(&runtime.step_agent)
+                .unwrap_or_default()
+        } else {
+            resolved_credentials
+        };
 
         let resolved = self.engines.agent_engine.resolve_agent_options(
             session,
             &runtime.step_agent,
             &run_opts,
-            &credential_env_vars,
+            &credentials,
             self.engines.runtime.as_ref(),
         )?;
         // For a squad-generated workflow, stamp the task's squad name +
@@ -701,6 +790,33 @@ impl AgentExecutionFactory for CommandLayerFactory {
             true => Ok(Some(())),
             false => Ok(None),
         }
+    }
+
+    fn recover_auth_failure(
+        &self,
+        agent: &crate::data::session::AgentName,
+        output_tail: &str,
+    ) -> Result<bool, EngineError> {
+        let Some(spec) = refreshable_spec_for(agent) else {
+            return Ok(false);
+        };
+        if !(spec.is_auth_failure)(output_tail) {
+            return Ok(false);
+        }
+        let Some(monitor) = credential_refresh_monitor() else {
+            return Ok(false);
+        };
+        let outcome = refresh_credential_blocking(monitor, agent.clone());
+        if let Some(warning) = refresh_warning(&outcome) {
+            self.shared.lock().unwrap().write_message(UserMessage {
+                level: MessageLevel::Warning,
+                text: format!("workflow authentication recovery: {warning}"),
+            });
+        }
+        // A matching descriptor signature authorises one relaunch even when
+        // the host cannot rotate. The monitor keeps the last-known-good file;
+        // the workflow engine owns the exactly-once guard.
+        Ok(true)
     }
 }
 
@@ -2534,17 +2650,28 @@ impl ExecWorkflowCommand {
             context_overlays,
             ..Default::default()
         };
-        let creds = self
+        let resolved_credentials = self
             .engines
             .auth_engine
             .resolve_agent_auth(session, agent)
-            .map(|c| c.env_vars)
             .unwrap_or_default();
+        let credentials = if self.engines.runtime.capabilities().kit_declarative
+            && matches!(
+                resolved_credentials.delivery,
+                crate::engine::auth::CredentialDelivery::File(_)
+            ) {
+            self.engines
+                .auth_engine
+                .agent_env_credentials(agent)
+                .unwrap_or_default()
+        } else {
+            resolved_credentials
+        };
         let resolved = self.engines.agent_engine.resolve_agent_options(
             session,
             agent,
             &run_opts,
-            &creds,
+            &credentials,
             self.engines.runtime.as_ref(),
         )?;
         // Stamp the squad identity on the dynamic leader too, when this is an
@@ -3068,6 +3195,7 @@ fn collect_single_entry_overlays(
         yolo: false,
         container_home,
         context_overlays: Vec::new(),
+        materialize_credentials: false,
     };
     let overlay_specs = engines
         .overlay_engine

@@ -120,6 +120,7 @@ New engine component, e.g. `CredentialRefreshMonitor`, owning a lease registry. 
 ## Codebase Integration:
 - follow established conventions, best practices, testing, and architecture patterns from the project's aspec.
 - Spec updates in the same change: `aspec/architecture/security.md` (§4 amendments), and note in this work item when the 0066 credential table row changes (Claude → file-delivered on container runtimes).
+- The work item 0066 credential table row for Claude changes from env-delivered (`CLAUDE_CODE_OAUTH_TOKEN`) to file-delivered on container-class runtimes; its host credential source remains as specified there.
 - Keep the descriptor surface minimal and concrete (one implementor); do not build speculative machinery beyond what Claude needs — "generic" here means the monitor/lease/delivery layers are agent-agnostic, not that we ship abstractions with no second user.
 
 ## Documentation

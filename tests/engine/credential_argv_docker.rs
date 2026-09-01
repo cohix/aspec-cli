@@ -17,6 +17,11 @@
 //! `pub(super)` `build_run_argv` (which the integration crate cannot reach).
 
 use std::process::{Command, Stdio};
+use std::time::{Duration, SystemTime};
+
+use awman::engine::auth::credential::{
+    claude_spec, CredentialExtra, CredentialSnapshot, SecretString,
+};
 
 use crate::helpers::docker_available;
 
@@ -174,5 +179,74 @@ fn docker_credential_value_absent_from_proc_cmdline_during_launch() {
         checked,
         "never managed to read {cmdline_path} while the client was alive; \
          the /proc assertion did not run"
+    );
+}
+
+/// Inverse of the env-delivery tests above: file-delivered credentials must
+/// appear only inside the staged 0600 file. The host path is expected in the
+/// `-v` mount argument; the secret is forbidden from argv, client output, and
+/// status/debug representations.
+#[test]
+fn docker_file_delivered_credential_secret_is_only_in_staged_file() {
+    if !docker_available() || !try_pull(IMAGE) {
+        eprintln!("skipping: docker/{IMAGE} unavailable");
+        return;
+    }
+    let secret = "fixture-file-delivery-secret-never-in-argv";
+    let snapshot = CredentialSnapshot {
+        secret: SecretString::new(secret),
+        expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+        extra: CredentialExtra::default(),
+    };
+    let file = (claude_spec().materialize)(&snapshot);
+    let staged = tempfile::tempdir().unwrap();
+    let staged_path = staged.path().join(&file.relative_path);
+    std::fs::write(&staged_path, &file.contents).unwrap();
+    let mount = format!("{}:/root/.claude:ro", staged.path().display());
+    let args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-v".to_string(),
+        mount.clone(),
+        IMAGE.to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        "test -f /root/.claude/.credentials.json && sha256sum /root/.claude/.credentials.json"
+            .to_string(),
+    ];
+    let rendered_argv = args.join("\u{0}");
+    assert!(rendered_argv.contains(staged.path().to_str().unwrap()));
+    assert!(
+        !rendered_argv.contains(secret),
+        "secret leaked into docker argv"
+    );
+    assert_eq!(
+        args.iter().position(|a| a == &mount),
+        args.iter().position(|a| a == "-v").map(|i| i + 1),
+        "the staged path is permitted only as a -v mount argument"
+    );
+
+    let output = Command::new("docker")
+        .args(&args)
+        .output()
+        .expect("run docker");
+    assert!(
+        output.status.success(),
+        "docker run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !logs.contains(secret),
+        "secret leaked to docker output/logs"
+    );
+    let status_output = format!("{:?}", file);
+    assert!(
+        !status_output.contains(secret),
+        "secret leaked to credential status/debug output"
     );
 }

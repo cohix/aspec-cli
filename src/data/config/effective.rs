@@ -24,6 +24,15 @@ pub struct EffectiveConfig {
     global: GlobalConfig,
 }
 
+/// Resolved live credential-refresh settings. Repository fields override the
+/// corresponding global fields; absent values use the built-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthRefreshSettings {
+    pub enabled: bool,
+    pub threshold: Duration,
+    pub tick: Duration,
+}
+
 impl Default for EffectiveConfig {
     fn default() -> Self {
         Self::new(
@@ -257,6 +266,31 @@ impl EffectiveConfig {
     pub fn auth_mode(&self) -> AgentAuthMode {
         self.repo.auth.unwrap_or_default()
     }
+
+    /// Effective live credential-refresh configuration (repo > global >
+    /// built-in). `enabled: false` is the escape hatch that restores legacy
+    /// env-variable credential delivery.
+    pub fn auth_refresh(&self) -> AuthRefreshSettings {
+        let repo = self.repo.auth_refresh.as_ref();
+        let global = self.global.auth_refresh.as_ref();
+        AuthRefreshSettings {
+            enabled: repo
+                .and_then(|c| c.enabled)
+                .or_else(|| global.and_then(|c| c.enabled))
+                .unwrap_or(true),
+            threshold: Duration::from_secs(
+                repo.and_then(|c| c.threshold_minutes)
+                    .or_else(|| global.and_then(|c| c.threshold_minutes))
+                    .unwrap_or(20)
+                    .saturating_mul(60),
+            ),
+            tick: Duration::from_secs(
+                repo.and_then(|c| c.tick_seconds)
+                    .or_else(|| global.and_then(|c| c.tick_seconds))
+                    .unwrap_or(60),
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -265,7 +299,7 @@ mod tests {
     use crate::data::config::env::{
         EnvSnapshot, AWMAN_API_KEY, AWMAN_REMOTE_ADDR, AWMAN_REMOTE_SESSION,
     };
-    use crate::data::config::repo::{AgentAuthMode, ApiConfig, RemoteConfig};
+    use crate::data::config::repo::{AgentAuthMode, ApiConfig, AuthRefreshConfig, RemoteConfig};
     use std::time::Duration;
 
     fn make_effective(
@@ -1094,5 +1128,112 @@ mod tests {
             global,
         );
         assert_eq!(ec.launch_mode_fallback(), LaunchModeFallback::Stdio);
+    }
+
+    // ── auth_refresh (WI-0107 §6) ────────────────────────────────────────────
+
+    #[test]
+    fn auth_refresh_defaults_when_unset_anywhere() {
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            GlobalConfig::default(),
+        );
+        assert_eq!(
+            ec.auth_refresh(),
+            AuthRefreshSettings {
+                enabled: true,
+                threshold: Duration::from_secs(20 * 60),
+                tick: Duration::from_secs(60),
+            }
+        );
+    }
+
+    #[test]
+    fn auth_refresh_repo_overrides_global_per_field() {
+        let repo = RepoConfig {
+            auth_refresh: Some(AuthRefreshConfig {
+                enabled: None,
+                threshold_minutes: Some(5),
+                tick_seconds: None,
+            }),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            auth_refresh: Some(AuthRefreshConfig {
+                enabled: Some(false),
+                threshold_minutes: Some(30),
+                tick_seconds: Some(15),
+            }),
+            ..Default::default()
+        };
+        let ec = make_effective(FlagConfig::default(), EnvSnapshot::empty(), repo, global);
+        let settings = ec.auth_refresh();
+        // repo sets threshold_minutes explicitly, so it wins over global's.
+        assert_eq!(
+            settings.threshold,
+            Duration::from_secs(5 * 60),
+            "repo threshold_minutes must override global"
+        );
+        // repo leaves `enabled` and `tick_seconds` unset, so each falls
+        // through to global independently (per-field precedence, not
+        // per-object).
+        assert!(
+            !settings.enabled,
+            "repo left `enabled` unset; must inherit global's false"
+        );
+        assert_eq!(
+            settings.tick,
+            Duration::from_secs(15),
+            "repo left tick_seconds unset; must inherit global's value"
+        );
+    }
+
+    #[test]
+    fn auth_refresh_repo_kill_switch_overrides_global_enabled_true() {
+        let repo = RepoConfig {
+            auth_refresh: Some(AuthRefreshConfig {
+                enabled: Some(false),
+                threshold_minutes: None,
+                tick_seconds: None,
+            }),
+            ..Default::default()
+        };
+        let global = GlobalConfig {
+            auth_refresh: Some(AuthRefreshConfig {
+                enabled: Some(true),
+                threshold_minutes: None,
+                tick_seconds: None,
+            }),
+            ..Default::default()
+        };
+        let ec = make_effective(FlagConfig::default(), EnvSnapshot::empty(), repo, global);
+        assert!(
+            !ec.auth_refresh().enabled,
+            "repo-level kill switch (enabled: false) must win over an enabled global default"
+        );
+    }
+
+    #[test]
+    fn auth_refresh_global_only_is_used_when_repo_unset() {
+        let global = GlobalConfig {
+            auth_refresh: Some(AuthRefreshConfig {
+                enabled: Some(true),
+                threshold_minutes: Some(45),
+                tick_seconds: Some(90),
+            }),
+            ..Default::default()
+        };
+        let ec = make_effective(
+            FlagConfig::default(),
+            EnvSnapshot::empty(),
+            RepoConfig::default(),
+            global,
+        );
+        let settings = ec.auth_refresh();
+        assert!(settings.enabled);
+        assert_eq!(settings.threshold, Duration::from_secs(45 * 60));
+        assert_eq!(settings.tick, Duration::from_secs(90));
     }
 }

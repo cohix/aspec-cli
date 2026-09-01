@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Path to the compiled `awman` binary. Cargo sets this for integration tests.
 fn awman_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"))
+    crate::awman_bin()
 }
 
 fn run_awman(args: &[&str]) -> std::process::Output {

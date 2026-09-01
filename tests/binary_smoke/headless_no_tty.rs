@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn awman_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"))
+    crate::awman_bin()
 }
 
 /// Open `/dev/null` on Unix; on Windows fall back to `NUL`. Used to detach

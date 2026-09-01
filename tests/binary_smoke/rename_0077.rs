@@ -10,7 +10,7 @@
 use std::process::{Command, Stdio};
 
 fn awman_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"))
+    crate::awman_bin()
 }
 
 fn make_git_repo() -> tempfile::TempDir {

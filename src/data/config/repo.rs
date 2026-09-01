@@ -11,6 +11,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::data::error::DataError;
 
+/// Optional live credential-refresh settings. This intentionally remains a
+/// sibling of the scalar `auth` setting so existing configuration files keep
+/// their wire shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthRefreshConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threshold_minutes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tick_seconds: Option<u64>,
+}
+
+pub(crate) fn validate_auth_refresh(config: &AuthRefreshConfig) -> Result<(), DataError> {
+    if config.threshold_minutes == Some(0) {
+        return Err(DataError::Other(
+            "authRefresh.thresholdMinutes must be >= 1".to_string(),
+        ));
+    }
+    if config.tick_seconds == Some(0) {
+        return Err(DataError::Other(
+            "authRefresh.tickSeconds must be >= 1".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Subdirectory under the git root in which awman stores per-repo state.
 pub const REPO_CONFIG_SUBDIR: &str = ".awman";
 
@@ -323,6 +351,8 @@ pub struct RepoConfig {
     /// Resolved per-repo; `keychain` (default) injects host keychain creds.
     #[serde(rename = "auth", skip_serializing_if = "Option::is_none")]
     pub auth: Option<AgentAuthMode>,
+    #[serde(rename = "authRefresh", skip_serializing_if = "Option::is_none")]
+    pub auth_refresh: Option<AuthRefreshConfig>,
     #[serde(rename = "launchMode", skip_serializing_if = "Option::is_none")]
     pub launch_mode: Option<LaunchMode>,
 }
@@ -357,6 +387,9 @@ impl RepoConfig {
                     "maxConcurrentAgents must be >= 1".to_string(),
                 ));
             }
+        }
+        if let Some(auth_refresh) = &cfg.auth_refresh {
+            validate_auth_refresh(auth_refresh)?;
         }
         Ok(cfg)
     }

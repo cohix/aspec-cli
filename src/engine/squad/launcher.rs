@@ -23,6 +23,7 @@ use crate::engine::agent::{AgentEngine, AgentRunOptions};
 use crate::engine::agent_runtime::execution::{AgentExitInfo, AgentInstance};
 use crate::engine::agent_runtime::frontend::AgentFrontend;
 use crate::engine::agent_runtime::{AgentRuntimeEngine, ResolvedAgentOptions};
+use crate::engine::auth::AgentCredentials;
 use crate::engine::container::naming::{generate_squad_container_name, validate_task_slug};
 use crate::engine::container::options::ContainerName;
 use crate::engine::error::EngineError;
@@ -130,9 +131,9 @@ pub struct LeaderRunSpec {
     /// Fully-resolved run options (prompt, model, non-interactive, yolo,
     /// task-directory context overlay, image tag override).
     pub run_options: AgentRunOptions,
-    /// Credential env vars injected into the container at startup only — never
-    /// written into the persistent task directory.
-    pub credential_env_vars: Vec<(String, String)>,
+    /// Resolved credential delivery. File delivery is staged by `AgentEngine`;
+    /// env values are never written into the persistent task directory.
+    pub credentials: AgentCredentials,
     /// The task name; used both for the container name slug and for the
     /// `awman.squad.task` label.
     pub task_name: String,
@@ -227,7 +228,7 @@ impl SquadAgentLauncher {
             &spec.session,
             &spec.agent,
             &spec.run_options,
-            &spec.credential_env_vars,
+            &spec.credentials,
             self.runtime.as_ref(),
         )?;
 

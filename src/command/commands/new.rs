@@ -375,7 +375,7 @@ impl Command for NewCommand {
                     let mut options = match self
                         .engines
                         .agent_engine
-                        .build_options(session, &agent, &run_opts)
+                        .build_options_with_credentials(session, &agent, &run_opts, &credentials)
                     {
                         Ok(o) => o,
                         Err(e) => {
@@ -386,7 +386,12 @@ impl Command for NewCommand {
                             return Err(CommandError::from(e));
                         }
                     };
-                    if !credentials.env_vars.is_empty() {
+                    if !credentials.env_vars.is_empty()
+                        && matches!(
+                            credentials.delivery,
+                            crate::engine::auth::CredentialDelivery::Env
+                        )
+                    {
                         options.push(ContainerOption::AgentCredentials {
                             env_vars: credentials.env_vars,
                         });
@@ -676,8 +681,12 @@ impl Command for NewCommand {
                         let mut options = match self
                             .engines
                             .agent_engine
-                            .build_options(session, &agent, &run_opts)
-                        {
+                            .build_options_with_credentials(
+                                session,
+                                &agent,
+                                &run_opts,
+                                &credentials,
+                            ) {
                             Ok(o) => o,
                             Err(e) => {
                                 frontend.write_message(UserMessage {
@@ -687,7 +696,12 @@ impl Command for NewCommand {
                                 return Err(CommandError::from(e));
                             }
                         };
-                        if !credentials.env_vars.is_empty() {
+                        if !credentials.env_vars.is_empty()
+                            && matches!(
+                                credentials.delivery,
+                                crate::engine::auth::CredentialDelivery::Env
+                            )
+                        {
                             options.push(ContainerOption::AgentCredentials {
                                 env_vars: credentials.env_vars,
                             });

@@ -3,7 +3,7 @@
 use std::process::Command;
 
 fn awman_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_awman"))
+    crate::awman_bin()
 }
 
 /// Conflicting pull modes must be rejected by clap before main can resolve a
