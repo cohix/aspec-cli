@@ -75,7 +75,29 @@ impl FakeAwmanProcess {
                 Err(e) => panic!("spawn fake awman-named process: {e}"),
             }
         };
-        Self { _dir: dir, child }
+
+        // `spawn` returns once the child *exists*, not once it has finished
+        // `execve`. Until that exec lands, the child's command name is still
+        // the one it inherited from the spawning thread — under `cargo test`
+        // that is a test-function name like `api_running_blo`, which
+        // `pid_is_awman` correctly rejects. A guard checked inside that window
+        // reads the pidfile, decides it names a foreign process, and clears it
+        // as stale, so the daemon that should have been refused starts.
+        //
+        // Wait for the identity the daemon is being stood up to present. It is
+        // the only thing that makes this fixture a stand-in for a real daemon,
+        // so no test may observe it before it holds.
+        let mut child = child;
+        let pid = child.id();
+        for _ in 0..500 {
+            if awman::data::fs::daemon_process::pid_is_awman(pid) {
+                return Self { _dir: dir, child };
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("fake awman-named process (PID {pid}) never presented an awman command name");
     }
 
     fn pid(&self) -> u32 {

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::sync::Mutex;
 
 use awman::data::config::env::{EnvSnapshot, AWMAN_API_ROOT, AWMAN_SQUAD_ROOT};
@@ -16,7 +16,7 @@ use awman::data::fs::{DaemonGuard, DaemonKind, DaemonPaths, SquadPaths};
 /// A few daemon-spawn tests temporarily replace `PATH` to inject a platform
 /// launcher.  Keep that process-global state serialized across the whole test
 /// module so one injection cannot change another test's meaning.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 static PATH_LOCK: Mutex<()> = Mutex::new(());
 
 fn paths_env(api_root: &Path, squad_root: &Path) -> EnvSnapshot {
@@ -152,9 +152,12 @@ fn spawn_detached_identity_is_distinct_for_api_and_squad() {
     // scoped `HOME` plus a stub `launchctl` on `PATH` exercises it for real.
     #[cfg(target_os = "macos")]
     {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _lock = ENV_LOCK.lock().unwrap();
+        // The module-wide lock, not a private one: this block installs a
+        // `launchctl` stub that reports *success*, and the spawn-failure test
+        // installs one that reports failure. Two locks over one process-global
+        // `PATH` serialize nothing, and whichever stub happened to be
+        // installed would decide the other test's result.
+        let _lock = PATH_LOCK.lock().unwrap();
         let home = tempfile::tempdir().unwrap();
         let bin_dir = home.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -208,19 +211,25 @@ fn squad_spawn_failure_is_wrapped_with_an_attributable_daemon_message() {
     let tmp = tempfile::tempdir().unwrap();
     let process = daemon(tmp.path(), DaemonKind::Squad);
 
-    // Force the portable `double_fork_spawn` path.  A real systemd-run can
-    // accept a unit before its executable fails, which is correct production
-    // behavior but not a synchronous failure injection.  This tiny stub makes
-    // its availability probe fail so the missing binary is observed here.
-    #[cfg(target_os = "linux")]
+    // Force the portable `double_fork_spawn` path.  Both platform launchers
+    // *accept* a job before its executable fails — a real systemd-run accepts
+    // the unit, and `launchctl load` accepts a plist naming a binary that does
+    // not exist — which is correct production behavior but not a synchronous
+    // failure injection.  Stubbing the launcher so it reports itself
+    // unavailable is what makes the missing binary observable here.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let _path_guard = {
         let _lock = PATH_LOCK.lock().unwrap();
         let bin_dir = tmp.path().join("bin");
         std::fs::create_dir(&bin_dir).unwrap();
-        let systemd = bin_dir.join("systemd-run");
-        std::fs::write(&systemd, "#!/bin/sh\nexit 1\n").unwrap();
+        let launcher = bin_dir.join(if cfg!(target_os = "macos") {
+            "launchctl"
+        } else {
+            "systemd-run"
+        });
+        std::fs::write(&launcher, "#!/bin/sh\nexit 1\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&systemd, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755)).unwrap();
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", &bin_dir);
         PathGuard { _lock, old_path }
@@ -240,13 +249,13 @@ fn squad_spawn_failure_is_wrapped_with_an_attributable_daemon_message() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct PathGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     old_path: Option<std::ffi::OsString>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl Drop for PathGuard {
     fn drop(&mut self) {
         match self.old_path.take() {
@@ -299,19 +308,38 @@ fn awman_named_test_process() -> Child {
     let tmp = tempfile::tempdir().unwrap();
     let helper = tmp.path().join("awman");
     std::fs::copy(source, &helper).unwrap();
-    let mut child = Command::new(&helper)
-        .args([
-            "--exact",
-            "daemon_guard_helper_process_stays_alive",
-            "--nocapture",
-        ])
-        .env("AWMAN_GUARD_HELPER", "1")
-        .spawn()
-        .unwrap();
-    for _ in 0..100 {
-        if awman::data::fs::daemon_process::is_process_alive(child.id()) {
-            // Once exec has completed, the child no longer needs the copied
-            // file. Dropping the TempDir avoids leaking a test binary.
+    // A concurrent test function forking anywhere in this process can inherit
+    // the still-open write descriptor on `helper`, which makes `execve` report
+    // the file as busy (`ETXTBSY`) until that fork execs and drops it. The
+    // window is short, so retry rather than force `--test-threads=1`.
+    let mut attempt = 0;
+    let mut child = loop {
+        let spawned = Command::new(&helper)
+            .args([
+                "--exact",
+                "daemon_guard_helper_process_stays_alive",
+                "--nocapture",
+            ])
+            .env("AWMAN_GUARD_HELPER", "1")
+            .spawn();
+        match spawned {
+            Ok(child) => break child,
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("spawn awman-named helper process: {e}"),
+        }
+    };
+    // Wait on the *identity*, not merely on liveness. `spawn` returns once the
+    // child exists, and a forked-but-not-yet-exec'd child is already alive
+    // while still reporting the command name it inherited from this thread —
+    // so `is_process_alive` can pass a whole tick before the child looks like
+    // an awman process to the guard under test.
+    for _ in 0..500 {
+        if awman::data::fs::daemon_process::pid_is_awman(child.id()) {
+            // Exec has landed, so the child no longer needs the copied file.
+            // Dropping the TempDir avoids leaking a test binary.
             drop(tmp);
             return child;
         }
@@ -319,7 +347,7 @@ fn awman_named_test_process() -> Child {
     }
     let _ = child.kill();
     let _ = child.wait();
-    panic!("awman-named helper process did not stay alive");
+    panic!("awman-named helper process never presented an awman command name");
 }
 
 #[cfg(unix)]

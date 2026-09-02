@@ -15,7 +15,7 @@ use awman::data::session::AgentName;
 use awman::data::session::{Session, SessionOpenOptions, StaticGitRootResolver};
 use awman::data::workflow_definition::Workflow;
 use awman::engine::agent_runtime::frontend::{AgentFrontend, AgentIo, AgentProgress, AgentStatus};
-use awman::engine::auth::credential::{claude_spec, CredentialFingerprint};
+use awman::engine::auth::credential::{claude_spec, CredentialBinding, CredentialFingerprint};
 use awman::engine::auth::RefreshableCredentialDelivery;
 use awman::engine::container::options::ResolvedContainerOptions;
 use awman::engine::container::{
@@ -45,10 +45,21 @@ fn host_file(home: &Path) -> PathBuf {
     home.join(".claude/.credentials.json")
 }
 
+/// Bind the fixture's planted credential FILE explicitly.
+///
+/// `claude_spec().source` returns the Keychain on macOS and ignores the home
+/// directory, so deriving the source from a temp HOME would read whatever the
+/// developer is logged into rather than the fixture — and find nothing on a CI
+/// runner. An explicit file binding makes every test below mean the same thing
+/// on every platform.
+fn binding(home: &Path) -> CredentialBinding {
+    CredentialBinding::to_file(AuthPathResolver::at_home(home), host_file(home))
+}
+
 fn materialized_delivery(home: &Path, staged_root: &Path) -> RefreshableCredentialDelivery {
     let spec = claude_spec();
-    let source = (spec.source)(&AuthPathResolver::at_home(home));
-    let snapshot = (spec.read)(&source).expect("fixture credential must parse");
+    let snapshot =
+        (spec.read)(&binding(home).source_for(spec)).expect("fixture credential must parse");
     let file = (spec.materialize)(&snapshot);
     std::fs::create_dir_all(staged_root).unwrap();
     std::fs::write(staged_root.join(&file.relative_path), &file.contents).unwrap();
@@ -62,23 +73,34 @@ fn materialized_delivery(home: &Path, staged_root: &Path) -> RefreshableCredenti
     }
 }
 
+/// The monitor under test, bound to the fixture child's HOME as an explicit
+/// file source. `CredentialRefreshMonitor::new` would derive the source from
+/// the platform instead, which on macOS means the real Keychain no matter what
+/// HOME says — see [`binding`].
 fn monitor() -> std::sync::Arc<CredentialRefreshMonitor> {
-    CredentialRefreshMonitor::new(MonitorConfig {
-        refresh_threshold: Duration::from_secs(20 * 60),
-        // The direct `refresh_now` calls below are deterministic.  A long tick
-        // avoids a background tick racing a deliberately asserted write count.
-        tick_interval: Duration::from_secs(60),
-    })
+    let home = PathBuf::from(std::env::var_os("HOME").expect("fixture child sets HOME"));
+    CredentialRefreshMonitor::with_binding(
+        MonitorConfig {
+            refresh_threshold: Duration::from_secs(20 * 60),
+            // The direct `refresh_now` calls below are deterministic. A long
+            // tick keeps later background ticks out of the way — but note the
+            // FIRST tick lands immediately on `register`, so a test that needs
+            // to own the rotation must still arrange for that tick to be a
+            // no-op (see the docker e2e test).
+            tick_interval: Duration::from_secs(60),
+        },
+        binding(&home),
+    )
 }
 
 fn child_env() -> bool {
     std::env::var_os("AWMAN_0107_MONITOR_CHILD").is_some()
 }
 
-/// Run this exact test in a fresh process. `CredentialRefreshMonitor::new`
-/// binds its resolver from HOME, and `refresh_host_credential` resolves
-/// `claude` from PATH; a child process makes both substitutions hermetic even
-/// when the parent test binary runs tests in parallel.
+/// Run this exact test in a fresh process. The fixture credential is keyed off
+/// HOME, and `refresh_host_credential` resolves `claude` from PATH; a child
+/// process makes both substitutions hermetic even when the parent test binary
+/// runs tests in parallel.
 fn run_fixture_child(test_name: &str, refresh_mode: &str) {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
@@ -578,11 +600,19 @@ fn docker_e2e_live_container_observes_rotated_fingerprint_and_exited_stage_is_un
     }
     let home = PathBuf::from(std::env::var_os("HOME").unwrap());
     std::fs::create_dir_all(home.join(".claude")).unwrap();
+    // Start FAR from expiry. `register` starts the monitor thread, and
+    // `run_monitor_loop` ticks before it sleeps, so the first tick lands
+    // immediately no matter how long `tick_interval` is. Planting a
+    // near-expiry credential here would let that first tick perform the whole
+    // rotation before the container below is even running: the explicit
+    // `refresh_now` would then find every staged file already current and
+    // report `NotNeeded`, and the container would only ever observe one
+    // fingerprint. Arm the rotation further down, once the container is live.
     std::fs::write(
         host_file(&home),
         payload(
-            "fixture-e2e-expiring",
-            SystemTime::now() + Duration::from_secs(10),
+            "fixture-e2e-initial",
+            SystemTime::now() + Duration::from_secs(7200),
         ),
     )
     .unwrap();
@@ -594,6 +624,22 @@ fn docker_e2e_live_container_observes_rotated_fingerprint_and_exited_stage_is_un
     let monitor = monitor();
     let live_lease = monitor.register(&live_delivery, "awman-e2e-live");
     let exited_lease = monitor.register(&exited_delivery, "awman-e2e-exited");
+    // Barrier on that first tick rather than assuming it is quick: it must be
+    // done reconciling the far-expiry credential before the rotation is armed,
+    // or it could be the one that rotates. A recorded outcome is the signal
+    // that `refresh_agent` ran to completion.
+    let first_tick = std::time::Instant::now();
+    while !monitor
+        .status()
+        .iter()
+        .any(|s| s.agent.as_str() == "claude" && s.last_outcome.is_some())
+    {
+        assert!(
+            first_tick.elapsed() < Duration::from_secs(30),
+            "the monitor's first tick never recorded an outcome"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let exited_mount = format!("{}:/root/.claude:ro", exited.path().display());
     assert!(Command::new("docker")
         .args(["run", "--rm", "-v", &exited_mount, "busybox:latest", "true"])
@@ -634,6 +680,19 @@ fn docker_e2e_live_container_observes_rotated_fingerprint_and_exited_stage_is_un
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(250));
+    // The container has now read the pre-rotation staged file at least once.
+    // Arm the rotation: a near-expiry host credential is what drives
+    // `refresh_agent` to run the fixture `claude` binary, which copies the
+    // refreshed token over the host file. The next tick is 60s away, so this
+    // `refresh_now` is unambiguously the call that performs it.
+    std::fs::write(
+        host_file(&home),
+        payload(
+            "fixture-e2e-expiring",
+            SystemTime::now() + Duration::from_secs(10),
+        ),
+    )
+    .unwrap();
     let outcome = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(monitor.refresh_now(&AgentName::new("claude").unwrap(), Duration::from_secs(2)));

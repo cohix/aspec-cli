@@ -277,7 +277,10 @@ async fn interview_collects_every_field_and_reaches_create_with_one_task() {
     assert_eq!(req.interval_secs, 600, "10m must parse to 600s in Layer 2");
     assert_eq!(
         req.workspace,
-        awman::data::fs::TaskWorkspace::Custom(tmp.path().to_path_buf()),
+        // The answer goes in raw and comes back canonicalized: Layer 2 resolves
+        // the path before storing it, so on macOS the `/var` -> `/private/var`
+        // symlink is already collapsed by the time it reaches the gateway.
+        awman::data::fs::TaskWorkspace::Custom(tmp.path().canonicalize().unwrap()),
         "the interview's custom-folder answer reaches Layer 2 as the workspace choice"
     );
     assert_eq!(req.agent.as_deref(), Some("claude"));

@@ -30,7 +30,7 @@ jobs:
             artifact: awman-windows-amd64.exe
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +57,7 @@ jobs:
         run: cp target/${{ matrix.target }}/release/awman.exe ${{ matrix.artifact }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
@@ -69,10 +69,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -99,7 +99,7 @@ jobs:
 
       - name: Create release with notes
         if: steps.notes.outputs.exists == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.version }}
           body_path: ${{ steps.notes.outputs.file }}
@@ -107,7 +107,7 @@ jobs:
 
       - name: Create release without notes
         if: steps.notes.outputs.exists != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.version }}
           generate_release_notes: true
