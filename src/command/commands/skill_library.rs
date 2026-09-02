@@ -398,24 +398,55 @@ mod tests {
     /// HTTPS URL a fresh `PullTarget::Slug` builds to a local `file://` remote,
     /// so a fresh clone never touches the network. Injected additively via
     /// `GIT_CONFIG_COUNT` so the developer's global git config is untouched.
+    /// Puts the `GIT_CONFIG_*` trio back the way it was found, on the normal
+    /// path and while unwinding alike.
+    struct RestoreGitConfigEnv {
+        prev: [(&'static str, Option<String>); 3],
+    }
+
+    impl Drop for RestoreGitConfigEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.prev {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
     fn with_github_insteadof<F, R>(github_url: &str, local_url: &str, f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        let _g = GIT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let keys = ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"];
-        let prev: Vec<Option<String>> = keys.iter().map(|k| std::env::var(k).ok()).collect();
-        std::env::set_var("GIT_CONFIG_COUNT", "1");
+        let _lock = GIT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `GIT_CONFIG_COUNT` is restored first for the same reason it is set
+        // last: with it absent, git ignores the indexed keys entirely.
+        let prev = [
+            ("GIT_CONFIG_COUNT", std::env::var("GIT_CONFIG_COUNT").ok()),
+            ("GIT_CONFIG_KEY_0", std::env::var("GIT_CONFIG_KEY_0").ok()),
+            (
+                "GIT_CONFIG_VALUE_0",
+                std::env::var("GIT_CONFIG_VALUE_0").ok(),
+            ),
+        ];
+
+        // These are process-global, and the lock only serializes the tests
+        // that inject them — every *other* test's `git` child still inherits
+        // whatever is set at the moment it is spawned. Publish the indexed
+        // pair before the count that makes git read it: while the count is
+        // unset the pair is inert, so no concurrent git can observe a count
+        // promising a key that has not been written yet, which git rejects
+        // outright with "missing config key GIT_CONFIG_KEY_0".
         std::env::set_var("GIT_CONFIG_KEY_0", format!("url.{local_url}.insteadOf"));
         std::env::set_var("GIT_CONFIG_VALUE_0", github_url);
-        let out = f();
-        for (k, v) in keys.iter().zip(prev) {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
-        }
-        out
+        std::env::set_var("GIT_CONFIG_COUNT", "1");
+
+        // Declared after `_lock`, so it restores the environment before the
+        // lock is released — and unwinds it even if `f` panics, which a plain
+        // sequence of `set_var` calls at the end of the function would not.
+        let _restore = RestoreGitConfigEnv { prev };
+        f()
     }
 
     // ─── resolve_pull_target ──────────────────────────────────────────────────

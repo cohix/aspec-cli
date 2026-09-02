@@ -50,7 +50,6 @@ impl EnvGuard {
             .collect();
 
         std::env::set_var("AWMAN_CONFIG_HOME", home);
-        std::env::set_var("GIT_CONFIG_COUNT", remotes.len().to_string());
         for (index, (github_url, local_repo)) in remotes.iter().enumerate() {
             std::env::set_var(
                 format!("GIT_CONFIG_KEY_{index}"),
@@ -58,6 +57,13 @@ impl EnvGuard {
             );
             std::env::set_var(format!("GIT_CONFIG_VALUE_{index}"), github_url);
         }
+        // Last, and dropped first: these vars are process-global, so a `git`
+        // spawned by any concurrently-running test inherits them mid-write.
+        // While `GIT_CONFIG_COUNT` is unset the indexed keys are inert, so
+        // publishing it only once they are all written means no such git ever
+        // sees a count promising a key that is missing — which git rejects
+        // outright rather than ignoring.
+        std::env::set_var("GIT_CONFIG_COUNT", remotes.len().to_string());
         Self { saved }
     }
 }
