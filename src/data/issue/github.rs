@@ -68,28 +68,50 @@ impl IssueSource for GithubIssueSource {
         git_root: &Path,
         sink: &mut dyn UserMessageSink,
     ) -> Result<Issue, IssueSourceError> {
-        let input = input.trim();
-        let (owner, repo, number) = parse_input(input, git_root, self.provider_name())?;
-
-        sink.write_message(UserMessage {
-            level: MessageLevel::Info,
-            text: format!(
-                "running: gh issue view {number} --repo {owner}/{repo} --json number,title,body,url"
-            ),
-        });
-
-        if let Some(issue) = try_gh_cli(&owner, &repo, number, self.provider_name()) {
-            return Ok(issue);
-        }
-
-        let api_url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}");
-        sink.write_message(UserMessage {
-            level: MessageLevel::Info,
-            text: format!("gh CLI unavailable, falling back to REST API: GET {api_url}"),
-        });
-
-        fetch_rest_api(&owner, &repo, number, self.provider_name())
+        fetch_issue_with_progress_using(
+            "gh",
+            "https://api.github.com",
+            input,
+            git_root,
+            self.provider_name(),
+            sink,
+        )
     }
+}
+
+/// Inner implementation for `fetch_issue_with_progress`, parameterised so
+/// tests can supply a deterministic CLI and REST endpoint without changing the
+/// process-global `PATH` or reaching the network.
+fn fetch_issue_with_progress_using(
+    gh_command: &str,
+    api_base_url: &str,
+    input: &str,
+    git_root: &Path,
+    provider: &str,
+    sink: &mut dyn UserMessageSink,
+) -> Result<Issue, IssueSourceError> {
+    let input = input.trim();
+    let (owner, repo, number) = parse_input(input, git_root, provider)?;
+
+    sink.write_message(UserMessage {
+        level: MessageLevel::Info,
+        text: format!(
+            "running: gh issue view {number} --repo {owner}/{repo} --json number,title,body,url"
+        ),
+    });
+
+    if let Some(issue) = try_gh_cli_with_cmd(gh_command, &owner, &repo, number, provider) {
+        return Ok(issue);
+    }
+
+    let api_base_url = api_base_url.trim_end_matches('/');
+    let api_url = format!("{api_base_url}/repos/{owner}/{repo}/issues/{number}");
+    sink.write_message(UserMessage {
+        level: MessageLevel::Info,
+        text: format!("gh CLI unavailable, falling back to REST API: GET {api_url}"),
+    });
+
+    fetch_rest_api_with_base(api_base_url, &owner, &repo, number, provider)
 }
 
 /// Parse user input into (owner, repo, number).
@@ -250,20 +272,37 @@ pub(crate) fn try_gh_cli_with_cmd(
     number: u32,
     provider: &str,
 ) -> Option<Issue> {
-    let output = Command::new(gh_cmd)
-        .args([
-            "issue",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &format!("{owner}/{repo}"),
-            "--json",
-            "number,title,body,url",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .ok()?;
+    let number = number.to_string();
+    let owner_repo = format!("{owner}/{repo}");
+    let mut retries = 0;
+    let output = loop {
+        let result = Command::new(gh_cmd)
+            .args([
+                "issue",
+                "view",
+                &number,
+                "--repo",
+                &owner_repo,
+                "--json",
+                "number,title,body,url",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output();
+        match result {
+            Ok(output) => break output,
+            // Parallel tests can fork while another test is still writing its
+            // fake gh executable. The fork inherits that write descriptor,
+            // creating a short ETXTBSY window even after the writer closes it.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && retries < 20 =>
+            {
+                retries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    };
 
     if !output.status.success() {
         return None;
@@ -1009,10 +1048,7 @@ exit 0
             .output()
             .unwrap();
 
-        // Prepend a fake gh to PATH that succeeds
-        let bin_dir = tmp.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-        let script = bin_dir.join("gh");
+        let script = tmp.path().join("gh");
         std::fs::write(
             &script,
             r#"#!/bin/sh
@@ -1025,13 +1061,15 @@ exit 0
         perms.set_mode(0o755);
         std::fs::set_permissions(&script, perms).unwrap();
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{orig_path}", bin_dir.display()));
-
         let mut sink = RecordingMessageSink::new();
-        let result = GithubIssueSource.fetch_issue_with_progress("42", tmp.path(), &mut sink);
-
-        std::env::set_var("PATH", &orig_path);
+        let result = fetch_issue_with_progress_using(
+            script.to_str().unwrap(),
+            "invalid-api-base",
+            "42",
+            tmp.path(),
+            "GitHub",
+            &mut sink,
+        );
 
         assert!(result.is_ok());
         let messages = sink.all();
@@ -1055,13 +1093,17 @@ exit 0
         let tmp = tempfile::tempdir().unwrap();
 
         // Use a full URL input so parse_input doesn't need a git remote.
-        // gh CLI will fail (the repo doesn't exist), triggering the REST
-        // fallback message. We don't need to manipulate PATH — a non-existent
-        // repo will cause gh to exit non-zero (or gh isn't installed at all).
+        // Both integrations are deliberately invalid so the test exercises
+        // the fallback messages without consulting the host's gh CLI or the
+        // network.
         let mut sink = RecordingMessageSink::new();
-        let _ = GithubIssueSource.fetch_issue_with_progress(
+        let missing_gh = tmp.path().join("missing-gh");
+        let _ = fetch_issue_with_progress_using(
+            missing_gh.to_str().unwrap(),
+            "invalid-api-base",
             "https://github.com/nonexistent-test-org-xyz/nonexistent-repo-xyz/issues/99999",
             tmp.path(),
+            "GitHub",
             &mut sink,
         );
 
